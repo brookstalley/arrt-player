@@ -5,7 +5,7 @@ something a default install does not provide.** Pango arrives through PyGObject,
 in the optional `raster` group: a device with a television and no panel installs
 neither it nor the driver. The layout tier above was split out so the judgement
 about legibility could be written and tested without any of that, leaving only
-this file needing the real text stack. Nothing else in `display` imports it — the
+this file needing the real text stack. Nothing else in `arrt` imports it — the
 composition root names it, and a device that has no panel never touches it.
 
 **Why Pango rather than a simpler drawing library.** This product's corpus comes
@@ -43,9 +43,9 @@ gi.require_version("PangoCairo", "1.0")
 import cairo  # noqa: E402 -- gi.require_version must run before the repository import below
 from gi.repository import Pango, PangoCairo  # noqa: E402 -- and ruff cannot see that ordering constraint
 
-from display.panel.layout import Extent, Layout, Measure  # noqa: E402 -- same ordering constraint
-from display.panel.raster import Raster, Rasterizer  # noqa: E402 -- same ordering constraint
-from display.panel.styling import Line, Run, Slant, Weight, byte_spans, set_text  # noqa: E402 -- same ordering constraint
+from arrt.panel.layout import Extent, Layout, Measure  # noqa: E402 -- same ordering constraint
+from arrt.panel.raster import Raster, Rasterizer  # noqa: E402 -- same ordering constraint
+from arrt.panel.styling import Line, Run, Slant, Weight, byte_spans, set_text  # noqa: E402 -- same ordering constraint
 
 #: The font family, as fontconfig resolves it. **A generic alias rather than a
 #: named face, and that is the accessibility decision**: `Sans` lets fontconfig

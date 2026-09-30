@@ -1,4 +1,4 @@
-"""Start the display plane: `uv run python -m display`.
+"""Start the display plane: `uv run python -m arrt`.
 
 The composition root, and the only module that knows a real television exists —
 everything above the seam is written against `TvClient`, so this is where the
@@ -16,14 +16,14 @@ import logging
 import signal
 import sys
 
-from display import logs
-from display.config import ConfigError, Settings, load
-from display.daemon import Clock, Daemon
-from display.manifest import Watcher
-from display.panel import Geometry, LabelSurface, SurfaceUnavailable
-from display.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
-from display.state import DisplayState, StateSchemaTooNew
-from display.tv.samsung import SamsungTv
+from arrt import logs
+from arrt.config import ConfigError, Settings, load
+from arrt.daemon import Clock, Daemon
+from arrt.manifest import Watcher
+from arrt.panel import Geometry, LabelSurface, SurfaceUnavailable
+from arrt.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
+from arrt.state import DisplayState, StateSchemaTooNew
+from arrt.tv.samsung import SamsungTv
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +90,8 @@ def label_surface(settings: Settings) -> LabelSurface | None:
     )
 
     try:
-        from display.panel.epaper import EpaperSurface, open_panel  # noqa: PLC0415 -- see the docstring
-        from display.panel.pango import PangoRasterizer  # noqa: PLC0415 -- see the docstring
+        from arrt.panel.epaper import EpaperSurface, open_panel  # noqa: PLC0415 -- see the docstring
+        from arrt.panel.pango import PangoRasterizer  # noqa: PLC0415 -- see the docstring
     except ImportError as exc:
         # The text stack being absent lands in the same place as the panel being
         # absent, and it is a provisioning mistake somebody can fix while the wall
