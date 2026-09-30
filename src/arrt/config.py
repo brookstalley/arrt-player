@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 # the startup line. It imports nothing from here, so there is no cycle, and
 # naming the file a second time in this module is exactly the duplication the
 # per-wall channel already has one copy of too many of.
-from display.heartbeat import path_in as heartbeat_path_in
+from arrt.heartbeat import path_in as heartbeat_path_in
 
 #: The manifest's filename under `ART_ROOT`, **one file per wall**. The name is
 #: **not configurable, deliberately**: this is the only channel between the

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from display.config import ConfigError, load
+from arrt.config import ConfigError, load
 
 
 def an_environment(art_root: Path, **overrides: str) -> dict[str, str]:

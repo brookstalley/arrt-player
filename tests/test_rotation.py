@@ -11,9 +11,9 @@ import random
 
 from fakes import FakeTv
 
-from display.daemon import Daemon
-from display.manifest import Watcher
-from display.state import DisplayState
+from arrt.daemon import Daemon
+from arrt.manifest import Watcher
+from arrt.state import DisplayState
 
 
 async def test_it_shows_the_first_work_immediately(daemon: Daemon, tv: FakeTv, publish):

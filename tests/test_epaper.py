@@ -17,11 +17,11 @@ import logging
 
 import pytest
 
-from display.panel.epaper import GREYSCALE_MODE, EpaperSurface, open_panel
-from display.panel.layout import Block, Geometry, Layout
-from display.panel.legibility import TypeScale
-from display.panel.raster import Raster, Rasterizer
-from display.panel.styling import Run
+from arrt.panel.epaper import GREYSCALE_MODE, EpaperSurface, open_panel
+from arrt.panel.layout import Block, Geometry, Layout
+from arrt.panel.legibility import TypeScale
+from arrt.panel.raster import Raster, Rasterizer
+from arrt.panel.styling import Run
 
 GEOMETRY = Geometry(width_px=8, height_px=4, margin_px=1)
 
@@ -117,7 +117,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
         guarded against and not a hypothetical: the driver comes up in `bw`, and
         `max_colors` says 16 either way.
         """
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         class StaysInOneBit(FakeEpd):
             """Takes the assignment and goes on running in one bit."""
@@ -145,7 +145,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
             def mode(self, value: str) -> None:
                 raise OSError("the SPI bus is not there")
 
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable):
             a_surface(epd=Unsettable())
@@ -164,7 +164,7 @@ class TestAFailureIsRaisedBecauseTheDriverWillNotReportOne:
         """The caller catches one type. Anything the Cython driver throws must
         arrive as that type or the daemon's `_caption` lets it past and the panel
         takes the wall down with it."""
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         epd = FakeEpd()
         epd.raises = OSError("the controller stopped answering")
@@ -205,7 +205,7 @@ class TestTheFrameIsTurnedToMatchTheMounting:
     def test_a_quarter_turn_is_refused_rather_than_half_supported(self):
         """It exchanges width and height, so the layout above would have been
         arranged for the wrong shape — a label laid out landscape, drawn portrait."""
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable) as raised:
             a_surface(rotate_degrees=90)
@@ -280,7 +280,7 @@ class TestOpeningAPanelThatIsNotThere:
         composition root catches `SurfaceUnavailable`, so either one escaping past
         it would stop a daemon whose television is working perfectly.
         """
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable) as raised:
             open_panel("no_such_vendor.no_such_panel")
@@ -298,7 +298,7 @@ class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
     """
 
     def test_a_rasterizer_that_raises_is_a_surface_that_is_unavailable(self):
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         class Broken(FlatRasterizer):
             def render(self, layout):
@@ -319,7 +319,7 @@ class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
             def render(self, layout):
                 raise RuntimeError("the text stack could not build a font map")
 
-        from display.panel.surface import SurfaceUnavailable
+        from arrt.panel.surface import SurfaceUnavailable
 
         epd = FakeEpd()
 

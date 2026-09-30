@@ -20,10 +20,10 @@ import asyncio
 
 import pytest
 
-from display import __main__ as entry
-from display.config import ConfigError
-from display.panel import SurfaceUnavailable
-from display.state import StateSchemaTooNew
+from arrt import __main__ as entry
+from arrt.config import ConfigError
+from arrt.panel import SurfaceUnavailable
+from arrt.state import StateSchemaTooNew
 
 
 @pytest.fixture(autouse=True)
@@ -212,7 +212,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         literal here would be this test re-stating the ratio instead of checking
         that the ratio is what got used.
         """
-        from display.panel.legibility import margin_for, type_scale_for
+        from arrt.panel.legibility import margin_for, type_scale_for
 
         scale = type_scale_for(
             width_px=settings.epd_panel_width_px,
@@ -232,7 +232,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         picture ends."""
         import dataclasses
 
-        from display.panel.legibility import margin_for, type_scale_for
+        from arrt.panel.legibility import margin_for, type_scale_for
 
         scale = type_scale_for(width_px=1448, height_px=1072, diagonal_inches=6.0, viewing_distance_inches=84.0)
         stated = dataclasses.replace(settings, epd_margin_px=17)
@@ -255,7 +255,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         import dataclasses
         import logging
 
-        from display import daemon as daemon_module
+        from arrt import daemon as daemon_module
 
         built: dict[str, object] = {}
 
@@ -295,8 +295,8 @@ async def test_a_crash_still_closes_the_art_channel_on_the_way_out(settings, tv,
     times out. So a daemon that skipped its close on the unexpected exit would
     come back up unable to reach the television it just crashed away from.
     """
-    from display.daemon import Daemon
-    from display.manifest import Watcher
+    from arrt.daemon import Daemon
+    from arrt.manifest import Watcher
 
     watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)
     daemon = Daemon(settings=settings, tv=tv, state=state, watcher=watcher, clock=clock.as_clock())
@@ -321,8 +321,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
     """
     import logging
 
-    from display.daemon import Daemon
-    from display.manifest import Watcher
+    from arrt.daemon import Daemon
+    from arrt.manifest import Watcher
 
     watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)
     daemon = Daemon(settings=settings, tv=tv, state=state, watcher=watcher, clock=clock.as_clock())

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from conftest import WALL_ID, write_manifest
 
-from display.manifest import (
+from arrt.manifest import (
     SUPPORTED_SCHEMA_MAJOR,
     ManifestUnreadable,
     ManifestVersionUnsupported,

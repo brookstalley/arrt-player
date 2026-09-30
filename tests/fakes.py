@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from display.panel import (
+from arrt.panel import (
     Extent,
     Geometry,
     LabelSurface,
@@ -32,7 +32,7 @@ from display.panel import (
     set_text,
     type_scale_for,
 )
-from display.tv import (
+from arrt.tv import (
     RemovalOutcome,
     SelectionAnnouncement,
     SelectionObserver,

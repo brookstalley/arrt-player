@@ -58,7 +58,7 @@ from samsungtvws.async_art import SamsungTVAsyncArt
 from samsungtvws.exceptions import ConnectionFailure, HttpApiError, ResponseError
 from websockets.exceptions import WebSocketException
 
-from display.tv.client import (
+from arrt.tv.client import (
     UPLOADED_CATEGORY,
     RemovalOutcome,
     SelectionAnnouncement,
