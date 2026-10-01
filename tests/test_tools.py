@@ -8,7 +8,7 @@ green, the linters stayed green, and the only thing that would have discovered i
 is the operator running the tool at the panel with the service stopped, which is
 the most expensive place this product has to find a defect.
 
-`tests/test_config.py` walks `arrt/tools/*.py`, but only with a regex looking
+`tests/test_config.py` walks `postarr/tools/*.py`, but only with a regex looking
 for deployment values — it never imports them. A file nothing imports is a file
 the type checker, the test suite and the linter all agree is fine.
 
@@ -27,9 +27,9 @@ from pathlib import Path
 
 import pytest
 
-from arrt.panel.layout import Extent
-from arrt.panel.raster import Raster
-from arrt.panel.styling import Line, set_text
+from postarr.panel.layout import Extent
+from postarr.panel.raster import Raster
+from postarr.panel.styling import Line, set_text
 
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 
@@ -72,14 +72,14 @@ def label_preview(monkeypatch):
     # it. Re-setting each to its own current value registers it with monkeypatch,
     # which restores it at teardown — the leak is contained here rather than by
     # making the tool defend against a caller it does not have.
-    from arrt.panel import layout, legibility
+    from postarr.panel import layout, legibility
 
     monkeypatch.setattr(legibility, "COMFORTABLE_CAP_ARCMIN", legibility.COMFORTABLE_CAP_ARCMIN)
     monkeypatch.setattr(layout, "MEASURE_EM", layout.MEASURE_EM)
 
-    stub_module = types.ModuleType("arrt.panel.pango")
+    stub_module = types.ModuleType("postarr.panel.pango")
     stub_module.PangoRasterizer = StubRasterizer
-    monkeypatch.setitem(sys.modules, "arrt.panel.pango", stub_module)
+    monkeypatch.setitem(sys.modules, "postarr.panel.pango", stub_module)
     monkeypatch.syspath_prepend(str(TOOLS))
     monkeypatch.delitem(sys.modules, "label_preview", raising=False)
 
@@ -94,7 +94,7 @@ def deployment(monkeypatch, tmp_path):
     """A complete, hermetic environment for the tool's `.env` road.
 
     **Every test touching that road needs this, and the reason is a defect these
-    tests shipped with.** `arrt.config.load` calls `load_dotenv()`, which reads
+    tests shipped with.** `postarr.config.load` calls `load_dotenv()`, which reads
     the repo-root `.env` — gitignored, so absent in CI and present with different
     contents on the Pi and on a developer's machine. Tests that merely set or
     deleted the two `EPD_*` variables therefore passed on exactly one machine:
@@ -107,7 +107,7 @@ def deployment(monkeypatch, tmp_path):
     itself. Nothing here reads the ambient filesystem, and every fact a test
     depends on is stated where the test can see it.
     """
-    from arrt import config
+    from postarr import config
 
     monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
     for name, value in (
@@ -323,7 +323,7 @@ class TestTheLabelPreviewStillRuns:
         operator finding that out at a stopped service on a Pi is the most
         expensive place this product has to find anything.
         """
-        from arrt.panel.corpus import CORPUS
+        from postarr.panel.corpus import CORPUS
 
         for name, _ in CORPUS:
             assert run(label_preview, str(tmp_path / f"{name}.png"), "--record", name) == 0, name
@@ -348,7 +348,7 @@ class TestTheLabelPreviewStillRuns:
         """
         from test_epaper import FakeEpd
 
-        from arrt.panel import epaper
+        from postarr.panel import epaper
 
         panel = FakeEpd(width=1448, height=1072)
         monkeypatch.setattr(epaper, "open_panel", lambda device: panel)

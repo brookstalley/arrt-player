@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from arrt.heartbeat import (
+from postarr.heartbeat import (
     HEARTBEAT_FILENAME_TEMPLATE,
     INTERVAL_SECONDS,
     REPORTED_AT_KEY,

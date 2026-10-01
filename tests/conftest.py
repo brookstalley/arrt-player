@@ -15,10 +15,10 @@ import pytest
 from fakes import FakeTv
 from hypothesis import settings as hypothesis_settings
 
-from arrt.config import Settings
-from arrt.daemon import Clock, Daemon
-from arrt.manifest import Watcher
-from arrt.state import DisplayState
+from postarr.config import Settings
+from postarr.daemon import Clock, Daemon
+from postarr.manifest import Watcher
+from postarr.state import DisplayState
 
 #: **The property suite is derandomized, and that is a decision rather than a
 #: default.** Hypothesis normally draws fresh examples per run, so a property
@@ -43,11 +43,11 @@ from arrt.state import DisplayState
 #: warning, which is the exact failure the check exists for: one fixture instance
 #: silently shared across all 200 examples.
 hypothesis_settings.register_profile(
-    "arrt",
+    "postarr",
     derandomize=True,
     max_examples=200,
 )
-hypothesis_settings.load_profile("arrt")
+hypothesis_settings.load_profile("postarr")
 
 
 class FakeClock:

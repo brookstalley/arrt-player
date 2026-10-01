@@ -42,10 +42,10 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
-from arrt.config import CACHED_MANIFEST_FILENAME, Settings
-from arrt.episodes import ReportOnce
-from arrt.heartbeat import path_in as heartbeat_path_in
-from arrt.manifest import ManifestUnreadable, parse
+from postarr.config import CACHED_MANIFEST_FILENAME, Settings
+from postarr.episodes import ReportOnce
+from postarr.heartbeat import path_in as heartbeat_path_in
+from postarr.manifest import ManifestUnreadable, parse
 
 log = logging.getLogger(__name__)
 

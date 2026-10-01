@@ -44,9 +44,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Final
 
-from arrt.panel.content import Candidate, Tier
-from arrt.panel.legibility import TypeScale
-from arrt.panel.styling import Line, Run, plain
+from postarr.panel.content import Candidate, Tier
+from postarr.panel.legibility import TypeScale
+from postarr.panel.styling import Line, Run, plain
 
 #: Space between one block and the next, as a fraction of the block's own size.
 #: Proportional rather than absolute, so the whole label rescales coherently with

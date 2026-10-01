@@ -10,8 +10,8 @@ import logging
 
 from fakes import FakeTv
 
-from arrt.daemon import Daemon
-from arrt.state import DisplayState
+from postarr.daemon import Daemon
+from postarr.state import DisplayState
 
 
 async def test_killing_curation_changes_nothing(daemon: Daemon, tv: FakeTv, publish, clock, art_root, caplog):

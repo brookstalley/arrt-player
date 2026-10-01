@@ -14,7 +14,7 @@ from dataclasses import replace
 
 import pytest
 
-from arrt.panel import (
+from postarr.panel import (
     Candidate,
     Case,
     Geometry,
@@ -28,7 +28,7 @@ from arrt.panel import (
     set_text,
     type_scale_for,
 )
-from arrt.panel.layout import (
+from postarr.panel.layout import (
     CONTINUATION_LEADING,
     FAMILY_EMPHASIS,
     FILL_CAP,

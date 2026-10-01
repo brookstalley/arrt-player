@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from arrt.brightness import solar_declination, sun_state, television_brightness
+from postarr.brightness import solar_declination, sun_state, television_brightness
 
 BOZEMAN = {"latitude": 45.68, "longitude": -111.04, "location_name": "Bozeman", "location_region": "USA"}
 

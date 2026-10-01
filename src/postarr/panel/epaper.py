@@ -34,10 +34,10 @@ from typing import Final, Protocol, runtime_checkable
 
 from PIL import Image
 
-from arrt.panel.layout import Geometry, Layout, Measure
-from arrt.panel.legibility import TypeScale
-from arrt.panel.raster import Raster, Rasterizer
-from arrt.panel.surface import LabelSurface, SurfaceUnavailable
+from postarr.panel.layout import Geometry, Layout, Measure
+from postarr.panel.legibility import TypeScale
+from postarr.panel.raster import Raster, Rasterizer
+from postarr.panel.surface import LabelSurface, SurfaceUnavailable
 
 log = logging.getLogger(__name__)
 

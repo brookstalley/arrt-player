@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from arrt.config import ConfigError, load
+from postarr.config import ConfigError, load
 
 
 def an_environment(art_root: Path, **overrides: str) -> dict[str, str]:
@@ -264,7 +264,7 @@ class TestHttpMode:
         "MANIFEST_SOURCE": "http",
         "SERVER_URL": "http://127.0.0.1:8770/",
         "WALL_TOKEN": "the-walls-token",
-        "CACHE_DIR": "/var/cache/arrt",
+        "CACHE_DIR": "/var/cache/postarr",
     }
 
     def test_file_mode_is_the_default(self, art_root: Path):
@@ -281,9 +281,9 @@ class TestHttpMode:
         assert settings.pulls_over_http
         assert settings.server_url == "http://127.0.0.1:8770", "a trailing slash doubled every route's first one"
         assert settings.wall_token == "the-walls-token"
-        assert settings.cache_dir == Path("/var/cache/arrt")
-        assert settings.manifest_path == Path("/var/cache/arrt/manifest.json")
-        assert settings.render_root == settings.heartbeat_root == Path("/var/cache/arrt")
+        assert settings.cache_dir == Path("/var/cache/postarr")
+        assert settings.manifest_path == Path("/var/cache/postarr/manifest.json")
+        assert settings.render_root == settings.heartbeat_root == Path("/var/cache/postarr")
         assert settings.state_path.parent == art_root, "the Player's own store moved with the mode"
 
     @pytest.mark.parametrize("missing", ["SERVER_URL", "WALL_TOKEN", "CACHE_DIR"])
@@ -306,4 +306,4 @@ class TestHttpMode:
         assert "the-walls-token" not in repr(line)
         assert line["manifest_source"] == "http"
         assert line["server_url"] == "http://127.0.0.1:8770"
-        assert line["heartbeat_path"].startswith("/var/cache/arrt/")
+        assert line["heartbeat_path"].startswith("/var/cache/postarr/")
