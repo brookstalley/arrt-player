@@ -12,8 +12,8 @@ that is `tests/raster/test_pango.py`, against real type.
 
 import pytest
 
-from arrt.panel import Case, LabelText, Run, Slant, Tier, Weight, plain, read_label
-from arrt.panel.layout import _compose
+from postarr.panel import Case, LabelText, Run, Slant, Tier, Weight, plain, read_label
+from postarr.panel.layout import _compose
 
 
 def said(label: LabelText) -> list[str]:

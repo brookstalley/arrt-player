@@ -18,8 +18,8 @@ import json
 import pytest
 from samsungtvws.exceptions import ResponseError
 
-from arrt.tv import TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
-from arrt.tv.samsung import SamsungTv
+from postarr.tv import TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
+from postarr.tv.samsung import SamsungTv
 
 
 class StubArt:

@@ -25,7 +25,7 @@ rather than merely documented.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from arrt.panel.layout import Layout, Measure
+from postarr.panel.layout import Layout, Measure
 
 
 @dataclass(frozen=True, slots=True)

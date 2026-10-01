@@ -1,6 +1,6 @@
-"""Arrt's side of the Player contract: what it reads, and what it writes.
+"""Postarr's side of the Player contract: what it reads, and what it writes.
 
-The manifest fixtures under `contract/` are the documents Curatarr may publish.
+The manifest fixtures under `contract/` are the documents Arrt may publish.
 Every one the contract calls valid must be one this reader adopts. Every invalid
 one that the contract's index marks `player_must_refuse` must be one it refuses.
 Those are the rules the reader enforces rather than trusts. The other invalid
@@ -28,8 +28,8 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from arrt import manifest
-from arrt.heartbeat import Health
+from postarr import manifest
+from postarr.heartbeat import Health
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 INDEX = json.loads((CONTRACT / "fixtures" / "index.json").read_text(encoding="utf-8"))["fixtures"]

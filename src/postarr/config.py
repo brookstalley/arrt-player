@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 # the startup line. It imports nothing from here, so there is no cycle, and
 # naming the file a second time in this module is exactly the duplication the
 # per-wall channel already has one copy of too many of.
-from arrt.heartbeat import path_in as heartbeat_path_in
+from postarr.heartbeat import path_in as heartbeat_path_in
 
 #: The manifest's filename under `ART_ROOT`, **one file per wall**. The name is
 #: **not configurable, deliberately**: this is the only channel between the
@@ -234,11 +234,11 @@ class Settings:
     rotation_shuffle_fallback: bool
 
     #: Where the manifest comes from: `file`, the shared `ART_ROOT` (the default
-    #: through wave 2), or `http`, pulled from Curatarr into `cache_dir`. The file
+    #: through wave 2), or `http`, pulled from Arrt into `cache_dir`. The file
     #: channel stays the default until wave 3 retires it, once HTTP has soaked on
     #: the real wall.
     manifest_source: str = "file"
-    #: Curatarr's base URL, in HTTP mode. Unset in file mode.
+    #: Arrt's base URL, in HTTP mode. Unset in file mode.
     server_url: str | None = None
     #: This wall's Player token, in HTTP mode. Kept out of `repr` and out of the
     #: startup line, because both reach the journal.

@@ -12,7 +12,7 @@ import logging
 
 import pytest
 
-from arrt import logs
+from postarr import logs
 
 
 @pytest.fixture(autouse=True)
@@ -79,7 +79,7 @@ class TestTheLineShape:
     def test_one_line_is_one_json_object_carrying_what_the_call_site_attached(self, capsys):
         logs.configure()
 
-        logging.getLogger("arrt.test").info("showing %s", "a work", extra={"event": "rotation.selected", "n": 3})
+        logging.getLogger("postarr.test").info("showing %s", "a work", extra={"event": "rotation.selected", "n": 3})
 
         line = json.loads(capsys.readouterr().err.strip())
         assert line["message"] == "showing a work"
@@ -91,8 +91,8 @@ class TestTheLineShape:
         logs.configure()
 
         with logs.work_context("w-42"):
-            logging.getLogger("arrt.test").info("inside")
-        logging.getLogger("arrt.test").info("outside")
+            logging.getLogger("postarr.test").info("inside")
+        logging.getLogger("postarr.test").info("outside")
 
         inside, outside = (json.loads(line) for line in capsys.readouterr().err.strip().splitlines())
         assert inside["work_id"] == "w-42"
@@ -104,7 +104,7 @@ class TestTheLineShape:
         with logs.work_context("outer"):
             with logs.work_context("inner"):
                 pass
-            logging.getLogger("arrt.test").info("after")
+            logging.getLogger("postarr.test").info("after")
 
         assert json.loads(capsys.readouterr().err.strip())["work_id"] == "outer"
 
@@ -113,7 +113,7 @@ class TestTheLineShape:
         outcome available to a logger."""
         logs.configure()
 
-        logging.getLogger("arrt.test").info("odd", extra={"thing": object()})
+        logging.getLogger("postarr.test").info("odd", extra={"thing": object()})
 
         assert "thing" in json.loads(capsys.readouterr().err.strip())
 
@@ -121,7 +121,7 @@ class TestTheLineShape:
         logs.configure()
         logs.configure()
 
-        logging.getLogger("arrt.test").info("once")
+        logging.getLogger("postarr.test").info("once")
 
         assert len(capsys.readouterr().err.strip().splitlines()) == 1
 

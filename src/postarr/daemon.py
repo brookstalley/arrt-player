@@ -48,15 +48,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
-from arrt import brightness as brightness_module
-from arrt import heartbeat as heartbeat_module
-from arrt.config import Settings
-from arrt.episodes import Backoff, ReportOnce
-from arrt.logs import work_context
-from arrt.manifest import Entry, Manifest, Watcher
-from arrt.panel import LabelSurface, Layout, lay_out, read_label
-from arrt.state import Binding, DisplayState, UploadStatus
-from arrt.tv import RemovalOutcome, SelectionAnnouncement, TvClient, TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
+from postarr import brightness as brightness_module
+from postarr import heartbeat as heartbeat_module
+from postarr.config import Settings
+from postarr.episodes import Backoff, ReportOnce
+from postarr.logs import work_context
+from postarr.manifest import Entry, Manifest, Watcher
+from postarr.panel import LabelSurface, Layout, lay_out, read_label
+from postarr.state import Binding, DisplayState, UploadStatus
+from postarr.tv import RemovalOutcome, SelectionAnnouncement, TvClient, TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
 
 log = logging.getLogger(__name__)
 

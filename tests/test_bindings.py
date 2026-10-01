@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 from fakes import FakeTv
 
-from arrt.daemon import Daemon
-from arrt.state import DisplayState, UploadStatus
+from postarr.daemon import Daemon
+from postarr.state import DisplayState, UploadStatus
 
 
 class TestTheStoreRefusesTheOldDefect:
@@ -341,8 +341,8 @@ async def test_a_store_from_a_newer_plane_is_refused_rather_than_opened(tmp_path
     stand between a restart and re-uploading the whole theme. Refusing at open is
     also the only moment it can be refused: after that the writes have happened.
     """
-    from arrt.state import StateSchemaTooNew
-    from arrt.state.store import SCHEMA_VERSION
+    from postarr.state import StateSchemaTooNew
+    from postarr.state.store import SCHEMA_VERSION
 
     path = tmp_path / "display-state.sqlite"
     with DisplayState(path) as store:
