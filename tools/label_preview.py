@@ -41,12 +41,12 @@ reference record the artifacts' measurements were taken against.
 It needs the text stack (`uv sync --group raster`); `--panel` additionally needs
 the panel driver (`--group epaper`) and a device to draw on:
 
-    cd display && uv run --group raster python tools/label_preview.py label.png
-    cd display && uv run --group raster python tools/label_preview.py label.png --cap-arcmin 11
-    cd display && uv run --group raster python tools/label_preview.py short.png --record okeeffe
+    cd postarr && uv run --group raster python tools/label_preview.py label.png
+    cd postarr && uv run --group raster python tools/label_preview.py label.png --cap-arcmin 11
+    cd postarr && uv run --group raster python tools/label_preview.py short.png --record okeeffe
 
     # away from the deployment, or trying a different wall on for size:
-    cd display && uv run --group raster python tools/label_preview.py label.png \\
+    cd postarr && uv run --group raster python tools/label_preview.py label.png \\
         --diagonal-inches 10.3 --viewing-distance-inches 120
 
 **`--panel` takes the SPI device, which `display.service` holds while it runs.**
@@ -54,7 +54,7 @@ Stop the unit for the pass and start it again afterwards, or the two contend for
 the same bus:
 
     sudo systemctl stop display.service
-    cd <checkout>/display && sudo -u <service-user> env HOME=<service-home> \\
+    cd <checkout>/postarr && sudo -u <service-user> env HOME=<service-home> \\
         uv run --group raster --group epaper \\
         python tools/label_preview.py --panel --cap-arcmin 11 --record hokusai
     sudo systemctl start display.service
@@ -73,10 +73,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from display.panel import Case, Layout, Run, Slant, TypeScale, Weight, lay_out, margin_for, read_label, set_text, type_scale_for
-from display.panel.corpus import CORPUS
-from display.panel.layout import Geometry
-from display.panel.pango import PangoRasterizer
+from postarr.panel import Case, Layout, Run, Slant, TypeScale, Weight, lay_out, margin_for, read_label, set_text, type_scale_for
+from postarr.panel.corpus import CORPUS
+from postarr.panel.layout import Geometry
+from postarr.panel.pango import PangoRasterizer
 
 #: The records this tool can draw, by the name `--record` takes.
 #:
@@ -223,7 +223,7 @@ def _viewing_conditions(args: argparse.Namespace, parser: argparse.ArgumentParse
     # Imported here rather than at module scope: reading a deployment's settings
     # is not something this tool should do merely by being imported, and the
     # suite drives `main` without an `.env` in front of it.
-    from display.config import load
+    from postarr.config import load
 
     try:
         settings = load()
@@ -270,8 +270,8 @@ def _apply_overrides(args: argparse.Namespace) -> None:
     and the geometry. Sweeping sizes directly would be sweeping past the
     derivation the whole label now rests on.
     """
-    from display.panel import layout as layout_module
-    from display.panel import legibility as legibility_module
+    from postarr.panel import layout as layout_module
+    from postarr.panel import legibility as legibility_module
 
     if args.cap_arcmin:
         legibility_module.COMFORTABLE_CAP_ARCMIN = args.cap_arcmin
@@ -291,7 +291,7 @@ def _draw_on_the_panel(args: argparse.Namespace, record: dict[str, str], surface
     and nowhere else, and this tool's PNG half must keep working on a machine
     that has no panel.
     """
-    from display.panel.epaper import EpaperSurface, open_panel  # noqa: PLC0415 -- see above
+    from postarr.panel.epaper import EpaperSurface, open_panel  # noqa: PLC0415 -- see above
 
     rasterizer = PangoRasterizer()
     panel = EpaperSurface(
@@ -345,8 +345,8 @@ def _report(laid_out: Layout, scale: TypeScale, args: argparse.Namespace) -> Non
     PNG on a backlit monitor cannot settle legibility, but it can settle that the
     right words are heavy.
     """
-    from display.panel import layout as layout_module
-    from display.panel.legibility import CAP_RATIO, pixels_per_arcminute, pixels_per_inch
+    from postarr.panel import layout as layout_module
+    from postarr.panel.legibility import CAP_RATIO, pixels_per_arcminute, pixels_per_inch
 
     per_arcmin = pixels_per_arcminute(
         ppi=pixels_per_inch(width_px=args.width_px, height_px=args.height_px, diagonal_inches=args.diagonal_inches),

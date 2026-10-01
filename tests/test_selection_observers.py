@@ -18,8 +18,8 @@ import json
 
 import pytest
 
-from display.tv import SelectionAnnouncement
-from display.tv.samsung import SamsungTv
+from postarr.tv import SelectionAnnouncement
+from postarr.tv.samsung import SamsungTv
 
 
 def announcement(content_id: str, *, is_shown: bool = True) -> dict[str, str]:

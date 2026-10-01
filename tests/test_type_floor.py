@@ -13,7 +13,7 @@ import math
 
 import pytest
 
-from display.panel.legibility import (
+from postarr.panel.legibility import (
     CAP_RATIO,
     COMFORTABLE_CAP_ARCMIN,
     MINIMUM_CAP_ARCMIN,
@@ -115,7 +115,7 @@ class TestWhatTheTiersMean:
         identifying line beneath the one size this module exists to hold — the
         floor violated by the tier that is supposed to sit above it.
         """
-        import display.panel.legibility as module
+        import postarr.panel.legibility as module
 
         monkeypatch.setattr(module, "COMFORTABLE_CAP_ARCMIN", MINIMUM_CAP_ARCMIN / 2)
 

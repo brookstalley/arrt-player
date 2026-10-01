@@ -11,8 +11,8 @@ import logging
 import pytest
 from fakes import FakeTv
 
-from display.daemon import Daemon
-from display.state import DisplayState
+from postarr.daemon import Daemon
+from postarr.state import DisplayState
 
 
 async def test_a_first_start_adopts_the_sequence_without_acting(daemon: Daemon, tv: FakeTv, publish, state: DisplayState):
@@ -43,7 +43,7 @@ async def test_a_restart_does_not_re_execute_the_last_directive(
     made, because a restart legitimately re-selects the work already on the wall —
     see the rotation suite. What must not happen is the *directive* firing twice.
     """
-    from display.manifest import Watcher
+    from postarr.manifest import Watcher
 
     def a_daemon() -> Daemon:
         watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)

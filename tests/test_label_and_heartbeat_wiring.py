@@ -24,12 +24,12 @@ import pytest
 from conftest import WALL_ID
 from fakes import FOREIGN_IMAGE, FakeSurface
 
-from display import daemon as daemon_module
-from display import logs
-from display.daemon import Daemon
-from display.heartbeat import INTERVAL_SECONDS, path_in
-from display.manifest import Watcher
-from display.panel import TypeScale
+from postarr import daemon as daemon_module
+from postarr import logs
+from postarr.daemon import Daemon
+from postarr.heartbeat import INTERVAL_SECONDS, path_in
+from postarr.manifest import Watcher
+from postarr.panel import TypeScale
 
 
 async def _comes_back(flag: threading.Event, *, within_seconds: float = 5.0) -> bool:

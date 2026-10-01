@@ -25,8 +25,8 @@ changing.
 
 from abc import ABC, abstractmethod
 
-from display.panel.layout import Geometry, Layout, Measure
-from display.panel.legibility import TypeScale
+from postarr.panel.layout import Geometry, Layout, Measure
+from postarr.panel.legibility import TypeScale
 
 
 class SurfaceUnavailable(Exception):

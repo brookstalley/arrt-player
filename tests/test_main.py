@@ -20,10 +20,10 @@ import asyncio
 
 import pytest
 
-from display import __main__ as entry
-from display.config import ConfigError
-from display.panel import SurfaceUnavailable
-from display.state import StateSchemaTooNew
+from postarr import __main__ as entry
+from postarr.config import ConfigError
+from postarr.panel import SurfaceUnavailable
+from postarr.state import StateSchemaTooNew
 
 
 @pytest.fixture(autouse=True)
@@ -212,7 +212,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         literal here would be this test re-stating the ratio instead of checking
         that the ratio is what got used.
         """
-        from display.panel.legibility import margin_for, type_scale_for
+        from postarr.panel.legibility import margin_for, type_scale_for
 
         scale = type_scale_for(
             width_px=settings.epd_panel_width_px,
@@ -232,7 +232,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         picture ends."""
         import dataclasses
 
-        from display.panel.legibility import margin_for, type_scale_for
+        from postarr.panel.legibility import margin_for, type_scale_for
 
         scale = type_scale_for(width_px=1448, height_px=1072, diagonal_inches=6.0, viewing_distance_inches=84.0)
         stated = dataclasses.replace(settings, epd_margin_px=17)
@@ -255,7 +255,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         import dataclasses
         import logging
 
-        from display import daemon as daemon_module
+        from postarr import daemon as daemon_module
 
         built: dict[str, object] = {}
 
@@ -295,8 +295,8 @@ async def test_a_crash_still_closes_the_art_channel_on_the_way_out(settings, tv,
     times out. So a daemon that skipped its close on the unexpected exit would
     come back up unable to reach the television it just crashed away from.
     """
-    from display.daemon import Daemon
-    from display.manifest import Watcher
+    from postarr.daemon import Daemon
+    from postarr.manifest import Watcher
 
     watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)
     daemon = Daemon(settings=settings, tv=tv, state=state, watcher=watcher, clock=clock.as_clock())
@@ -321,8 +321,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
     """
     import logging
 
-    from display.daemon import Daemon
-    from display.manifest import Watcher
+    from postarr.daemon import Daemon
+    from postarr.manifest import Watcher
 
     watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)
     daemon = Daemon(settings=settings, tv=tv, state=state, watcher=watcher, clock=clock.as_clock())
@@ -339,3 +339,80 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
     assert "daemon.crashed" in events, "a crash left no ERROR behind"
     assert "daemon.stopped" not in events, "a crash reported itself as a clean shutdown"
     assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+class _PullRecorder:
+    """Stands in for the pull: records that it ran, and stops when asked, or fails when told to."""
+
+    started: list[object] = []
+    failure: Exception | None = None
+
+    def __init__(self, settings) -> None:
+        type(self).started.append(settings)
+
+    async def run(self, stop) -> None:
+        if type(self).failure is not None:
+            raise type(self).failure
+        await stop.wait()
+
+
+def _wire(monkeypatch, settings, tv, *, daemon_run, pull_fails: Exception | None = None):
+    from postarr import daemon as daemon_module
+
+    class QuickDaemon(daemon_module.Daemon):
+        async def run(self, stop) -> None:
+            await daemon_run(stop)
+
+    _PullRecorder.started = []
+    # Set here on every wiring, so a test cannot inherit another's failure.
+    monkeypatch.setattr(_PullRecorder, "failure", pull_fails)
+    monkeypatch.setattr(entry, "load", lambda: settings)
+    monkeypatch.setattr(entry, "SamsungTv", lambda **kwargs: tv)
+    monkeypatch.setattr(entry, "Daemon", QuickDaemon)
+    monkeypatch.setattr(entry, "Pull", _PullRecorder)
+
+
+async def test_http_mode_runs_the_pull_beside_the_daemon_and_stops_them_together(monkeypatch, settings, tv, tmp_path):
+    import dataclasses
+
+    http = dataclasses.replace(
+        settings, manifest_source="http", server_url="http://s", wall_token="t", cache_dir=tmp_path / "cache"
+    )
+
+    async def runs_briefly(stop) -> None:
+        await asyncio.sleep(0.01)
+        stop.set()
+
+    _wire(monkeypatch, http, tv, daemon_run=runs_briefly)
+
+    assert await asyncio.wait_for(entry._run(), timeout=5) == 0
+    assert _PullRecorder.started == [http]
+
+
+async def test_file_mode_starts_no_pull(monkeypatch, settings, tv):
+    async def stops_at_once(stop) -> None:
+        stop.set()
+
+    _wire(monkeypatch, settings, tv, daemon_run=stops_at_once)
+
+    assert await entry._run() == 0
+    assert _PullRecorder.started == []
+
+
+async def test_a_pull_that_dies_stops_the_plane_at_once_and_says_why(monkeypatch, settings, tv, tmp_path, caplog):
+    """A dead pull is a wall that takes no updates; it becomes a restart instead of a silence."""
+    import dataclasses
+    import logging
+
+    http = dataclasses.replace(
+        settings, manifest_source="http", server_url="http://s", wall_token="t", cache_dir=tmp_path / "cache"
+    )
+
+    async def runs_until_stopped(stop) -> None:
+        await stop.wait()
+
+    _wire(monkeypatch, http, tv, daemon_run=runs_until_stopped, pull_fails=OSError("No space left on device"))
+    with caplog.at_level(logging.ERROR), pytest.raises(OSError, match="No space"):
+        await asyncio.wait_for(entry._run(), timeout=5)
+
+    assert [record.__dict__.get("event") for record in caplog.records if record.levelno >= logging.ERROR] == ["pull.crashed"]

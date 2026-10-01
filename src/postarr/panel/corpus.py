@@ -2,7 +2,7 @@
 
 **Not a sample of the corpus — a sample of its failure modes.** The artists here
 are real, with the name split the seed table actually stores
-(`curation/src/curation/seed/names.py`), because the label's hardest decisions are
+(`arrt/src/arrt/seed/names.py`), because the label's hardest decisions are
 all decided by particular words: how long the family name is, whether the
 nationality is a demonym, whether there is a title at all. Invented records get
 those wrong in the polite direction and a label engine tested only against them
@@ -56,8 +56,8 @@ measurements the artifacts quote.
 **It is in the package rather than in the test tree, and the reason is the second
 reader.** `tools/label_preview.py` draws these on the real panel — that is what
 "records a human would want to look at" means in practice, and it is the only
-instrument that can settle legibility. `display/tests/` is on nobody's import
-path when that tool runs; `display.panel.corpus` is importable for free. Nothing
+instrument that can settle legibility. `postarr/tests/` is on nobody's import
+path when that tool runs; `postarr.panel.corpus` is importable for free. Nothing
 in the daemon imports it, and what it costs to carry is a few kilobytes of text.
 """
 
