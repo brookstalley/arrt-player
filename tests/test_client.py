@@ -21,8 +21,8 @@ from aiohttp.test_utils import TestServer
 from fakes import FakeTv, RecordingOutput, drm_tree
 from server_double import CLIENT_ID, ServerDouble
 
-from postarr import __main__ as entry
-from postarr.client import (
+from arrt_player import __main__ as entry
+from arrt_player.client import (
     Assignment,
     ClientDocument,
     FrameIdentity,
@@ -33,8 +33,8 @@ from postarr.client import (
     client_outputs,
     hdmi_outputs,
 )
-from postarr.daemon import Clock
-from postarr.pull import ClientPull
+from arrt_player.daemon import Clock
+from arrt_player.pull import ClientPull
 
 #: The connectors of a Pi with one screen plugged in and one socket empty — and,
 #: beside them, connectors that are not HDMI and must not become outputs.
@@ -236,7 +236,7 @@ async def test_a_wall_on_an_output_this_client_lacks_is_reported_once_and_not_st
     server.assign("hall", "hdmi-a-1")
     server.publish("h1", wall_id="hall")
 
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(supervisor_for(client, drm)) as supervisor:
             await eventually(lambda: "hall" in screens and screens["hall"].shown, what="the placeable wall to start")
             # A change elsewhere in the document, so it is read again and the
@@ -256,7 +256,7 @@ async def test_a_client_with_no_frame_does_not_start_a_wall_assigned_to_one(clie
     without_frame = replace(client, frame=None)
     server.publish("w1", wall_id="living-room")
 
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(supervisor_for(without_frame, drm)) as supervisor:
             await asyncio.sleep(0.15)
             assert supervisor.running == {}
@@ -305,7 +305,7 @@ async def test_a_client_document_the_server_will_not_give_keeps_the_walls_and_is
 ):
     server.publish("w1", wall_id="living-room")
 
-    with caplog.at_level(logging.WARNING, logger="postarr.pull"):
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
         async with Running(supervisor_for(client, drm)) as supervisor:
             await eventually(lambda: television.on_the_wall is not None, what="the Frame to show the wall")
             if fault == "token-refused":
@@ -353,7 +353,7 @@ def _etag_unreadable(path: Path) -> None:
 
 @pytest.mark.parametrize("spoil", [_etag_not_utf8, _etag_unreadable], ids=["not-utf8", "unreadable"])
 async def test_a_spoiled_etag_is_not_sent_and_the_whole_document_comes_back(client, server, spoil):
-    from postarr import pull as pull_module
+    from arrt_player import pull as pull_module
 
     link = ClientPull(client)
     try:
@@ -373,7 +373,7 @@ async def test_a_client_document_that_cannot_be_cached_still_starts_its_walls_an
 ):
     """A full disk costs the cache, not the walls: the supervisor gets the
     document all the same, and the failure is said once over several polls."""
-    from postarr import pull as pull_module
+    from arrt_player import pull as pull_module
 
     cache_files = {client.client_document_path, client.cache_dir / pull_module.CLIENT_ETAG_FILENAME}
     write = pull_module._write_atomically
@@ -386,7 +386,7 @@ async def test_a_client_document_that_cannot_be_cached_still_starts_its_walls_an
     monkeypatch.setattr(pull_module, "_write_atomically", disk_full_for_the_client_cache)
     server.publish("w1", wall_id="living-room")
 
-    with caplog.at_level(logging.INFO, logger="postarr.pull"):
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
         async with Running(supervisor_for(client, drm)) as supervisor:
             await eventually(lambda: television.on_the_wall is not None, what="the Frame to show the wall")
             await asyncio.sleep(0.3)  # several polls
@@ -411,7 +411,7 @@ async def test_a_crashed_worker_is_logged_and_started_again(client, server, drm,
         await stop.wait()
 
     supervisor = supervisor_for(client, drm, worker=fails_once, restart_min_seconds=0.01, restart_max_seconds=0.05)
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(supervisor):
             await eventually(lambda: len(calls) >= 2, what="the worker to be started again")
             await asyncio.sleep(0.1)
@@ -431,7 +431,7 @@ async def test_a_worker_that_ends_without_being_asked_is_started_again(client, s
             await stop.wait()
 
     supervisor = supervisor_for(client, drm, worker=returns_once, restart_min_seconds=0.01)
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(supervisor):
             await eventually(lambda: len(calls) >= 2, what="the worker to be started again")
 
@@ -590,7 +590,7 @@ async def test_a_frame_whose_id_cannot_be_read_is_reported_without_one_and_said_
     identity = identified(client, tv)
     supervisor = supervisor_with_identity(client, drm, identity, worker=_idle)
 
-    with caplog.at_level(logging.WARNING, logger="postarr.client"):
+    with caplog.at_level(logging.WARNING, logger="arrt_player.client"):
         for _ in range(3):
             await supervisor.cycle()
     await supervisor.stop_all()
@@ -731,7 +731,7 @@ async def test_a_label_on_an_output_this_client_lacks_is_reported_once_and_not_s
     labels = RecordingLabels()
     server.map_label("label-1", "epd-7", "living-room", LABEL_DOCUMENT)
 
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(with_a_panel(client, drm, labels)):
             await eventually(lambda: len(server.client_heartbeats) >= 1, what="a poll")
             await asyncio.sleep(0.2)
@@ -746,7 +746,7 @@ async def test_two_labels_on_one_output_start_one_renderer(client, server, drm, 
     server.map_label("label-1", "epd-0", "living-room", LABEL_DOCUMENT)
     server.clients[CLIENT_ID]["labels"].append({"label_id": "label-2", "output": "epd-0", "wall_id": "study"})
 
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(with_a_panel(client, drm, labels)):
             await eventually(lambda: labels.started, what="the renderer to start")
             await asyncio.sleep(0.2)
@@ -766,7 +766,7 @@ async def test_a_crashed_renderer_is_logged_and_started_again(client, server, dr
 
     server.map_label("label-1", "epd-0", "living-room", LABEL_DOCUMENT)
     supervisor = with_a_panel(client, drm, fails_once, restart_min_seconds=0.01, restart_max_seconds=0.05)
-    with caplog.at_level(logging.ERROR, logger="postarr.client"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.client"):
         async with Running(supervisor):
             await eventually(lambda: len(calls) >= 2, what="the renderer to be started again")
 

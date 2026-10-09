@@ -15,9 +15,9 @@ import pytest
 from fakes import RecordingOutput
 from jsonschema import Draft202012Validator
 
-from postarr.heartbeat import INTERVAL_SECONDS, path_in
-from postarr.manifest import Watcher
-from postarr.screen import ScreenWall
+from arrt_player.heartbeat import INTERVAL_SECONDS, path_in
+from arrt_player.manifest import Watcher
+from arrt_player.screen import ScreenWall
 
 
 @pytest.fixture

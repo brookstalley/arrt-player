@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 
 # The heartbeat's own module owns what its file is called; this only reports it
 # in the startup line.
-from postarr.heartbeat import path_in as heartbeat_path_in
+from arrt_player.heartbeat import path_in as heartbeat_path_in
 
 #: The Frame's own store, in the wall's directory beside the manifest it reads.
 #: The Frame worker is its sole writer and nothing else ever opens it.

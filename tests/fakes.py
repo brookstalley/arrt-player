@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from postarr.panel import (
+from arrt_player.panel import (
     Extent,
     Geometry,
     LabelSurface,
@@ -32,7 +32,7 @@ from postarr.panel import (
     set_text,
     type_scale_for,
 )
-from postarr.tv import (
+from arrt_player.tv import (
     IdentityUnreadable,
     PowerStateUnreadable,
     RemovalOutcome,

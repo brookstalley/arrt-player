@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from postarr.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
+from arrt_player.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
 
 FRAME = {
     "TV_ADDRESS": "10.0.0.1",

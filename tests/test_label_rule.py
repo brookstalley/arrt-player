@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from postarr.label_rule import (
+from arrt_player.label_rule import (
     HOLD,
     STATES,
     Drawing,

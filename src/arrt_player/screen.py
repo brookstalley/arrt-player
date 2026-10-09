@@ -35,13 +35,13 @@ import random
 from pathlib import Path
 from typing import Protocol
 
-from postarr import heartbeat as heartbeat_module
-from postarr.config import WallSettings
-from postarr.daemon import Clock
-from postarr.episodes import ReportOnce
-from postarr.heartbeat import DisplayReport, ScreenState
-from postarr.logs import work_context
-from postarr.manifest import Entry, Manifest, Watcher
+from arrt_player import heartbeat as heartbeat_module
+from arrt_player.config import WallSettings
+from arrt_player.daemon import Clock
+from arrt_player.episodes import ReportOnce
+from arrt_player.heartbeat import DisplayReport, ScreenState
+from arrt_player.logs import work_context
+from arrt_player.manifest import Entry, Manifest, Watcher
 
 log = logging.getLogger(__name__)
 

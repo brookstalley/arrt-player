@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from conftest import WALL_ID, write_manifest
 
-from postarr.config import CACHED_MANIFEST_FILENAME
-from postarr.manifest import (
+from arrt_player.config import CACHED_MANIFEST_FILENAME
+from arrt_player.manifest import (
     SUPPORTED_SCHEMA_MAJOR,
     ManifestUnreadable,
     ManifestVersionUnsupported,

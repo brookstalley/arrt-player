@@ -20,11 +20,11 @@ import types
 
 import pytest
 
-from postarr.panel.epaper import GREYSCALE_MODE, EpaperSurface, open_panel
-from postarr.panel.layout import Block, Geometry, Layout
-from postarr.panel.legibility import TypeScale
-from postarr.panel.raster import Raster, Rasterizer
-from postarr.panel.styling import Run
+from arrt_player.panel.epaper import GREYSCALE_MODE, EpaperSurface, open_panel
+from arrt_player.panel.layout import Block, Geometry, Layout
+from arrt_player.panel.legibility import TypeScale
+from arrt_player.panel.raster import Raster, Rasterizer
+from arrt_player.panel.styling import Run
 
 GEOMETRY = Geometry(width_px=8, height_px=4, margin_px=1)
 
@@ -120,7 +120,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
         guarded against and not a hypothetical: the driver comes up in `bw`, and
         `max_colors` says 16 either way.
         """
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         class StaysInOneBit(FakeEpd):
             """Takes the assignment and goes on running in one bit."""
@@ -149,7 +149,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
             def mode(self, value: str) -> None:
                 raise OSError("the SPI bus is not there")
 
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable):
             a_surface(epd=Unsettable())
@@ -168,7 +168,7 @@ class TestAFailureIsRaisedBecauseTheDriverWillNotReportOne:
         """The caller catches one type. Anything the Cython driver throws must
         arrive as that type or the daemon's `_caption` lets it past and the panel
         takes the wall down with it."""
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         epd = FakeEpd()
         epd.raises = OSError("the controller stopped answering")
@@ -209,7 +209,7 @@ class TestTheFrameIsTurnedToMatchTheMounting:
     def test_a_quarter_turn_is_refused_rather_than_half_supported(self):
         """It exchanges width and height, so the layout above would have been
         arranged for the wrong shape — a label laid out landscape, drawn portrait."""
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable) as raised:
             a_surface(rotate_degrees=90)
@@ -285,7 +285,7 @@ class TestOpeningAPanelThatIsNotThere:
         composition root catches `SurfaceUnavailable`, so either one escaping past
         it would stop a daemon whose television is working perfectly.
         """
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable) as raised:
             open_panel("no_such_vendor.no_such_panel")
@@ -358,7 +358,7 @@ class TestALabelIsOneRefreshNotTwo:
     def test_a_driver_that_will_not_take_the_silenced_clear_is_a_surface_that_is_unavailable(self, monkeypatch):
         """A driver object with fixed attributes refuses the assignment. The
         composition root catches one type, so the refusal must arrive as it."""
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         class Fixed:
             __slots__ = ("mode",)
@@ -381,7 +381,7 @@ class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
     """
 
     def test_a_rasterizer_that_raises_is_a_surface_that_is_unavailable(self):
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         class Broken(FlatRasterizer):
             def render(self, layout):
@@ -402,7 +402,7 @@ class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
             def render(self, layout):
                 raise RuntimeError("the text stack could not build a font map")
 
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         epd = FakeEpd()
 

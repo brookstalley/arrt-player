@@ -1,4 +1,4 @@
-"""Postarr's side of the Player contract: what it reads, and what it writes.
+"""Arrt Player's side of the Player contract: what it reads, and what it writes.
 
 The manifest fixtures under `contract/` are the documents Arrt may publish.
 Every one the contract calls valid must be one this reader adopts. Every invalid
@@ -36,16 +36,16 @@ import pytest
 from fakes import drm_tree
 from jsonschema import Draft202012Validator
 
-from postarr import manifest
-from postarr.client import (
+from arrt_player import manifest
+from arrt_player.client import (
     ClientDocumentUnreadable,
     LabelOutputReport,
     client_heartbeat,
     client_outputs,
     parse_client_document,
 )
-from postarr.heartbeat import DisplayReport, Health, ScreenState
-from postarr.label_rule import STATES, LabelDocumentUnreadable, Outcome, outcome, parse_label_document
+from arrt_player.heartbeat import DisplayReport, Health, ScreenState
+from arrt_player.label_rule import STATES, LabelDocumentUnreadable, Outcome, outcome, parse_label_document
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 INDEX = json.loads((CONTRACT / "fixtures" / "index.json").read_text(encoding="utf-8"))["fixtures"]

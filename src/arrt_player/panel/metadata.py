@@ -31,8 +31,8 @@ the renderer's business, and the vocabulary is deliberately not one renderer's.
 from dataclasses import dataclass, fields
 from typing import Any
 
-from postarr.panel.content import Candidate, Tier
-from postarr.panel.styling import Case, Run, Slant, Weight
+from arrt_player.panel.content import Candidate, Tier
+from arrt_player.panel.styling import Case, Run, Slant, Weight
 
 #: What separates the facts sharing the identification line. Its own run rather
 #: than punctuation glued to the fact after it, so that a tier deciding what to

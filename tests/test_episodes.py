@@ -7,7 +7,7 @@ never began, a ladder held past its ceiling, a recovery that has to put the next
 failure back at the bottom rung rather than halfway up it.
 """
 
-from postarr.episodes import Backoff, ReportOnce
+from arrt_player.episodes import Backoff, ReportOnce
 
 
 class TestReportOnce:

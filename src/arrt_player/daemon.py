@@ -50,15 +50,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from postarr import brightness as brightness_module
-from postarr import heartbeat as heartbeat_module
-from postarr.config import Settings
-from postarr.episodes import Backoff, ReportOnce
-from postarr.heartbeat import DisplayReport, ScreenState
-from postarr.logs import work_context
-from postarr.manifest import Entry, Manifest, Watcher
-from postarr.state import Binding, DisplayState, UploadStatus
-from postarr.tv import (
+from arrt_player import brightness as brightness_module
+from arrt_player import heartbeat as heartbeat_module
+from arrt_player.config import Settings
+from arrt_player.episodes import Backoff, ReportOnce
+from arrt_player.heartbeat import DisplayReport, ScreenState
+from arrt_player.logs import work_context
+from arrt_player.manifest import Entry, Manifest, Watcher
+from arrt_player.state import Binding, DisplayState, UploadStatus
+from arrt_player.tv import (
     PowerStateUnreadable,
     RemovalOutcome,
     SelectionAnnouncement,
