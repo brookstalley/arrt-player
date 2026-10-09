@@ -27,9 +27,9 @@ from server_double import CONTRACT, ROUTES, TOKEN
 from server_double import MANIFEST_FIXTURE as FIXTURE
 from server_double import ServerDouble as Stub
 
-from postarr.daemon import Daemon
-from postarr.manifest import Watcher
-from postarr.pull import (
+from arrt_player.daemon import Daemon
+from arrt_player.manifest import Watcher
+from arrt_player.pull import (
     CLIENT_HEARTBEAT_ROUTE,
     CLIENT_ROUTE,
     ETAG_FILENAME,
@@ -159,7 +159,7 @@ async def test_a_render_that_does_not_match_its_hash_is_discarded_and_reported_o
     bad = stub.manifest["entries"][1]["media"]["sha256"]
     stub.media[bad] = b"bytes that are not the render"
 
-    with caplog.at_level(logging.WARNING, logger="postarr.pull"):
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
         await pull.cycle(session)
         stub.publish("w1", "w2", sequence=5)
         stub.media[bad] = b"bytes that are not the render"
@@ -187,7 +187,7 @@ async def test_a_manifest_this_reader_refuses_is_never_cached(pull, stub, sessio
     await pull.cycle(session)
     stub.manifest = json.loads((CONTRACT / "fixtures" / "manifest.v1" / "invalid" / "major-2.json").read_text())
 
-    with caplog.at_level(logging.ERROR, logger="postarr.pull"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
         await pull.cycle(session)
         await pull.cycle(session)
 
@@ -243,7 +243,7 @@ async def test_a_refused_token_is_reported_once_and_the_cache_is_kept(
     stub.tokens = holders
     stub.publish("w2")
 
-    with caplog.at_level(logging.ERROR, logger="postarr.pull"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
         for _ in range(3):
             assert await pull.cycle(session) is True
 
@@ -294,7 +294,7 @@ async def test_an_unreachable_server_is_reported_once_and_its_return_once(stub, 
     port = stub.server.port
     await stub.server.close()
 
-    with caplog.at_level(logging.INFO, logger="postarr.pull"):
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
         for _ in range(3):
             assert await pull.cycle(session) is False
         stub.server = TestServer(stub.app(), port=port)
@@ -308,7 +308,7 @@ async def test_an_unreachable_server_is_reported_once_and_its_return_once(stub, 
 
 
 async def test_a_manifest_404_is_reported_once_as_nothing_published(pull, stub, session, caplog):
-    with caplog.at_level(logging.ERROR, logger="postarr.pull"):
+    with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
         for _ in range(3):
             assert await pull.cycle(session) is True
 
@@ -325,7 +325,7 @@ async def test_a_refusal_ends_on_a_304(pull, stub, session, caplog):
     holders = stub.tokens
     stub.tokens = {}
 
-    with caplog.at_level(logging.INFO, logger="postarr.pull"):
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
         await pull.cycle(session)
         stub.tokens = holders
         await pull.cycle(session)
@@ -350,7 +350,7 @@ async def test_a_work_with_no_usable_media_is_skipped_and_said_once(pull, stub, 
     stub.publish("w1", "w2")
     del stub.manifest["entries"][0]["media"]
 
-    with caplog.at_level(logging.WARNING, logger="postarr.pull"):
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
         await pull.cycle(session)
         stub.publish("w1", "w2", sequence=9)
         del stub.manifest["entries"][0]["media"]
@@ -368,7 +368,7 @@ async def test_a_render_that_keeps_failing_is_said_once_and_backed_off(pull, stu
     heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
     heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}))
 
-    with caplog.at_level(logging.INFO, logger="postarr.pull"):
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
         for _ in range(3):
             assert await pull.cycle(session) is False, "a failing render was not backed off"
         # Checked while the render is still failing: the manifest route answered,
@@ -398,11 +398,13 @@ async def test_the_token_never_reaches_the_journal(pull, stub, session, http_set
         await stub.server.close()
         await pull.cycle(session)
 
-    postarr_lines = [record.getMessage() for record in caplog.records if record.name.startswith("postarr")]
-    assert postarr_lines, "nothing was logged, so this checks nothing"
-    assert all(TOKEN not in line for line in postarr_lines)
+    arrt_player_lines = [record.getMessage() for record in caplog.records if record.name.startswith("arrt_player")]
+    assert arrt_player_lines, "nothing was logged, so this checks nothing"
+    assert all(TOKEN not in line for line in arrt_player_lines)
     assert all(
-        TOKEN not in json.dumps(record.__dict__, default=str) for record in caplog.records if record.name.startswith("postarr")
+        TOKEN not in json.dumps(record.__dict__, default=str)
+        for record in caplog.records
+        if record.name.startswith("arrt_player")
     )
     assert TOKEN not in repr(http_settings)
 

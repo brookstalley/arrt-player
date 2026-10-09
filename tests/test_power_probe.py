@@ -52,12 +52,12 @@ def probe_module(monkeypatch):
 def deployment(monkeypatch, tmp_path):
     """A hermetic `.env` road, for the same reason `test_tools.py` has one.
 
-    `postarr.config.load` calls `load_dotenv()`, which reads the repo-root `.env` —
+    `arrt_player.config.load` calls `load_dotenv()`, which reads the repo-root `.env` —
     gitignored, absent in CI, and present with different contents on the Pi and on
     a developer's machine. A test that depended on it would pass on exactly one
     machine and say nothing about the code on any other.
     """
-    from postarr import config
+    from arrt_player import config
 
     monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
     # The settings a one-wall Player read are refused by name now, so one left in
@@ -433,7 +433,7 @@ class TestItWillNotWriteTheWallsOwnToken:
 
     def test_it_refuses_with_no_set_to_probe(self, probe_module, monkeypatch, capsys):
         """No fallback address. Naming one here would point the instrument at a wall nobody asked about."""
-        from postarr import config
+        from arrt_player import config
 
         monkeypatch.setattr(config, "load_dotenv", lambda *a, **k: None)
         monkeypatch.delenv("TV_ADDRESS", raising=False)

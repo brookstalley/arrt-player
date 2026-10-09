@@ -45,9 +45,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, Protocol
 
-from postarr import heartbeat as heartbeat_module
-from postarr.config import FRAME_OUTPUT, ClientSettings, WallIdUnusable, WallSettings
-from postarr.episodes import Backoff, ReportOnce
+from arrt_player import heartbeat as heartbeat_module
+from arrt_player.config import FRAME_OUTPUT, ClientSettings, WallIdUnusable, WallSettings
+from arrt_player.episodes import Backoff, ReportOnce
 
 log = logging.getLogger(__name__)
 

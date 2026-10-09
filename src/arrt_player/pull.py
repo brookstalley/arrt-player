@@ -45,12 +45,12 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
-from postarr.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
-from postarr.config import CACHED_MANIFEST_FILENAME, ClientSettings, WallSettings
-from postarr.episodes import ReportOnce
-from postarr.heartbeat import path_in as heartbeat_path_in
-from postarr.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
-from postarr.manifest import ManifestUnreadable, parse
+from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
+from arrt_player.config import CACHED_MANIFEST_FILENAME, ClientSettings, WallSettings
+from arrt_player.episodes import ReportOnce
+from arrt_player.heartbeat import path_in as heartbeat_path_in
+from arrt_player.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
+from arrt_player.manifest import ManifestUnreadable, parse
 
 log = logging.getLogger(__name__)
 

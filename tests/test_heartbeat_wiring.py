@@ -23,8 +23,8 @@ from pathlib import Path
 import pytest
 from conftest import WALL_ID
 
-from postarr import logs
-from postarr.heartbeat import INTERVAL_SECONDS, path_in
+from arrt_player import logs
+from arrt_player.heartbeat import INTERVAL_SECONDS, path_in
 
 
 class TestTheFrameLoopDrawsNoLabel:

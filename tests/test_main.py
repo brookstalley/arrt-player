@@ -26,10 +26,10 @@ from typing import ClassVar
 
 import pytest
 
-from postarr import __main__ as entry
-from postarr.config import ConfigError
-from postarr.panel import SurfaceUnavailable
-from postarr.state import StateSchemaTooNew
+from arrt_player import __main__ as entry
+from arrt_player.config import ConfigError
+from arrt_player.panel import SurfaceUnavailable
+from arrt_player.state import StateSchemaTooNew
 
 
 @pytest.fixture(autouse=True)
@@ -206,7 +206,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         literal here would be this test re-stating the ratio instead of checking
         that the ratio is what got used.
         """
-        from postarr.panel.legibility import margin_for, type_scale_for
+        from arrt_player.panel.legibility import margin_for, type_scale_for
 
         scale = type_scale_for(
             width_px=panel_settings.epd_panel_width_px,
@@ -226,7 +226,7 @@ class TestWhetherThisDeviceHasALabelSurface:
         picture ends."""
         import dataclasses
 
-        from postarr.panel.legibility import margin_for, type_scale_for
+        from arrt_player.panel.legibility import margin_for, type_scale_for
 
         scale = type_scale_for(width_px=1448, height_px=1072, diagonal_inches=6.0, viewing_distance_inches=84.0)
         stated = dataclasses.replace(panel_settings, epd_margin_px=17)
@@ -302,8 +302,8 @@ async def test_a_crash_still_closes_the_art_channel_on_the_way_out(settings, tv,
     times out. So a daemon that skipped its close on the unexpected exit would
     come back up unable to reach the television it just crashed away from.
     """
-    from postarr.daemon import Daemon
-    from postarr.manifest import Watcher
+    from arrt_player.daemon import Daemon
+    from arrt_player.manifest import Watcher
 
     watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)
     daemon = Daemon(settings=settings, tv=tv, state=state, watcher=watcher, clock=clock.as_clock())
@@ -328,8 +328,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
     """
     import logging
 
-    from postarr.daemon import Daemon
-    from postarr.manifest import Watcher
+    from arrt_player.daemon import Daemon
+    from arrt_player.manifest import Watcher
 
     watcher = Watcher(settings.manifest_path, rotation_interval_fallback=180, shuffle_fallback=False)
     daemon = Daemon(settings=settings, tv=tv, state=state, watcher=watcher, clock=clock.as_clock())
@@ -364,7 +364,7 @@ class _PullRecorder:
 
 
 def _wire(monkeypatch, tv, *, daemon_run, pull_fails: Exception | None = None):
-    from postarr import daemon as daemon_module
+    from arrt_player import daemon as daemon_module
 
     class QuickDaemon(daemon_module.Daemon):
         async def run(self, stop) -> None:

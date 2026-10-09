@@ -18,9 +18,9 @@ import json
 import pytest
 from samsungtvws.exceptions import HttpApiError, ResponseError
 
-from postarr.tv import IdentityUnreadable, PowerStateUnreadable, TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
-from postarr.tv import samsung as samsung_module
-from postarr.tv.samsung import SamsungTv
+from arrt_player.tv import IdentityUnreadable, PowerStateUnreadable, TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
+from arrt_player.tv import samsung as samsung_module
+from arrt_player.tv.samsung import SamsungTv
 
 
 class StubArt:

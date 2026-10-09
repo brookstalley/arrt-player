@@ -47,18 +47,18 @@ caller and reported, and the picture changes regardless — a panel that is brok
 missing, or slow leaves the wall rotating.
 """
 
-from postarr.panel.content import Candidate, Tier
-from postarr.panel.layout import Block, Extent, Geometry, Layout, Measure, lay_out
-from postarr.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
-from postarr.panel.metadata import LabelText, read_label
-from postarr.panel.raster import Raster, Rasterizer
-from postarr.panel.styling import Case, Line, Run, Slant, Weight, plain, set_text
-from postarr.panel.surface import LabelSurface, SurfaceUnavailable
+from arrt_player.panel.content import Candidate, Tier
+from arrt_player.panel.layout import Block, Extent, Geometry, Layout, Measure, lay_out
+from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
+from arrt_player.panel.metadata import LabelText, read_label
+from arrt_player.panel.raster import Raster, Rasterizer
+from arrt_player.panel.styling import Case, Line, Run, Slant, Weight, plain, set_text
+from arrt_player.panel.surface import LabelSurface, SurfaceUnavailable
 
 #: **The drivers are deliberately absent from this list.** `panel.pango` needs a
 #: text stack and `panel.epaper` needs a panel driver, neither of which installs
 #: on every machine this package is imported on; re-exporting them here would make
-#: `import postarr.panel` — which the daemon does on every device, panel or not —
+#: `import arrt_player.panel` — which the daemon does on every device, panel or not —
 #: fail wherever those are missing. They are imported by name, from the one place
 #: that has decided this device has a panel.
 __all__ = [

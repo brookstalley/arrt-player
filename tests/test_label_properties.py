@@ -25,10 +25,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from postarr.panel import Geometry, Line, Tier, lay_out, read_label, set_text, type_scale_for
-from postarr.panel.corpus import CORPUS
-from postarr.panel.layout import Extent
-from postarr.panel.legibility import margin_for
+from arrt_player.panel import Geometry, Line, Tier, lay_out, read_label, set_text, type_scale_for
+from arrt_player.panel.corpus import CORPUS
+from arrt_player.panel.layout import Extent
+from arrt_player.panel.legibility import margin_for
 
 #: The reference wall: a 6-inch 1448×1072 panel read from 7 feet. Derived rather
 #: than written down, for the reason `test_label_layout.py` gives.

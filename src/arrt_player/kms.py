@@ -43,8 +43,8 @@ from typing import Final, Protocol
 
 from PIL import Image, ImageOps
 
-from postarr.client import DRM_ROOT, FRAMEBUFFER_KIND, OutputReport, hdmi_outputs
-from postarr.episodes import ReportOnce
+from arrt_player.client import DRM_ROOT, FRAMEBUFFER_KIND, OutputReport, hdmi_outputs
+from arrt_player.episodes import ReportOnce
 
 log = logging.getLogger(__name__)
 

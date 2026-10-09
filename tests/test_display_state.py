@@ -20,7 +20,7 @@ from pathlib import Path
 from conftest import WALL_ID
 from jsonschema import Draft202012Validator
 
-from postarr.heartbeat import INTERVAL_SECONDS, path_in
+from arrt_player.heartbeat import INTERVAL_SECONDS, path_in
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 SCHEMA = json.loads((CONTRACT / "schemas" / "heartbeat.v1.schema.json").read_text(encoding="utf-8"))
@@ -224,7 +224,7 @@ def test_the_player_reports_exactly_the_states_the_schema_names():
     import json
     from pathlib import Path
 
-    from postarr.heartbeat import ScreenState
+    from arrt_player.heartbeat import ScreenState
 
     schema = json.loads((Path(__file__).parents[2] / "contract" / "schemas" / "heartbeat.v1.schema.json").read_text())
 

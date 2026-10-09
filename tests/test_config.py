@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from postarr.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
+from arrt_player.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
 
 FRAME = {
     "TV_ADDRESS": "10.0.0.1",
@@ -44,6 +44,15 @@ class TestWhatMustBeSet:
 
         with pytest.raises(ConfigError, match=missing):
             load(environment)
+
+    @pytest.mark.parametrize("name", ["CACHE_DIR", "TV_TOKEN_FILE"])
+    def test_a_relative_path_to_the_players_state_is_refused_by_name(self, cache_dir: Path, name: str):
+        """A relative path resolves inside the checkout, where a redeploy that removes a project directory deletes it."""
+        with pytest.raises(ConfigError, match=f"{name} must be an absolute path"):
+            load(an_environment(cache_dir, **{name: "cache/state"}))
+
+    def test_a_home_relative_cache_is_absolute_once_expanded(self, cache_dir: Path):
+        assert load(an_environment(cache_dir, CACHE_DIR="~/arrt-player-cache")).cache_dir.is_absolute()
 
     @pytest.mark.parametrize("retired", sorted(RETIRED_SETTINGS))
     def test_a_setting_a_one_wall_player_read_is_refused_by_name(self, cache_dir: Path, retired: str):

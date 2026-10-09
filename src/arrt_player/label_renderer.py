@@ -26,11 +26,11 @@ from contextlib import nullcontext
 from datetime import datetime
 from typing import Final, Protocol
 
-from postarr.client import EPAPER_KIND, LabelAssignment, LabelOutputReport
-from postarr.episodes import ReportOnce
-from postarr.label_rule import Drawing, LabelDocument, Outcome, drawing_for, offline
-from postarr.logs import work_context
-from postarr.panel import Candidate, LabelSurface, Layout, Run, Tier, lay_out, read_label
+from arrt_player.client import EPAPER_KIND, LabelAssignment, LabelOutputReport
+from arrt_player.episodes import ReportOnce
+from arrt_player.label_rule import Drawing, LabelDocument, Outcome, drawing_for, offline
+from arrt_player.logs import work_context
+from arrt_player.panel import Candidate, LabelSurface, Layout, Run, Tier, lay_out, read_label
 
 log = logging.getLogger(__name__)
 

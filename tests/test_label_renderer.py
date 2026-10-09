@@ -35,13 +35,13 @@ from aiohttp.test_utils import TestServer
 from fakes import FakeSurface
 from server_double import ServerDouble
 
-from postarr import label_renderer as renderer_module
-from postarr import logs
-from postarr.client import LabelAssignment
-from postarr.label_renderer import LabelPanel, LabelRenderer
-from postarr.label_rule import HOLD, parse_label_document
-from postarr.panel import TypeScale
-from postarr.pull import LabelAnswer, LabelPull
+from arrt_player import label_renderer as renderer_module
+from arrt_player import logs
+from arrt_player.client import LabelAssignment
+from arrt_player.label_renderer import LabelPanel, LabelRenderer
+from arrt_player.label_rule import HOLD, parse_label_document
+from arrt_player.panel import TypeScale
+from arrt_player.pull import LabelAnswer, LabelPull
 
 LABEL_ID = "label-hall-panel"
 WALL = "w-living"

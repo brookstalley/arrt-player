@@ -1,4 +1,4 @@
-"""Start the Player: `uv run python -m postarr`.
+"""Start the Player: `uv run python -m arrt_player`.
 
 The composition root, and the only module that knows a real television exists —
 everything above the seam is written against `TvClient`, so this is where the
@@ -38,19 +38,28 @@ import sys
 from collections.abc import Awaitable, Callable
 from functools import partial
 
-from postarr import logs
-from postarr.client import FRAME_KIND, FrameIdentity, LabelAssignment, OutputReport, Supervisor, client_outputs
-from postarr.config import PANEL_OUTPUT, ClientSettings, ConfigError, FrameSettings, PanelSettings, Settings, WallSettings, load
-from postarr.daemon import Clock, Daemon
-from postarr.kms import KmsOutput
-from postarr.label_renderer import LabelPanel, LabelRenderer
-from postarr.manifest import Watcher
-from postarr.panel import Geometry, LabelSurface, SurfaceUnavailable
-from postarr.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
-from postarr.pull import ClientPull, LabelPull, Pull
-from postarr.screen import ScreenOutput, ScreenWall
-from postarr.state import DisplayState, StateSchemaTooNew
-from postarr.tv.samsung import SamsungTv
+from arrt_player import logs
+from arrt_player.client import FRAME_KIND, FrameIdentity, LabelAssignment, OutputReport, Supervisor, client_outputs
+from arrt_player.config import (
+    PANEL_OUTPUT,
+    ClientSettings,
+    ConfigError,
+    FrameSettings,
+    PanelSettings,
+    Settings,
+    WallSettings,
+    load,
+)
+from arrt_player.daemon import Clock, Daemon
+from arrt_player.kms import KmsOutput
+from arrt_player.label_renderer import LabelPanel, LabelRenderer
+from arrt_player.manifest import Watcher
+from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
+from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
+from arrt_player.pull import ClientPull, LabelPull, Pull
+from arrt_player.screen import ScreenOutput, ScreenWall
+from arrt_player.state import DisplayState, StateSchemaTooNew
+from arrt_player.tv.samsung import SamsungTv
 
 log = logging.getLogger(__name__)
 
@@ -117,8 +126,8 @@ def label_surface(settings: PanelSettings) -> LabelSurface | None:
     )
 
     try:
-        from postarr.panel.epaper import EpaperSurface, open_panel
-        from postarr.panel.pango import PangoRasterizer
+        from arrt_player.panel.epaper import EpaperSurface, open_panel
+        from arrt_player.panel.pango import PangoRasterizer
     except ImportError as exc:
         # The text stack being absent lands in the same place as the panel being
         # absent, and it is a provisioning mistake somebody can fix while the wall

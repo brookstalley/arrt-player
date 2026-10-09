@@ -13,8 +13,8 @@ import pytest
 from fakes import drm_tree
 from PIL import Image
 
-from postarr import __main__ as entry
-from postarr.kms import KmsOutput, ScreenAbsent, fitted, scanout_bytes
+from arrt_player import __main__ as entry
+from arrt_player.kms import KmsOutput, ScreenAbsent, fitted, scanout_bytes
 
 MATTE = (28, 28, 28)
 PAINT = (230, 200, 20)

@@ -5,12 +5,12 @@ stack. What is under test is the one thing all three depend on being right — t
 a run's characters and a run's *place* in the string a renderer sets agree.
 """
 
-from postarr.panel import Case, Line, Run, Slant, Weight, plain, set_text
+from arrt_player.panel import Case, Line, Run, Slant, Weight, plain, set_text
 
 # **Not re-exported from the package**, unlike the rest of this vocabulary: the
 # only caller is the renderer, which imports the module directly, and a package
 # root that offers a name nobody reaches is a surface with no reader.
-from postarr.panel.styling import byte_spans
+from arrt_player.panel.styling import byte_spans
 
 
 class TestARunHoldsWhatWasRecorded:

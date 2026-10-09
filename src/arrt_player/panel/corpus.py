@@ -56,8 +56,8 @@ measurements the artifacts quote.
 **It is in the package rather than in the test tree, and the reason is the second
 reader.** `tools/label_preview.py` draws these on the real panel — that is what
 "records a human would want to look at" means in practice, and it is the only
-instrument that can settle legibility. `postarr/tests/` is on nobody's import
-path when that tool runs; `postarr.panel.corpus` is importable for free. Nothing
+instrument that can settle legibility. `arrt-player/tests/` is on nobody's import
+path when that tool runs; `arrt_player.panel.corpus` is importable for free. Nothing
 in the daemon imports it, and what it costs to carry is a few kilobytes of text.
 """
 

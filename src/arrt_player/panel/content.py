@@ -35,7 +35,7 @@ nobody discovers that by eye at 7 feet.
 from dataclasses import dataclass
 from enum import Enum
 
-from postarr.panel.styling import Line, plain
+from arrt_player.panel.styling import Line, plain
 
 
 class Tier(Enum):

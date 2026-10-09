@@ -31,7 +31,7 @@ pytest.importorskip("gi", reason="the typesetter needs the `raster` group: uv sy
 import gi
 
 # The oracle below reaches Pango directly, so this file pins the versions itself
-# rather than relying on `postarr.panel.pango` having been imported first — which
+# rather than relying on `arrt_player.panel.pango` having been imported first — which
 # is an ordering the import block does not guarantee and the linter may reshuffle.
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
@@ -39,9 +39,9 @@ gi.require_version("PangoCairo", "1.0")
 import cairo  # noqa: E402 -- same
 from gi.repository import Pango, PangoCairo  # noqa: E402 -- same
 
-from postarr.panel.layout import Block, Geometry, Layout  # noqa: E402 -- same
-from postarr.panel.pango import PangoRasterizer  # noqa: E402 -- importing it is what needs the group
-from postarr.panel.styling import Case, Line, Run, Slant, Weight  # noqa: E402 -- same
+from arrt_player.panel.layout import Block, Geometry, Layout  # noqa: E402 -- same
+from arrt_player.panel.pango import PangoRasterizer  # noqa: E402 -- importing it is what needs the group
+from arrt_player.panel.styling import Case, Line, Run, Slant, Weight  # noqa: E402 -- same
 
 #: **Deliberately not a multiple of four.** Cairo pads each row of an A8 surface
 #: out to a four-byte boundary, so a width of 1448 — the reference panel's, and
