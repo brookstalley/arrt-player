@@ -57,18 +57,18 @@ owes, and an unattended daemon meeting its first prompt is a daemon that stops.
 
 Read the state, which is always safe and needs no flag:
 
-    cd postarr && uv run python tools/power_probe.py
+    cd arrt-player && uv run python tools/power_probe.py
 
 Measure a gesture, from whatever state the set is in now:
 
-    cd postarr && uv run python tools/power_probe.py --click --i-am-at-the-set
-    cd postarr && uv run python tools/power_probe.py --hold 3 --i-am-at-the-set
+    cd arrt-player && uv run python tools/power_probe.py --click --i-am-at-the-set
+    cd arrt-player && uv run python tools/power_probe.py --hold 3 --i-am-at-the-set
 
 Skip the art channel when only the REST reading is wanted — which is also how to
 find out whether the art channel opens at all in a given state, since a run
 *with* it reports that as a datum rather than failing:
 
-    cd postarr && uv run python tools/power_probe.py --no-art-channel
+    cd arrt-player && uv run python tools/power_probe.py --no-art-channel
 
 The set's address and client name come from this deployment's `.env`, the same
 road `__main__` takes; `--host` overrides it for a set that is not this wall's.
@@ -239,7 +239,7 @@ class Probe:
 
     Both channels close on one path, in `run`'s `finally`. That is not tidiness:
     this set has been observed refusing art-channel connections for minutes after
-    a client went away without closing, and `daemon.py` carries a `finally` for
+    a client went away without closing, and the wall loop (`wall.py`) carries a `finally` for
     exactly that reason after an exception once turned one crash into a daemon that
     could not reach its own television. A second channel is a second way to
     reproduce it, so it gets the same single lifetime.
@@ -785,7 +785,7 @@ def _settings_into(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     # Imported here rather than at module scope, like label_preview.py: reading a
     # deployment's settings is not something a tool should do merely by being
     # imported, and the suite drives `main` without an `.env` in front of it.
-    from postarr.config import load
+    from arrt_player.config import load
 
     settings = None
     try:

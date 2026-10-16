@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from postarr.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
+from arrt_player.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
 
 FRAME = {
     "TV_ADDRESS": "10.0.0.1",
@@ -45,6 +45,15 @@ class TestWhatMustBeSet:
         with pytest.raises(ConfigError, match=missing):
             load(environment)
 
+    @pytest.mark.parametrize("name", ["CACHE_DIR", "TV_TOKEN_FILE"])
+    def test_a_relative_path_to_the_players_state_is_refused_by_name(self, cache_dir: Path, name: str):
+        """A relative path resolves inside the checkout, where a redeploy that removes a project directory deletes it."""
+        with pytest.raises(ConfigError, match=f"{name} must be an absolute path"):
+            load(an_environment(cache_dir, **{name: "cache/state"}))
+
+    def test_a_home_relative_cache_is_absolute_once_expanded(self, cache_dir: Path):
+        assert load(an_environment(cache_dir, CACHE_DIR="~/arrt-player-cache")).cache_dir.is_absolute()
+
     @pytest.mark.parametrize("retired", sorted(RETIRED_SETTINGS))
     def test_a_setting_a_one_wall_player_read_is_refused_by_name(self, cache_dir: Path, retired: str):
         """A stale `.env` fails loudly rather than being half-read.
@@ -60,7 +69,11 @@ class TestWhatMustBeSet:
 
     @pytest.mark.parametrize(
         ("retired", "replaced_by"),
-        [("WALL_ID", "Settings › Clients"), ("WALL_TOKEN", "CLIENT_TOKEN"), ("MANIFEST_SOURCE", "SERVER_URL")],
+        [
+            ("WALL_ID", "Settings › Clients"),
+            ("WALL_TOKEN", "CLIENT_TOKEN"),
+            ("MANIFEST_SOURCE", "SERVER_URL"),
+        ],
     )
     def test_the_refusal_says_what_replaced_it(self, cache_dir: Path, retired: str, replaced_by: str):
         with pytest.raises(ConfigError, match=replaced_by):
@@ -69,6 +82,19 @@ class TestWhatMustBeSet:
     def test_a_retired_setting_left_empty_is_not_set(self, cache_dir: Path):
         """`WALL_ID=` is a key nobody filled in, which is the same as no key."""
         assert load(an_environment(cache_dir, WALL_ID="", WALL_TOKEN="", MANIFEST_SOURCE="")).server_url
+
+    def test_the_servers_pace_settings_in_a_shared_env_are_left_to_the_server(self, cache_dir: Path):
+        """`ROTATION_INTERVAL_SECONDS` and `ROTATION_SHUFFLE` are Arrt's: the default pace a theme inherits.
+
+        One `.env` serves both on a development checkout, so a Player that
+        refused them would not start beside its server. It reads neither: the
+        schedule it is sent sets the pace.
+        """
+        settings = load(an_environment(cache_dir, ROTATION_INTERVAL_SECONDS="931", ROTATION_SHUFFLE="false"))
+
+        assert settings.server_url
+        assert "ROTATION_INTERVAL_SECONDS" not in RETIRED_SETTINGS
+        assert "ROTATION_SHUFFLE" not in RETIRED_SETTINGS
 
     @pytest.mark.parametrize("missing", ["LATITUDE", "LONGITUDE", "LOCATION_NAME"])
     def test_a_frame_without_the_sun_it_follows_does_not_start(self, cache_dir: Path, missing: str):
@@ -82,10 +108,15 @@ class TestWhatMustBeSet:
         with pytest.raises(ConfigError, match="TV_PORT"):
             load(an_environment(cache_dir, TV_PORT="eight-thousand"))
 
-    def test_a_label_panel_with_no_frame_to_caption_is_refused(self, cache_dir: Path):
-        """The panel captions the wall on the Frame; with no Frame it would caption nothing, silently."""
-        with pytest.raises(ConfigError, match="EPD_DEVICE"):
-            load(an_environment(cache_dir, frame=False, EPD_DEVICE="waveshare_epd.it8951"))
+    def test_a_label_panel_with_no_frame_is_a_client_with_a_label_output(self, cache_dir: Path):
+        """**Reversed on purpose** (`labels-and-surfaces.md` ruling 3): a label output
+        may live on a client with no display at all, and the server maps it to a
+        wall on any client. So `EPD_DEVICE` without `TV_ADDRESS` starts, with no
+        Frame and a panel."""
+        settings = load(an_environment(cache_dir, frame=False, EPD_DEVICE="waveshare_epd.it8951"))
+
+        assert settings.frame is None
+        assert settings.panel.epd_device == "waveshare_epd.it8951"
 
 
 class TestTheFrameIsAnOutputAClientMayHave:
@@ -113,8 +144,8 @@ class TestWhatDefaults:
         assert settings.poll_interval_seconds == 1.0
         assert settings.client_poll_seconds == 30.0
         assert settings.frame.tv_port == 8002
-        assert settings.frame.epd_panel_width_px == 1448
-        assert settings.frame.epd_panel_height_px == 1072
+        assert settings.panel.epd_panel_width_px == 1448
+        assert settings.panel.epd_panel_height_px == 1072
         assert settings.frame.tv_client_name == "tvpi"
         assert settings.frame.tv_token_file == cache_dir / "token_file"
 
@@ -122,7 +153,7 @@ class TestWhatDefaults:
         """This deployment is a 1448×1072 IT8951; the product must run on any."""
         settings = load(an_environment(cache_dir, EPD_PANEL_WIDTH_PX="800", EPD_PANEL_HEIGHT_PX="600"))
 
-        assert (settings.frame.epd_panel_width_px, settings.frame.epd_panel_height_px) == (800, 600)
+        assert (settings.panel.epd_panel_width_px, settings.panel.epd_panel_height_px) == (800, 600)
 
     def test_the_three_values_that_decide_whether_this_device_has_a_panel(self, cache_dir: Path):
         """**The names a misspelling makes invisible.**
@@ -134,13 +165,13 @@ class TestWhatDefaults:
         a device with no panel. That is the exact distinction this plane was built
         to draw, collapsed by a typo nothing else would catch.
         """
-        frame = load(
+        panel = load(
             an_environment(cache_dir, EPD_DEVICE="waveshare_epd.it8951", EPD_MARGIN_PX="64", EPD_ROTATE_DEGREES="0")
-        ).frame
+        ).panel
 
-        assert frame.epd_device == "waveshare_epd.it8951"
-        assert frame.epd_margin_px == 64
-        assert frame.epd_rotate_degrees == 0
+        assert panel.epd_device == "waveshare_epd.it8951"
+        assert panel.epd_margin_px == 64
+        assert panel.epd_rotate_degrees == 0
 
     def test_a_deployment_that_says_nothing_about_a_panel_has_none(self, cache_dir: Path):
         """The supported deployment rather than the degraded one.
@@ -150,11 +181,11 @@ class TestWhatDefaults:
         does not: it derives from the type, so this value is an override nobody
         has exercised rather than a default everybody inherits.
         """
-        frame = load(an_environment(cache_dir)).frame
+        panel = load(an_environment(cache_dir)).panel
 
-        assert frame.epd_device == ""
-        assert frame.epd_margin_px is None
-        assert frame.epd_rotate_degrees == 180
+        assert panel.epd_device == ""
+        assert panel.epd_margin_px is None
+        assert panel.epd_rotate_degrees == 180
 
     def test_the_viewing_conditions_have_no_defaults_and_must_not_acquire_any(self, cache_dir: Path):
         """**The one pair in this module that may never be guessed.**
@@ -164,23 +195,16 @@ class TestWhatDefaults:
         and every test passes. That is not hypothetical; it is what shipped. A
         default here would restore it.
         """
-        stated = load(an_environment(cache_dir, EPD_PANEL_DIAGONAL_INCHES="6", EPD_VIEWING_DISTANCE_INCHES="84")).frame
+        stated = load(an_environment(cache_dir, EPD_PANEL_DIAGONAL_INCHES="6", EPD_VIEWING_DISTANCE_INCHES="84")).panel
         assert (stated.epd_panel_diagonal_inches, stated.epd_viewing_distance_inches) == (6.0, 84.0)
 
-        unstated = load(an_environment(cache_dir)).frame
+        unstated = load(an_environment(cache_dir)).panel
         assert unstated.epd_panel_diagonal_inches is None
         assert unstated.epd_viewing_distance_inches is None
 
     def test_a_viewing_measurement_that_is_not_a_number_is_refused_rather_than_dropped(self, cache_dir: Path):
         with pytest.raises(ConfigError, match="EPD_VIEWING_DISTANCE_INCHES"):
             load(an_environment(cache_dir, EPD_VIEWING_DISTANCE_INCHES="seven feet"))
-
-    @pytest.mark.parametrize(
-        ("raw", "expected"),
-        [("false", False), ("FALSE", False), ("0", False), ("no", False), ("off", False), ("true", True), ("yes", True)],
-    )
-    def test_the_shuffle_fallback_reads_the_spellings_people_write(self, cache_dir: Path, raw: str, expected: bool):
-        assert load(an_environment(cache_dir, ROTATION_SHUFFLE=raw)).rotation_shuffle_fallback is expected
 
 
 class TestEachWallHasItsOwnDirectory:
@@ -242,26 +266,36 @@ class TestTheStartupLine:
         assert lines["wall_id"] == "study"
         assert lines["manifest_path"] == str(cache_dir / "study" / "manifest.json")
         assert lines["heartbeat_path"] == str(cache_dir / "study" / "display-heartbeat-study.json")
-        assert lines["epd_panel_px"] == "1448x1072"
+
+    def test_the_clients_line_names_its_panel_with_or_without_a_frame(self, cache_dir: Path):
+        """The panel is the client's now, so its geometry is on the client's line, Frame or no Frame."""
+        for frame in (True, False):
+            lines = load(an_environment(cache_dir, frame=frame, EPD_DEVICE="waveshare_epd.it8951")).startup_lines()
+            assert lines["panel"]["epd_panel_px"] == "1448x1072"
+            assert lines["panel"]["epd_device"] == "waveshare_epd.it8951"
 
     def test_it_names_the_viewing_conditions_the_type_was_sized_from(self, cache_dir: Path):
         lines = load(an_environment(cache_dir, EPD_PANEL_DIAGONAL_INCHES="6", EPD_VIEWING_DISTANCE_INCHES="84")).startup_lines()
 
-        assert "6.0" in str(lines["frame"]["epd_viewing"])
-        assert "84.0" in str(lines["frame"]["epd_viewing"])
+        assert "6.0" in str(lines["panel"]["epd_viewing"])
+        assert "84.0" in str(lines["panel"]["epd_viewing"])
 
     def test_unstated_viewing_conditions_are_reported_as_what_they_cost(self, cache_dir: Path):
-        line = str(load(an_environment(cache_dir)).startup_lines()["frame"]["epd_viewing"])
+        line = str(load(an_environment(cache_dir)).startup_lines()["panel"]["epd_viewing"])
 
         assert "not stated" in line
         assert "draws none" in line, f"the line does not say what the absence costs: {line}"
 
-    def test_it_holds_no_fact_about_the_television_s_physical_size(self, cache_dir: Path):
-        """Curation composes the mat into the render, so this plane never needs the TV's size."""
-        settings = load(an_environment(cache_dir, TV_PANEL_DIAGONAL_INCHES="50", TV_PANEL_WIDTH_PX="3840"))
+    def test_it_names_the_frames_geometry_and_the_mat_it_draws_from(self, cache_dir: Path):
+        """The Player composes for the Frame, so a wrong diagonal must be one journal line away."""
+        lines = repr(
+            load(
+                an_environment(cache_dir, TV_PANEL_DIAGONAL_INCHES="55", TV_PANEL_WIDTH_PX="1920", TV_PANEL_HEIGHT_PX="1080")
+            ).startup_lines()
+        )
 
-        assert not hasattr(settings.frame, "tv_panel_diagonal_inches")
-        assert "3840" not in repr(settings.startup_lines())
+        assert "1920x1080 at 55.0 in" in lines
+        assert "1.5 in, bottom x1.15" in lines
 
     def test_the_pairing_token_is_reported_as_a_path_and_never_as_its_contents(self, cache_dir: Path, tmp_path: Path):
         token = tmp_path / "token_file"
@@ -281,3 +315,54 @@ class TestTheStartupLine:
             assert "the-clients-token" not in said
         assert "the-clients-token" not in repr(on_the_frame.startup_lines())
         assert "the-clients-token" not in repr(wall.wall_lines())
+
+
+class TestTheGeometryThePlayerComposesFor:
+    """The Frame's size and the mat's proportions, which moved here from the server (`feeds-and-players.md` ruling 7)."""
+
+    def test_unstated_they_are_the_servers_defaults(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir))
+
+        assert (settings.frame.tv_panel_width_px, settings.frame.tv_panel_height_px) == (3840, 2160)
+        assert settings.frame.tv_panel_diagonal_inches == 42.0
+        assert (settings.mat_width_inches, settings.mat_bottom_weight) == (1.5, 1.15)
+
+    def test_the_frame_wall_composes_for_the_configured_panel_at_its_density(self, cache_dir: Path):
+        settings = load(
+            an_environment(
+                cache_dir,
+                TV_PANEL_WIDTH_PX="1920",
+                TV_PANEL_HEIGHT_PX="1080",
+                TV_PANEL_DIAGONAL_INCHES="43",
+                MAT_WIDTH_INCHES="2",
+                MAT_BOTTOM_WEIGHT="1.3",
+            )
+        )
+
+        geometry = settings.frame_wall("living-room").geometry
+
+        assert geometry.screen == (1920, 1080)
+        assert geometry.pixels_per_inch == pytest.approx((1920**2 + 1080**2) ** 0.5 / 43)
+        assert (geometry.mat_width_inches, geometry.bottom_weight) == (2.0, 1.3)
+
+    def test_a_screen_wall_takes_the_mat_proportions_and_no_density(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, frame=False, MAT_BOTTOM_WEIGHT="1.25"))
+
+        geometry = settings.wall("hall").geometry_for((1920, 1200))
+
+        assert geometry.screen == (1920, 1200)
+        assert geometry.pixels_per_inch is None
+        assert geometry.bottom_weight == 1.25
+
+    @pytest.mark.parametrize(
+        "name", ["TV_PANEL_WIDTH_PX", "TV_PANEL_HEIGHT_PX", "TV_PANEL_DIAGONAL_INCHES", "MAT_WIDTH_INCHES", "MAT_BOTTOM_WEIGHT"]
+    )
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_a_size_of_zero_or_below_is_refused_by_name(self, cache_dir: Path, name: str, value: str):
+        with pytest.raises(ConfigError, match=name):
+            load(an_environment(cache_dir, **{name: value}))
+
+    def test_a_mat_setting_on_a_client_with_no_frame_is_still_read(self, cache_dir: Path):
+        """A screen draws a mat too, so the mat is the client's and not the Frame's."""
+        with pytest.raises(ConfigError, match="MAT_BOTTOM_WEIGHT"):
+            load(an_environment(cache_dir, frame=False, MAT_BOTTOM_WEIGHT="0"))

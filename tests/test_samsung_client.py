@@ -16,10 +16,11 @@ import asyncio
 import json
 
 import pytest
-from samsungtvws.exceptions import ResponseError
+from samsungtvws.exceptions import HttpApiError, ResponseError
 
-from postarr.tv import TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
-from postarr.tv.samsung import SamsungTv
+from arrt_player.tv import IdentityUnreadable, PowerStateUnreadable, TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
+from arrt_player.tv import samsung as samsung_module
+from arrt_player.tv.samsung import SamsungTv
 
 
 class StubArt:
@@ -43,6 +44,7 @@ class StubArt:
         self.undeletable: set[str] = set()
         self.artmode_reply: object = "on"
         self.artmode_raises: Exception | None = None
+        self.rest = StubRest()
 
         self.callbacks: dict[str, object] = {}
         self.select_raises: Exception | None = None
@@ -141,6 +143,28 @@ class StubArt:
         if self.artmode_raises is not None:
             raise self.artmode_raises
         return self.artmode_reply
+
+    def _get_rest_api(self) -> "StubRest":
+        return self.rest
+
+
+class StubRest:
+    """The art client's REST helper, as far as the `PowerState` read touches it."""
+
+    def __init__(self) -> None:
+        self.reply: object = {"device": {"PowerState": "on"}}
+        self.raises: Exception | None = None
+        #: Never answers, as a set that stopped serving HTTP would not.
+        self.hangs = False
+        self.reads = 0
+
+    async def rest_device_info(self) -> object:
+        self.reads += 1
+        if self.hangs:
+            await asyncio.Event().wait()
+        if self.raises is not None:
+            raise self.raises
+        return self.reply
 
 
 @pytest.fixture
@@ -584,3 +608,211 @@ async def test_an_art_mode_reply_that_is_not_a_string_is_no_reply(tv: SamsungTv,
     art.artmode_reply = {"value": "on"}
 
     assert await tv.reported_art_mode() is None
+
+
+# -- PowerState: in use or off, read beside the art channel ---------------------------------
+
+
+@pytest.mark.parametrize("power", ["on", "standby"])
+async def test_power_state_is_the_sets_own_word(tv: SamsungTv, art: StubArt, power: str):
+    art.rest.reply = {"device": {"PowerState": power}}
+
+    assert await tv.power_state() == power
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param({"device": {}}, id="no PowerState"),
+        pytest.param({"device": {"PowerState": 1}}, id="not a string"),
+        pytest.param({}, id="no device"),
+        pytest.param([], id="not an object"),
+    ],
+)
+async def test_a_reply_without_a_readable_power_state_is_unreadable(tv: SamsungTv, art: StubArt, reply: object):
+    art.rest.reply = reply
+
+    with pytest.raises(PowerStateUnreadable):
+        await tv.power_state()
+
+
+async def test_a_failed_power_read_is_unreadable_and_leaves_the_art_channel_open(tv: SamsungTv, art: StubArt):
+    """Its transport is REST, not the websocket: failing says nothing about the art channel."""
+    art.rest.raises = HttpApiError("TV unreachable or feature not supported on this model.")
+
+    with pytest.raises(PowerStateUnreadable):
+        await tv.power_state()
+
+    assert art.closed == 0, "a REST hiccup dropped the art channel as if it were an outage"
+    assert await tv.showing_art() is True, "the art channel stopped answering after a REST failure"
+
+
+async def test_a_power_read_that_never_answers_is_bounded(tv: SamsungTv, art: StubArt, monkeypatch):
+    monkeypatch.setattr(samsung_module, "POWER_STATE_TIMEOUT_SECONDS", 0.05)
+    art.rest.hangs = True
+
+    with pytest.raises(PowerStateUnreadable):
+        await asyncio.wait_for(tv.power_state(), timeout=2.0)
+
+
+async def test_power_state_is_unreadable_before_connecting(art: StubArt, tmp_path):
+    tv = SamsungTv(
+        host="10.0.0.1",
+        port=8002,
+        token_file=tmp_path / "token_file",
+        client_name="tvpi-test",
+        connect_timeout_seconds=1.0,
+        upload_timeout_seconds=5.0,
+        select_confirm_seconds=0.05,
+    )
+
+    with pytest.raises(PowerStateUnreadable):
+        await tv.power_state()
+    assert art.rest.reads == 0
+
+
+async def test_the_librarys_power_read_is_a_get_and_nothing_else():
+    """**The read the daemon relies on, checked against the library rather than the stub.**
+
+    `power_state` goes through `SamsungTVAsyncArt._get_rest_api().rest_device_info()`.
+    This drives those two real library methods over a recording session: the art
+    client's helper must hand back the library's REST client on the art client's
+    own session, and the device-info read must be one GET of `/api/v2/` — no
+    POST, PUT or key press — which is what keeps it outside the rule that the
+    television belongs to whoever is using it.
+    """
+    from types import SimpleNamespace
+
+    from samsungtvws.async_art import SamsungTVAsyncArt
+    from samsungtvws.async_rest import SamsungTVAsyncRest
+
+    calls: list[tuple[str, str]] = []
+
+    class Reply:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def text(self):
+            return json.dumps({"device": {"PowerState": "standby"}})
+
+    class RecordingSession:
+        closed = False
+
+        def __getattr__(self, verb):
+            def request(url, **kwargs):
+                calls.append((verb, url))
+                return Reply()
+
+            return request
+
+    session = RecordingSession()
+    holder = SimpleNamespace(host="10.0.0.1", port=8002, session=session, _rest_api=None)
+    holder.get_session = lambda: session
+    rest = SamsungTVAsyncArt._get_rest_api(holder)
+
+    assert isinstance(rest, SamsungTVAsyncRest)
+    info = await rest.rest_device_info()
+
+    assert info["device"]["PowerState"] == "standby"
+    assert [verb for verb, _ in calls] == ["get"]
+    assert calls[0][1].endswith("/api/v2/")
+
+
+# -- the set's identity, read without the art channel ---------------------------------------
+
+
+@pytest.fixture
+def unconnected(art: StubArt, tmp_path) -> SamsungTv:
+    """A client never connected: the identity is read by the client, with no wall and no art channel."""
+    client = SamsungTv(
+        host="10.0.0.1",
+        port=8002,
+        token_file=tmp_path / "token_file",
+        client_name="tvpi-test",
+        connect_timeout_seconds=1.0,
+        upload_timeout_seconds=5.0,
+        select_confirm_seconds=0.05,
+    )
+    client._construct = lambda: pytest.fail("the identity read built an art client that checks its token")
+    client._construct_rest_only = lambda: art
+    return client
+
+
+async def test_the_identity_is_the_sets_duid(unconnected: SamsungTv, art: StubArt):
+    art.rest.reply = {"id": "uuid:top", "device": {"duid": "uuid:the-frame", "id": "uuid:the-frame", "PowerState": "standby"}}
+
+    assert await unconnected.read_identity() == "uuid:the-frame"
+
+
+async def test_the_identity_read_closes_what_it_opened(unconnected: SamsungTv, art: StubArt):
+    art.rest.reply = {"device": {"duid": "uuid:the-frame"}}
+
+    await unconnected.read_identity()
+    art.rest.raises = HttpApiError("TV unreachable or feature not supported on this model.")
+    with pytest.raises(IdentityUnreadable):
+        await unconnected.read_identity()
+
+    assert art.closed == 2, "a REST session was left open on one of the two roads out"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param({"device": {}}, id="no duid"),
+        pytest.param({"device": {"duid": ""}}, id="an empty duid"),
+        pytest.param({"device": {"duid": 7}}, id="not a string"),
+        pytest.param({"id": "uuid:top-level-only"}, id="no device at all"),
+        pytest.param(["not", "an", "object"], id="not an object"),
+    ],
+)
+async def test_a_reply_without_a_readable_duid_is_unreadable(unconnected: SamsungTv, art: StubArt, reply: object):
+    """Only `device.duid` is the identity; the top-level id is not read in its place."""
+    art.rest.reply = reply
+
+    with pytest.raises(IdentityUnreadable):
+        await unconnected.read_identity()
+
+
+async def test_an_identity_read_that_never_answers_is_bounded(unconnected: SamsungTv, art: StubArt, monkeypatch):
+    monkeypatch.setattr(samsung_module, "IDENTITY_TIMEOUT_SECONDS", 0.05)
+    art.rest.hangs = True
+
+    with pytest.raises(IdentityUnreadable):
+        await asyncio.wait_for(unconnected.read_identity(), timeout=2.0)
+
+
+async def test_the_identity_read_leaves_a_running_art_channel_alone(tv: SamsungTv, art: StubArt):
+    """Read beside a worker's connection, it must not touch it."""
+    rest_only = StubArt()
+    rest_only.rest.reply = {"device": {"duid": "uuid:the-frame"}}
+    tv._construct_rest_only = lambda: rest_only
+
+    assert await tv.read_identity() == "uuid:the-frame"
+    assert art.closed == 0
+    assert art.rest.reads == 0
+    assert await tv.showing_art() is True
+
+
+async def test_the_rest_only_client_opens_no_remote_control_channel_and_no_art_channel(monkeypatch):
+    """**Checked against the library rather than the stub.** `SamsungTVAsyncArt.__init__`
+    ends in `get_token()`, which builds the remote-control client — and on an empty
+    token file opens its websocket to pair, a prompt on somebody's screen. The
+    identity read's client must skip it, and must never have opened the art
+    channel."""
+    from samsungtvws import async_art
+    from samsungtvws.async_rest import SamsungTVAsyncRest
+
+    monkeypatch.setattr(async_art, "SamsungTVWS", lambda *a, **k: pytest.fail("the remote-control client was built"))
+
+    client = samsung_module._RestOnly(host="10.0.0.1", port=8002, timeout=2.0)
+
+    try:
+        assert client.connection is None, "the art channel was opened"
+        assert isinstance(client._get_rest_api(), SamsungTVAsyncRest)
+        assert client._get_rest_api()._format_rest_url("").endswith(":8002/api/v2/")
+    finally:
+        await client.close()
+    assert client.session.closed, "the REST session outlived the read"

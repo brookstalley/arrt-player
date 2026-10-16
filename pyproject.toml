@@ -1,6 +1,6 @@
 [project]
-name = "postarr"
-version = "0.4.0"
+name = "arrt-player"
+version = "0.5.0"
 description = "Display plane — reads the theme manifest, drives the television, owns this device's own state."
 # **The plane whose version is pinned by hardware, and the reason the two planes
 # are sibling uv projects rather than one workspace.** Raspberry Pi OS Trixie
@@ -40,10 +40,11 @@ dependencies = [
     # outcome for a declared-early entry and named the moment it would be due for
     # checking; this is that check, made rather than assumed.
     "python-dotenv",
-    # **The panel driver's interchange format, and the only reason this is here.**
+    # **The panel driver's interchange format, and the compositor's image library.**
     # `panel/epaper.py` hands omni-epd a PIL image because that is what its
-    # `display()` takes. The HDMI output (`kms.py`) also decodes a render and fits
-    # it to its screen; the television is still handed a *path* it streams itself.
+    # `display()` takes. `compose.py` draws every major 2 work's mat with it, for
+    # the Frame and for a screen alike, and the HDMI output (`kms.py`) decodes and
+    # fits what it is handed; the television is still handed a *path* it streams.
     #
     # It is a core dependency rather than a panel-only one on purpose, and the
     # purpose is testability: with Pillow always present, the whole of
@@ -52,7 +53,7 @@ dependencies = [
     # driver failure into a raised one are exercised by the default suite instead
     # of only on a Pi with a panel screwed to it.
     "pillow",
-    # The HTTP mode's one client, in `src/postarr/pull.py` and nowhere else
+    # The HTTP mode's one client, in `src/arrt_player/pull.py` and nowhere else
     # (`tests/preferences/test_plane_isolation.py` holds that). Already installed
     # through the fork above, at the version the lockfile resolves; declared
     # because an indirect copy disappears the day that package changes its own
@@ -86,7 +87,7 @@ dependencies = [
 #
 #   Any HTTP client but the one above, used by one module. This is not an
 #     omission — it is the norm: the per-wall manifest and its media, from the
-#     shared file or pulled into this Player's cache by `src/postarr/pull.py`, are
+#     shared file or pulled into this Player's cache by `src/arrt_player/pull.py`, are
 #     the only channel from curation to display. The television websocket is the
 #     other exemption, because talking to the television is this plane's whole
 #     job.
@@ -167,7 +168,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/postarr"]
+packages = ["src/arrt_player"]
 
 [tool.uv]
 # **The pin that a `[dependency-groups]` entry cannot express, and the decision it
@@ -187,8 +188,19 @@ packages = ["src/postarr"]
 # An override rather than a dependency entry, because the requirement being
 # corrected is not ours: it is inside `omni_epd`'s own metadata, and only an
 # override reaches it.
+#
+# **`jetson-gpio` is overridden away, and the panel depends on it being gone**
+# (#181). The Waveshare sample declares it unconditionally, and it ships its own
+# `RPi/GPIO/__init__.py` (one line, `from Jetson.GPIO import *`) at the very path
+# `rpi-gpio` installs the real one. Two packages owning one file means the last
+# one installed wins, so the same lockfile gave a working panel on one install and
+# "Could not determine Jetson model" on the next. No Pi needs it: the sample
+# imports `Jetson.GPIO` only inside its JetsonNano branch, which a Raspberry Pi
+# never takes. A marker no platform matches is how an override removes a
+# dependency.
 override-dependencies = [
     "IT8951[rpi] @ git+https://github.com/GregDMeyer/IT8951.git@9f136139378f74e17d9972d7165dc6ae53a2568e",
+    "jetson-gpio; sys_platform == 'never'",
 ]
 
 # **The other unpinned axis, and pinning the driver alone would have left it
@@ -218,7 +230,7 @@ allow-direct-references = true
 # own venv can import it.
 #
 # It has to change, because `src/` layout and "never installed" cannot both hold —
-# `python -m postarr` finds nothing on the path, and the alternative is a
+# `python -m arrt_player` finds nothing on the path, and the alternative is a
 # `PYTHONPATH=src` that every invocation, unit file and test run has to remember.
 
 [tool.black]

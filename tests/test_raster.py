@@ -11,7 +11,7 @@ leaving a comment that each implementation is free to overlook.
 
 import pytest
 
-from postarr.panel.raster import Raster
+from arrt_player.panel.raster import Raster
 
 
 def test_a_flat_buffer_is_what_the_type_is_for():

@@ -10,11 +10,11 @@ import logging
 
 from fakes import FakeTv
 
-from postarr.daemon import Daemon
-from postarr.state import DisplayState
+from arrt_player.state import DisplayState
+from arrt_player.wall import Wall
 
 
-async def test_killing_curation_changes_nothing(daemon: Daemon, tv: FakeTv, publish, clock, wall_dir, caplog):
+async def test_killing_curation_changes_nothing(daemon: Wall, tv: FakeTv, publish, clock, wall_dir, caplog):
     """The acceptance criterion, made mechanical.
 
     Nothing here stands in for the curation process, and that is the test: with
@@ -33,7 +33,7 @@ async def test_killing_curation_changes_nothing(daemon: Daemon, tv: FakeTv, publ
     assert [record.levelno for record in caplog.records] == []
 
 
-async def test_a_manifest_that_never_arrives_is_waited_on_quietly(daemon: Daemon, tv: FakeTv, caplog):
+async def test_a_manifest_that_never_arrives_is_waited_on_quietly(daemon: Wall, tv: FakeTv, caplog):
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
             await daemon.tick()
@@ -43,7 +43,7 @@ async def test_a_manifest_that_never_arrives_is_waited_on_quietly(daemon: Daemon
     assert [record.levelno for record in caplog.records] == []
 
 
-async def test_an_asleep_television_backs_off_and_reports_once(daemon: Daemon, tv: FakeTv, publish, caplog):
+async def test_an_asleep_television_backs_off_and_reports_once(daemon: Wall, tv: FakeTv, publish, caplog):
     """One WARNING a second until morning buries every other line in the journal."""
     publish(["w1"])
     tv.unavailable = True
@@ -56,7 +56,7 @@ async def test_an_asleep_television_backs_off_and_reports_once(daemon: Daemon, t
     assert waits == [5.0, 10.0, 20.0, 40.0, 80.0], "the backoff did not widen"
 
 
-async def test_the_backoff_is_bounded(daemon: Daemon, tv: FakeTv, publish, settings):
+async def test_the_backoff_is_bounded(daemon: Wall, tv: FakeTv, publish, settings):
     publish(["w1"])
     tv.unavailable = True
 
@@ -65,7 +65,7 @@ async def test_the_backoff_is_bounded(daemon: Daemon, tv: FakeTv, publish, setti
     assert max(waits) == settings.tv_retry_max_seconds
 
 
-async def test_recovery_is_logged_and_resets_the_backoff(daemon: Daemon, tv: FakeTv, publish, settings, clock, caplog):
+async def test_recovery_is_logged_and_resets_the_backoff(daemon: Wall, tv: FakeTv, publish, settings, clock, caplog):
     """The pair of lines is what gives an outage a length in the journal."""
     publish(["w1", "w2"], interval_seconds=10)
     tv.unavailable = True
@@ -86,13 +86,11 @@ async def test_recovery_is_logged_and_resets_the_backoff(daemon: Daemon, tv: Fak
     assert await daemon.tick() == settings.tv_retry_min_seconds
 
 
-async def test_a_daemon_with_nothing_to_say_does_not_discover_the_set_is_gone(
-    daemon: Daemon, tv: FakeTv, publish, settings, clock
-):
+async def test_a_daemon_with_nothing_to_say_does_not_discover_the_set_is_gone(daemon: Wall, tv: FakeTv, publish, settings, clock):
     """And that is right, not a gap.
 
-    Between rotations there is no call to make: the manifest has not changed, the
-    directive has not advanced, the theme is fully uploaded, and the wall is
+    Between slots there is no call to make: the manifest has not changed, the
+    schedule has not moved on, the theme is fully uploaded, and the wall is
     holding a picture the television owns. A liveness poll would be traffic bought
     to learn something nothing is waiting on — and the outage is discovered by the
     next pass that actually needs the set, which is the pass that could not have
@@ -111,7 +109,7 @@ async def test_a_daemon_with_nothing_to_say_does_not_discover_the_set_is_gone(
     assert tv.connects == calls_before
 
 
-async def test_the_wall_is_shown_as_soon_as_the_set_comes_back(daemon: Daemon, tv: FakeTv, publish):
+async def test_the_wall_is_shown_as_soon_as_the_set_comes_back(daemon: Wall, tv: FakeTv, publish):
     publish(["w1", "w2"])
     tv.unavailable = True
     await daemon.tick()
@@ -120,11 +118,11 @@ async def test_the_wall_is_shown_as_soon_as_the_set_comes_back(daemon: Daemon, t
     tv.unavailable = False
     await daemon.tick()
 
-    assert tv.on_the_wall.name == "w1.jpg"
+    assert publish.work_of(tv.on_the_wall) == "w1"
 
 
 async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns(
-    daemon: Daemon, tv: FakeTv, publish, state: DisplayState
+    daemon: Wall, tv: FakeTv, publish, state: DisplayState
 ):
     """The declared deliverable, on the path it is most likely to be needed.
 
@@ -150,7 +148,7 @@ async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns
     assert "MY-LEGACY-1" not in tv.holding, "orphan removal was dropped rather than deferred"
 
 
-async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Daemon, tv: FakeTv, publish, clock, settings):
+async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, tv: FakeTv, publish, clock, settings):
     """Cleared on the far side of the call, so a set that goes away during it does
     not leave the work recorded as done — and retried on a wait, not on every poll.
 
@@ -182,7 +180,7 @@ async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Daemon
 
 
 async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever(
-    daemon: Daemon, tv: FakeTv, publish, clock, settings
+    daemon: Wall, tv: FakeTv, publish, clock, settings
 ):
     """A *known* refusal is an answer, and asking again learns nothing.
 
@@ -218,7 +216,7 @@ async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever
 
 
 async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(
-    daemon: Daemon, tv: FakeTv, publish, state: DisplayState
+    daemon: Wall, tv: FakeTv, publish, state: DisplayState
 ):
     """The manifest is local file I/O and cannot fail on account of the television.
 
@@ -229,10 +227,10 @@ async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(
     tv.unavailable = True
     await daemon.tick()
 
-    publish(["w2"], sequence=1)
+    publish(["w2"])
     await daemon.tick()
 
     tv.unavailable = False
     await daemon.tick()
 
-    assert tv.on_the_wall.name == "w2.jpg"
+    assert publish.work_of(tv.on_the_wall) == "w2"

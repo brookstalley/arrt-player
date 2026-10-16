@@ -14,7 +14,7 @@ from dataclasses import replace
 
 import pytest
 
-from postarr.panel import (
+from arrt_player.panel import (
     Candidate,
     Case,
     Geometry,
@@ -28,7 +28,7 @@ from postarr.panel import (
     set_text,
     type_scale_for,
 )
-from postarr.panel.layout import (
+from arrt_player.panel.layout import (
     CONTINUATION_LEADING,
     FAMILY_EMPHASIS,
     FILL_CAP,
@@ -1460,23 +1460,23 @@ class TestTheFamilyNameEmphasis:
 
     @staticmethod
     def _line(*, continues: bool = False):
-        from postarr.panel.layout import _ComposedLine
+        from arrt_player.panel.layout import _ComposedLine
 
         return _ComposedLine(
             runs=(), mandatory=True, wholly_identifying=True, carries_the_name=True, continues_the_line_above=continues
         )
 
     def test_a_second_line_that_continues_the_name_gives_the_first_its_emphasis(self):
-        from postarr.panel.layout import _family_name_holds_its_own_line
+        from arrt_player.panel.layout import _family_name_holds_its_own_line
 
         assert _family_name_holds_its_own_line([self._line(), self._line(continues=True)], identifying_lines=2)
 
     def test_a_second_line_that_is_the_next_fact_does_not(self):
-        from postarr.panel.layout import _family_name_holds_its_own_line
+        from arrt_player.panel.layout import _family_name_holds_its_own_line
 
         assert not _family_name_holds_its_own_line([self._line(), self._line(continues=False)], identifying_lines=2)
 
     def test_one_identifying_line_never_does(self):
-        from postarr.panel.layout import _family_name_holds_its_own_line
+        from arrt_player.panel.layout import _family_name_holds_its_own_line
 
         assert not _family_name_holds_its_own_line([self._line(), self._line(continues=True)], identifying_lines=1)

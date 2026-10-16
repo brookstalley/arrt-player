@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-from postarr.panel import (
+from arrt_player.panel import (
     Extent,
     Geometry,
     LabelSurface,
@@ -32,7 +32,9 @@ from postarr.panel import (
     set_text,
     type_scale_for,
 )
-from postarr.tv import (
+from arrt_player.tv import (
+    IdentityUnreadable,
+    PowerStateUnreadable,
     RemovalOutcome,
     SelectionAnnouncement,
     SelectionObserver,
@@ -102,7 +104,7 @@ class FakeTv(TvClient):
         #: returned, raised nothing and emitted no event, while what the set
         #: displayed did not change over twelve seconds and repeated attempts.
         #: Armed here because the failure is invisible from the call — a fake that
-        #: could not reproduce it let the daemon report rotations that never
+        #: could not reproduce it let the daemon report changes of picture that never
         #: happened, and every test passed.
         self.displays_nothing_selected = False
         #: What the set is displaying. It starts on a picture of the set's own
@@ -127,6 +129,17 @@ class FakeTv(TvClient):
         self.art_mode_announced = False
         #: How many times the set has been asked whether it is showing art.
         self.art_mode_reads = 0
+        #: The set's REST `PowerState`: `"on"` for a lit panel (art mode or a
+        #: programme alike), `"standby"` for a set switched off at the remote.
+        self.power = "on"
+        #: Armed to make the `PowerState` read fail while the art channel answers,
+        #: which the real seam reports as unreadable rather than as an outage.
+        self.power_unreadable = False
+        self.power_reads = 0
+        #: The set's `device.duid`, or None for a set whose description carries
+        #: none. Read without a connection, as the real read is.
+        self.device_id: str | None = "uuid:frame-in-the-living-room"
+        self.identity_reads = 0
 
     async def connect(self) -> None:
         """Cheap once connected, exactly as the real client is.
@@ -136,9 +149,9 @@ class FakeTv(TvClient):
         that goes away *after* a connection is established is discovered by the
         next real call — `select_image`, `upload` — and not by `connect`. A fake
         that re-checked reachability every pass made the outage arrive at the top
-        of the tick instead, so the whole of the directive path was unreachable
-        while the set was away: two tests asserting that a directive is not
-        consumed during an outage passed because the code under test never ran. A
+        of the tick instead, so everything a pass does after the top of the tick
+        was unreachable while the set was away: two tests asserting that a change
+        survives an outage passed because the code under test never ran. A
         mutation sweep found it by swapping two statements neither test executed.
         """
         if self._connected:
@@ -146,6 +159,10 @@ class FakeTv(TvClient):
         self._check_reachable()
         self.connects += 1
         self._connected = True
+        # **A connection is itself news, as the real client says it is**: the set
+        # may have changed state while nobody could hear it, so `SamsungTv.connect`
+        # leaves an art-mode announcement pending, and so does this.
+        self.art_mode_announced = True
 
     async def close(self) -> None:
         self.closed += 1
@@ -235,6 +252,25 @@ class FakeTv(TvClient):
         # often it is asked, and nothing else here can express it.
         self.art_mode_reads += 1
         return self.art_mode == "on"
+
+    async def power_state(self) -> str:
+        # Never `TvUnavailable`: the real read rides REST beside the art channel,
+        # and its failing neither drops the connection nor is an outage.
+        self.power_reads += 1
+        if self.power_unreadable or self.unavailable or not self._connected:
+            raise PowerStateUnreadable("the set's device description did not answer")
+        return self.power
+
+    async def read_identity(self) -> str:
+        # **Needs no connection**, as the real read opens its own REST client and
+        # never the art channel; it fails where that one fails, on a set that
+        # does not answer and on a description with no duid.
+        self.identity_reads += 1
+        if self.unavailable:
+            raise IdentityUnreadable("the set's device description did not answer")
+        if self.device_id is None:
+            raise IdentityUnreadable("the set's device description carries no device.duid")
+        return self.device_id
 
     def observe_selections(self, observer: SelectionObserver) -> None:
         # Idempotent, as the real client is: subscribing twice must not mean being
@@ -343,7 +379,8 @@ class FakeSurface(LabelSurface):
         self.measurement_explodes = False
         #: How long a draw takes, in real seconds. **The real one is not
         #: instantaneous and no amount of arranging makes it so**: a full 16-level
-        #: frame was measured at 1.5–1.9 s with no partial refresh, so a fake that
+        #: frame takes the time measured in `platform-and-dependency-findings.md`
+        #: § The e-paper panel, with no partial refresh, so a fake that
         #: returned immediately would let a caller drawing on the event loop pass
         #: every test a caller drawing off it passes.
         self.draw_takes_seconds = 0.0
@@ -450,6 +487,9 @@ class RecordingOutput:
 
     def __init__(self, *, connected: bool = True, screen: tuple[int, int] | None = (1920, 1080)) -> None:
         self.shown: list[Path] = []
+        #: Whether the output exists at all. False models a connector the kernel
+        #: stopped listing under a running worker.
+        self.listed = True
         self.connected = connected
         self.screen = screen
         #: Armed to make `show` raise, as a driver that loses its device would.

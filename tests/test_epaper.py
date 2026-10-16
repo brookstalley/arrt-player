@@ -2,10 +2,11 @@
 
 **Everything here would otherwise only be checkable on a Pi with a panel screwed
 to it**, which is why the driver is passed in rather than opened inside. What is
-under test is the four corrections this surface applies at the seam: the panel is
+under test is the corrections this surface applies at the seam: the panel is
 put into sixteen greys and checked rather than asked, a driver that returns
 nothing on failure is turned into one that raises, the frame is turned to match
-how the panel is mounted, and nothing on the shutdown path can throw.
+how the panel is mounted, a label is one refresh rather than a clear and then a
+frame, and nothing on the shutdown path can throw.
 
 The one thing that genuinely needs the library — `open_panel` — is a single
 function, and what it promises (a failure to open is a `SurfaceUnavailable`, not
@@ -14,14 +15,16 @@ where the library is deliberately absent.
 """
 
 import logging
+import sys
+import types
 
 import pytest
 
-from postarr.panel.epaper import GREYSCALE_MODE, EpaperSurface, open_panel
-from postarr.panel.layout import Block, Geometry, Layout
-from postarr.panel.legibility import TypeScale
-from postarr.panel.raster import Raster, Rasterizer
-from postarr.panel.styling import Run
+from arrt_player.panel.epaper import GREYSCALE_MODE, EpaperSurface, open_panel
+from arrt_player.panel.layout import Block, Geometry, Layout
+from arrt_player.panel.legibility import TypeScale
+from arrt_player.panel.raster import Raster, Rasterizer
+from arrt_player.panel.styling import Run
 
 GEOMETRY = Geometry(width_px=8, height_px=4, margin_px=1)
 
@@ -117,7 +120,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
         guarded against and not a hypothetical: the driver comes up in `bw`, and
         `max_colors` says 16 either way.
         """
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         class StaysInOneBit(FakeEpd):
             """Takes the assignment and goes on running in one bit."""
@@ -146,7 +149,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
             def mode(self, value: str) -> None:
                 raise OSError("the SPI bus is not there")
 
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable):
             a_surface(epd=Unsettable())
@@ -165,7 +168,7 @@ class TestAFailureIsRaisedBecauseTheDriverWillNotReportOne:
         """The caller catches one type. Anything the Cython driver throws must
         arrive as that type or the daemon's `_caption` lets it past and the panel
         takes the wall down with it."""
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         epd = FakeEpd()
         epd.raises = OSError("the controller stopped answering")
@@ -206,7 +209,7 @@ class TestTheFrameIsTurnedToMatchTheMounting:
     def test_a_quarter_turn_is_refused_rather_than_half_supported(self):
         """It exchanges width and height, so the layout above would have been
         arranged for the wrong shape — a label laid out landscape, drawn portrait."""
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable) as raised:
             a_surface(rotate_degrees=90)
@@ -282,12 +285,90 @@ class TestOpeningAPanelThatIsNotThere:
         composition root catches `SurfaceUnavailable`, so either one escaping past
         it would stop a daemon whose television is working perfectly.
         """
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         with pytest.raises(SurfaceUnavailable) as raised:
             open_panel("no_such_vendor.no_such_panel")
 
         assert "no_such_vendor.no_such_panel" in str(raised.value), "the operator is not told which device could not be opened"
+
+
+class It8951LikeDriver:
+    """omni-epd's IT8951 driver as far as refreshes go: `display` runs `_display`,
+    which clears the panel (a white frame in the INIT waveform) and then draws the
+    frame in GC16 — two full refreshes, recorded here by waveform."""
+
+    def __init__(self) -> None:
+        self.mode = "bw"
+        self.refreshes: list[str] = []
+
+    def prepare(self) -> None:
+        pass
+
+    def display(self, image: object) -> None:
+        self._display(image)
+
+    def _display(self, image: object) -> None:
+        self.clear()
+        self.refreshes.append("GC16")
+
+    def clear(self) -> None:
+        self.refreshes.append("INIT")
+
+    def sleep(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def opened_through_a_library_that_returns(driver: object, monkeypatch: pytest.MonkeyPatch) -> object:
+    """`open_panel` against a stand-in omni-epd whose factory hands back `driver`."""
+    displayfactory = types.ModuleType("omni_epd.displayfactory")
+    displayfactory.load_display_driver = lambda _name: driver  # type: ignore[attr-defined]
+    omni_epd = types.ModuleType("omni_epd")
+    omni_epd.displayfactory = displayfactory  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "omni_epd", omni_epd)
+    monkeypatch.setitem(sys.modules, "omni_epd.displayfactory", displayfactory)
+    return open_panel("waveshare_epd.it8951")
+
+
+class TestALabelIsOneRefreshNotTwo:
+    """The IT8951 driver clears before every frame, so a label cost two full
+    refreshes, the first the heaviest flashing the panel has. GC16 rewrites every
+    pixel alone; measured on the wall's panel, 1.8–2.3 s a label became 0.57 s."""
+
+    def test_a_label_is_drawn_without_clearing_the_panel_first(self, monkeypatch):
+        driver = It8951LikeDriver()
+        epd = opened_through_a_library_that_returns(driver, monkeypatch)
+
+        a_surface(epd=epd).show(a_layout())
+
+        assert driver.refreshes == ["GC16"], "the panel was cleared before the frame, a second full refresh"
+
+    def test_every_label_after_the_first_is_one_refresh_too(self, monkeypatch):
+        driver = It8951LikeDriver()
+        surface = a_surface(epd=opened_through_a_library_that_returns(driver, monkeypatch))
+
+        surface.show(a_layout())
+        surface.show(a_layout())
+
+        assert driver.refreshes == ["GC16", "GC16"]
+
+    def test_a_driver_that_will_not_take_the_silenced_clear_is_a_surface_that_is_unavailable(self, monkeypatch):
+        """A driver object with fixed attributes refuses the assignment. The
+        composition root catches one type, so the refusal must arrive as it."""
+        from arrt_player.panel.surface import SurfaceUnavailable
+
+        class Fixed:
+            __slots__ = ("mode",)
+
+            def clear(self) -> None: ...
+
+        with pytest.raises(SurfaceUnavailable) as raised:
+            opened_through_a_library_that_returns(Fixed(), monkeypatch)
+
+        assert "waveshare_epd.it8951" in str(raised.value)
 
 
 class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
@@ -300,7 +381,7 @@ class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
     """
 
     def test_a_rasterizer_that_raises_is_a_surface_that_is_unavailable(self):
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         class Broken(FlatRasterizer):
             def render(self, layout):
@@ -321,7 +402,7 @@ class TestTypesettingFailsInsideTheGuardRatherThanBeforeIt:
             def render(self, layout):
                 raise RuntimeError("the text stack could not build a font map")
 
-        from postarr.panel.surface import SurfaceUnavailable
+        from arrt_player.panel.surface import SurfaceUnavailable
 
         epd = FakeEpd()
 

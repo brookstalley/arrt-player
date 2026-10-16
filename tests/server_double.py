@@ -8,26 +8,35 @@ another repository will not have:
 * every request carries a client's token: unknown is `401`;
 * a per-wall route for a wall not assigned to that client is `403`;
 * `GET /client` lists that client's walls with an ETag, `304` on a match;
+* `GET /walls/{wall_id}/manifest/v{major}` serves a wall's manifest at the
+  major it is published at, with an ETag, and `404` at any other major;
 * `POST /client/heartbeat` is `204`, and `400` for a body the contract's schema
-  refuses — so a Player writing a bad one fails here as it would against Arrt.
+  refuses — so a Player writing a bad one fails here as it would against Arrt;
+* `GET /labels/{label_id}` serves a label document with an ETag, `304` on a
+  match, and `403` for a label output another client holds or an unknown id.
 """
 
-import copy
 import hashlib
+import io
+import itertools
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
 from jsonschema import Draft202012Validator
+from PIL import Image
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract"
 ROUTES = json.loads((CONTRACT / "routes.json").read_text(encoding="utf-8"))["routes"]
-MANIFEST_FIXTURE = json.loads((CONTRACT / "fixtures" / "manifest.v1" / "valid" / "minor-2-with-media.json").read_text())
 CLIENT_HEARTBEAT_SCHEMA = json.loads((CONTRACT / "schemas" / "client-heartbeat.v1.schema.json").read_text())
 
 #: The client every test's Player is, unless it says otherwise.
 TOKEN = "the-clients-token"
 CLIENT_ID = "c-the-pi"
+
+#: Where `publish`'s schedule starts: the instant the suite's test clock starts at.
+SCHEDULE_STARTS = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
 
 
 class ServerDouble:
@@ -55,7 +64,20 @@ class ServerDouble:
         self.authorizations: list[str | None] = []
         self.requests: list[tuple[str, str]] = []
         self.echo_heartbeats_to: Path | None = None
+        #: Each label's document, by label id.
+        self.label_documents: dict[str, dict] = {}
+        #: A forced answer for every label request, for the failure tests.
+        self.label_status: int | None = None
         self._default_wall = wall_id
+        #: Each manifest major requested, in order, as the integer asked for.
+        self.majors_requested: list[int] = []
+        #: The major a wall's document is served at, where it is not the one the
+        #: document names: a server that serves the wrong document at a route.
+        self.served_at: dict[str, int] = {}
+        #: Where `publish`'s schedule starts. The suite's test clock by default;
+        #: a test of the running process, on the system clock, moves it to now.
+        self.schedule_starts = SCHEDULE_STARTS
+        self._generation = itertools.count(1)
 
     # -- the app ---------------------------------------------------------------------
 
@@ -64,9 +86,10 @@ class ServerDouble:
         for key, handler in (
             ("client", self.serve_client),
             ("client_heartbeat", self.receive_client_heartbeat),
-            ("manifest", self.serve_manifest),
+            ("manifest_major", self.serve_manifest_major),
             ("media", self.serve_media),
             ("heartbeat", self.receive_heartbeat),
+            ("label", self.serve_label),
         ):
             application.router.add_route(ROUTES[key]["method"], ROUTES[key]["path"], handler)
         return application
@@ -112,14 +135,33 @@ class ServerDouble:
         self.client_heartbeats.append(document)
         return web.Response(status=204)
 
-    async def serve_manifest(self, request: web.Request) -> web.Response:
+    async def serve_label(self, request: web.Request) -> web.Response:
+        client, refused = self._admit(request, None)
+        if refused is not None:
+            return refused
+        if self.label_status is not None:
+            return web.Response(status=self.label_status)
+        label_id = request.match_info["label_id"]
+        document = self.label_documents.get(label_id)
+        if document is None or label_id not in {label["label_id"] for label in client.get("labels", [])}:
+            return web.json_response({"error": "That label output is not this client's."}, status=403)
+        body = json.dumps(document).encode()
+        etag = f'"{hashlib.sha256(body).hexdigest()}"'
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag})
+        return web.Response(body=body, content_type="application/json", headers={"ETag": etag})
+
+    async def serve_manifest_major(self, request: web.Request) -> web.Response:
+        """A wall's manifest at one major, as Arrt mounts it: 404 for a major it does not publish for that wall."""
+        major = int(request.match_info["major"])
+        self.majors_requested.append(major)
         wall_id = request.match_info["wall_id"]
         _client, refused = self._admit(request, wall_id)
         if refused is not None:
             return refused
         manifest = self.manifests.get(wall_id)
-        if manifest is None:
-            return web.json_response({"error": "Nothing has been published for this wall yet."}, status=404)
+        if manifest is None or self.served_at.get(wall_id, manifest["schema"]["major"]) != major:
+            return web.json_response({"error": f"No manifest of major {major} is published for this wall."}, status=404)
         body = json.dumps(manifest).encode()
         etag = f'"{hashlib.sha256(body).hexdigest()}"'
         if request.headers.get("If-None-Match") == etag:
@@ -171,6 +213,17 @@ class ServerDouble:
             {"wall_id": wall_id, "name": wall_id, "output": output}
         )
 
+    def map_label(self, label_id: str, output: str, wall_id: str, document: dict, *, client_id: str = CLIENT_ID) -> None:
+        """Map one of a client's label outputs to a wall, serving `document` for it."""
+        client = self.clients.setdefault(client_id, {"name": client_id, "walls": []})
+        client["labels"] = [label for label in client.get("labels", []) if label["output"] != output]
+        client["labels"].append({"label_id": label_id, "output": output, "wall_id": wall_id})
+        self.label_documents[label_id] = document
+
+    def unmap_label(self, label_id: str) -> None:
+        for client in self.clients.values():
+            client["labels"] = [label for label in client.get("labels", []) if label["label_id"] != label_id]
+
     def unassign(self, wall_id: str) -> None:
         for client in self.clients.values():
             client["walls"] = [wall for wall in client["walls"] if wall["wall_id"] != wall_id]
@@ -179,25 +232,94 @@ class ServerDouble:
         self,
         *work_ids: str,
         wall_id: str | None = None,
-        sequence: int = 4,
-        interval_seconds: int | None = None,
-        renders: dict[str, bytes] | None = None,
+        interval_seconds: int = 180,
+        media: dict[str, bytes] | None = None,
     ) -> dict:
-        """The contract's minor 2 fixture for one wall, carrying these works with real bytes behind their hashes."""
-        document = copy.deepcopy(MANIFEST_FIXTURE)
-        template = document["entries"][0]
-        document["entries"] = []
-        document["directive"]["sequence"] = sequence
-        if interval_seconds is not None:
-            document["rotation"]["interval_seconds"] = interval_seconds
+        """A major 2 feed for one wall: these works in order, each up for `interval_seconds`, from the test clock's start.
+
+        The slots go round the works again, a hundred of them, and the rest of
+        the one-day horizon is a gap. Each work's master is held behind its hash, a small real JPEG unless
+        `media` gives its bytes. Every publish is a new document, as every
+        republish of Arrt's is (its `generated_at` moves), so a Player asking
+        with the last ETag is served it again.
+        """
+        works: dict[str, dict] = {}
         for work_id in work_ids:
-            data = (renders or {}).get(work_id, f"the render of {work_id}".encode())
+            data = (media or {}).get(work_id, _a_master(work_id))
             sha = hashlib.sha256(data).hexdigest()
             self.media[sha] = data
-            entry = copy.deepcopy(template)
-            entry["work_id"] = work_id
-            entry["label"] = {**entry["label"], "title": f"Title of {work_id}"}
-            entry["media"] = {"url": f"/media/sha256-{sha}", "sha256": sha, "bytes": len(data), "content_type": "image/jpeg"}
-            document["entries"].append(entry)
+            works[work_id] = {
+                "media": {"url": f"/media/sha256-{sha}", "sha256": sha, "bytes": len(data), "content_type": "image/jpeg"},
+                "mat_color": "#222222",
+                "label": {"title": f"Title of {work_id}"},
+            }
+        starts = self.schedule_starts
+        horizon_until = starts + timedelta(days=1)
+        slots = []
+        start = starts
+        for position in range(100):
+            if not work_ids or start >= horizon_until:
+                break
+            until = min(start + timedelta(seconds=interval_seconds), horizon_until)
+            slots.append({"work_id": work_ids[position % len(work_ids)], "from": start.isoformat(), "until": until.isoformat()})
+            start = until
+        document = {
+            "schema": {"major": 2, "minor": 0},
+            "generated_at": (starts + timedelta(seconds=next(self._generation))).isoformat(),
+            "playlist": {"id": "pl-1", "name": "A playlist"},
+            "works": works,
+            "schedule": {
+                "horizon": {"from": starts.isoformat(), "until": horizon_until.isoformat()},
+                "slots": slots,
+            },
+        }
         self.manifests[wall_id or self._default_wall] = document
         return document
+
+    def publish_feed(
+        self,
+        slots: list[tuple[str, str, str]],
+        *,
+        staging: tuple[str, ...] = (),
+        wall_id: str | None = None,
+        media: dict[str, bytes] | None = None,
+    ) -> dict:
+        """A one-day major 2 feed for one wall, each work's master held behind its hash.
+
+        `slots` are (work, from, until) as full RFC 3339 instants on 2026-06-21,
+        the test clock's day. `media` overrides a work's bytes; a work whose
+        bytes are given as b"" is published with a hash but nothing held for it.
+        """
+        works: dict[str, dict] = {}
+        for work_id in dict.fromkeys([work for work, _, _ in slots] + list(staging)):
+            data = (media or {}).get(work_id, _a_master(work_id))
+            sha = hashlib.sha256(data or work_id.encode()).hexdigest()
+            if data:
+                self.media[sha] = data
+            works[work_id] = {
+                "media": {"url": f"/media/sha256-{sha}", "sha256": sha, "bytes": len(data), "content_type": "image/jpeg"},
+                "mat_color": "#222222",
+                "label": {"title": f"Title of {work_id}"},
+            }
+        document = {
+            "schema": {"major": 2, "minor": 0},
+            "generated_at": "2026-06-21T00:00:00+00:00",
+            "playlist": {"id": "pl-1", "name": "A playlist"},
+            "works": works,
+            "schedule": {
+                "horizon": {"from": "2026-06-21T00:00:00+00:00", "until": "2026-06-22T00:00:00+00:00"},
+                "slots": [{"work_id": work, "from": start, "until": until} for work, start, until in slots],
+            },
+            "scene": None,
+            "staging": list(staging),
+        }
+        self.manifests[wall_id or self._default_wall] = document
+        return document
+
+
+def _a_master(work_id: str) -> bytes:
+    """A small real JPEG, its colour drawn from the work's id, so each work's hash differs and a wall can compose it."""
+    shade = hashlib.sha256(work_id.encode()).digest()
+    buffer = io.BytesIO()
+    Image.new("RGB", (120, 80), (shade[0], shade[1], shade[2])).save(buffer, format="JPEG", quality=90)
+    return buffer.getvalue()
