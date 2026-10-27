@@ -24,9 +24,9 @@ Arrt deploy runbook), unless step 2 says this release goes Player-first.
 
 ## The first time: off the monorepo checkout
 
-Once per Pi. **`/opt/arrt-player` is the path `deploy/display.service` names, and
-the owner has not yet confirmed it.** Confirm it before running this; if the path
-changes, the unit and this section change together first.
+Once per Pi. **`/opt/arrt-player` is the path `deploy/display.service` names**
+(confirmed by the owner 2026-10-26). If the path changes, the unit and this
+section change together first.
 
 Nothing here touches the old checkout, so it stays the way back (F9).
 
@@ -67,7 +67,8 @@ F6. Install the unit and reload systemd:
         sudo cp /opt/arrt-player/deploy/display.service /etc/systemd/system/
         sudo systemctl daemon-reload
 
-F7. Steps 12–16. Then check the unit runs from the new checkout:
+F7. Steps 12–16, except that where one of them sends you to step 17, go to F9
+    instead. Then check the unit runs from the new checkout:
 
         systemctl show -p WorkingDirectory display.service
 

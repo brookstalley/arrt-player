@@ -64,7 +64,7 @@ jobs:
     # device with a television and no e-paper panel installs neither, and the
     # laptop this product is developed on builds it only against Homebrew's
     # libraries. Folding
-    # these into the display leg would mean either installing the group for every
+    # these into the suite job would mean either installing the group for every
     # run or never running them, and the second is what "the accessibility surface
     # is untested" looks like from the outside.
     #
