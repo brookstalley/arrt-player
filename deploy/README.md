@@ -257,7 +257,7 @@ back first.
 
 `display.service` and `curation.service` are the planes this product is being
 rebuilt onto. Three paths they depend on were unsettled until the cutover and are
-settled now; `operational-spec.md` § Where the two trees live records why each one
+settled now; Arrt's `operational-spec.md` § Where the two trees live records why each one
 won, and this is the short form:
 
 | | |
@@ -275,7 +275,7 @@ reach is not a detail to leave to whoever reads a unit file next.
 Creating that account, giving it the `spi`, `gpio` and `video` groups, moving the art tree
 to `/srv/art`, placing the checkout at `/opt`, and enabling these two units are
 **one change, not five** — any of them landing alone leaves a machine that is
-neither the old arrangement nor the new one. `operational-spec.md` § The Service
+neither the old arrangement nor the new one. Arrt's `operational-spec.md` § The Service
 Account is the authority on the account and on why the five are one change; the
 steps below, in the order they are written, are the authority on the order.
 *(This used to point at a build-plan chunk for the ordering. A plan is archived
@@ -337,7 +337,7 @@ There is no current procedure for installing a new Pi from this repository.
 
 **`--no-create-home` then `usermod --home` is not a detour, it is the finding.**
 An account with `HOME=/nonexistent` cannot run `uv` at all — it fails on its own
-cache directory before doing any work. `operational-spec.md` § The Service Account
+cache directory before doing any work. Arrt's `operational-spec.md` § The Service Account
 records why the answer is a home for tool state rather than a list of `UV_*`
 variables in both units. Create it directly with `--home /var/lib/tvpi` if you are
 doing this fresh; the two-step above is only what this machine's history looked
@@ -520,7 +520,7 @@ finding about the television.
 
 **It will not send anything without `--i-am-at-the-set`.** One of the measurements is
 taken from the television state, which
-`nonfunctional-requirements.md` § The television belongs to whoever is using it
+Arrt's `nonfunctional-requirements.md` § The television belongs to whoever is using it
 forbids shipped code to press at; passing the flag is what says a person is standing
 in front of the set, which is the whole difference between a measurement and an
 interruption. A run with no gesture flag reads the state and is always safe.
@@ -647,7 +647,7 @@ Player's settings (`arrt_player.config.load`) refuse to start without each value
 `.env.example` marks REQUIRED, naming the one that is missing, so that a missing
 deployment value stops the process instead of quietly running against a
 plausible-looking default. The unit's `EnvironmentFile=` is un-prefixed, so a
-missing `.env` stops the unit with the path it wanted (`operational-spec.md`
+missing `.env` stops the unit with the path it wanted (Arrt's `operational-spec.md`
 § Configuration).
 
 ## The dependency moves the television has confirmed

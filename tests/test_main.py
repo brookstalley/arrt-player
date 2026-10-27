@@ -70,7 +70,7 @@ def test_an_unexpected_failure_is_not_swallowed_into_a_tidy_exit(monkeypatch):
 class TestWhetherThisDeviceHasALabelSurface:
     """Two roads to no label, and only one of them is a fault.
 
-    `architecture.md` § Direction: a device with no label surface is a supported
+    Arrt's `architecture.md` § Direction: a device with no label surface is a supported
     configuration, not a broken deployment. A device whose configured panel will
     not open is broken — and still rotates the wall, because the label is an
     annotation of the product and never a precondition for it.

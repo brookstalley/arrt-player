@@ -300,7 +300,7 @@ class FrameDisplay:
         """Whether the set is showing art, and may therefore be asked to change it.
 
         **The television belongs to whoever is using it**
-        (`nonfunctional-requirements.md`). Selecting an image on a set showing a
+        (Arrt's `nonfunctional-requirements.md`). Selecting an image on a set showing a
         programme does not fail politely: it switches the set into art mode and
         takes the screen off the person watching. So nothing reaches the wall
         without asking first, and a no freezes everything — no selection, and the
@@ -517,7 +517,7 @@ class FrameDisplay:
         connection**, which is the other failure and has its own retry. Without
         this, one bad render is a round trip, a WARNING and a rewritten row every
         second for as long as it stays in the theme — an unbounded small-write
-        source on the SD card that `observability-strategy.md` says not to build,
+        source on the SD card that Arrt's `observability-strategy.md` says not to build,
         and a journal in which the rate limiter starts dropping the lines that
         matter.
 

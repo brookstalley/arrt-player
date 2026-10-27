@@ -6,7 +6,7 @@ the keys do: `platform-and-dependency-findings.md` records two presses from one
 starting state, never tested press-and-hold, and labels its own transitions *a
 sketch*. That was fine while the display plane held no power verb. It is the whole
 risk now, because the state the map is missing is the **television** one — a press
-sent there is the interruption `nonfunctional-requirements.md` § The television
+sent there is the interruption Arrt's `nonfunctional-requirements.md` § The television
 belongs to whoever is using it exists to prevent, and it is the one state whose
 readings are identical to dark's on the art channel.
 

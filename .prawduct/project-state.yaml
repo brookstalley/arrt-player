@@ -15,39 +15,68 @@ classification:
   # Product domain. Values: utility, social, marketplace, productivity, b2b,
   # content, automation, developer-tool, education, health, finance,
   # entertainment, communication. May be multiple for hybrid products.
-  domain: null
+  # Drafted 2026-10-26 from README, CLAUDE.md, the code and Arrt's project-state;
+  # confirmed by the owner 2026-10-27.
+  domain: [content, automation]
 
   # Structural characteristics — architectural facts that determine what KINDS
   # of artifacts a product needs. These are a small, stable set (6) that drive
   # artifact generation. null = not applicable.
   structural:
     # User-facing interface. modality: screen|terminal|voice|spatial|minimal; platform: mobile|web|desktop|cross-platform
-    has_human_interface: null
+    has_human_interface:
+      modality: screen     # the Frame, HDMI outputs, and the e-paper label; nobody operates it
+      platform: raspberry-pi
     # Runs without user interaction. trigger: scheduled|event-driven|always-on
-    runs_unattended: null
+    runs_unattended:
+      trigger: always-on   # display.service under systemd
     # Exposes or consumes APIs. consumers: internal|external|both
     # If it exposes one, record the API decisions in design_decisions below.
-    exposes_programmatic_interface: null
+    exposes_programmatic_interface: false  # it serves nothing; it consumes arrt-contract's routes and the Frame's art API
     # Multiple distinct user types. parties: [list of distinct user types]
-    has_multiple_party_types: null
+    has_multiple_party_types: false  # the operator; the household sees the wall but has no interface
     # Handles sensitive information. categories: [PII, financial, health, etc.]; regulatory: [list]
-    handles_sensitive_data: null
+    handles_sensitive_data:
+      categories: [credentials]  # the client token and the television's token
+      regulatory: []
     # Multiple processes or services communicating at runtime. topology: monolith-with-workers|client-server|microservices|pipeline
-    multi_process_distributed: null
+    multi_process_distributed:
+      topology: client-server  # a client of the Arrt server over HTTP, drawing from a local cache
 
   # Domain-specific characteristics — what makes THIS product unique in its domain.
   # Dynamically identified, not from a predefined list.
   # Each: { characteristic: string, implications: [string] }
-  domain_characteristics: []
+  domain_characteristics:
+    - characteristic: "The television belongs to whoever is using it"
+      implications:
+        - "Shipped code never presses power and never touches a set that is not in art mode (Arrt nonfunctional-requirements.md)."
+        - "A hard kill holds the art channel for minutes, so the daemon stops on SIGTERM only."
+    - characteristic: "Failure is silent by construction"
+      implications:
+        - "The only feedback is a picture on a wall, so state reaches the server as a heartbeat and the journal as structured events."
+    - characteristic: "The label is the household's accessibility surface"
+      implications:
+        - "Legibility is measured physically (viewing distance, angular size), and the typesetting suite runs in CI as its own job."
+
 
   # Risk and complexity profile.
   risk_profile:
     # Overall risk: low, medium, high.
     # Drives discovery depth (methodology/discovery.md "Risk Calibration").
-    overall: null
+    overall: low-medium  # one household, but it drives real hardware somebody may be watching
     # Specific risk factors identified during classification.
     # Each: { factor, level (low/medium/high), rationale }
-    factors: []
+    factors:
+      - factor: "Samsung firmware may remove the art-mode API"
+        level: medium
+        rationale: "The vendor owns the capability the Frame output rests on. The set is held at a firmware version; see .prawduct/artifacts/samsung-tv-state-findings.md."
+      - factor: "E-paper driver stack is dormant upstream"
+        level: medium
+        rationale: "Pinned, and passed into EpaperSurface rather than opened by it; see platform-and-dependency-findings.md."
+      - factor: "Contract drift with the server"
+        level: low
+        rationale: "Taken at a released arrt-contract tag and tested against its schemas and fixtures."
+
 
   # Prior art surfaced during discovery (via web search or domain knowledge).
   # Informational — informs scope decisions, not a gate.
@@ -62,10 +91,20 @@ classification:
 product_definition:
   # One-sentence description of what this product is and why it exists. The
   # near-term and North Star live in prose in the product brief's Vision section.
-  vision: null
+  vision: >
+    The player at each wall of an Arrt installation: told the server's address and
+    its own token, it learns which walls it shows on which outputs, pulls each
+    wall's programming and media into a local cache, and draws only from that
+    cache, so a server that is down never blanks a wall.
 
   # Measurable success criteria. What does "this worked" look like?
-  goals: []
+  goals:
+    - "A wall keeps showing art when the server is down or restarting."
+    - "The Player never interrupts somebody watching the television."
+    - "A failure reaches the server's heartbeat view or the journal, not only the wall."
+    - "The e-paper label is legible from where the household views the work."
+    - "The Player makes only the requests arrt-contract's routes name, and holds to its schemas."
+
 
   # Who uses this product and what they need.
   users:
@@ -75,18 +114,47 @@ product_definition:
     #   technical_level: none | basic | intermediate | advanced
     #   primary_needs: [string]
     #   constraints: [string]
-    personas: []
+    personas:
+      - name: "The operator"
+        description: "The single owner: installs the Pi, pairs it with the server, assigns walls. Technically expert."
+        technical_level: advanced
+      - name: "The household (viewers)"
+        description: "Everyone who sees the wall. No interface; they experience the artwork and the label beside it."
+        technical_level: none
+
 
   # Core user flows (UI), operations (API), or pipeline stages (automation).
   # Each: { name, description, steps (optional), priority (must-have/nice-to-have) }
-  core_flows: []
+  core_flows:
+    - name: "Pair and report outputs"
+      description: "Started with a server address and token, the Player reports its outputs and is assigned walls."
+      priority: must-have
+    - name: "Pull into the cache"
+      description: "Each wall's manifest and media are pulled into CACHE_DIR; drawing reads the cache alone."
+      priority: must-have
+    - name: "Draw to outputs"
+      description: "The Frame over its art API, HDMI connectors via KMS, and the e-paper label typeset with Pango."
+      priority: must-have
+    - name: "Heartbeat"
+      description: "State and problems reach the server on a heartbeat, so a failure is visible away from the wall."
+      priority: must-have
+
 
   # Scope decisions.
   scope:
-    v1: []                # Must have for initial release
+    v1:                   # Must have for initial release; confirmed 2026-10-27 as what runs today
+      - "Pair and report outputs"
+      - "Pull into the cache"
+      - "Draw to outputs"
+      - "Heartbeat"
     accommodate: []       # Design for but don't build yet; every alignment pass keeps these possible
     later: []             # Not needed for v1 to be useful
-    never: []             # Explicitly out of scope. Each: { item, rationale }
+    never:
+      - item: "Curation, discovery or any server-side state"
+        rationale: "Arrt's. The Player reads the contract and nothing else."
+      - item: "Pressing power on the television from shipped code"
+        rationale: "The set belongs to whoever is using it; tools/power_probe.py alone, by hand, with somebody at the set."
+
 
   # Product identity.
   product_identity:
@@ -94,7 +162,7 @@ product_definition:
     personality: null     # Brand personality, mood (null for internal tools)
     visual_preferences: null  # Look/feel preferences (null for non-visual products)
 
-  platform: null          # Where this runs (web, mobile, CLI, etc.)
+  platform: "Raspberry Pi (Debian 13, aarch64) under systemd"
 
   # Non-functional requirements, calibrated to risk.
   nonfunctional:
@@ -156,6 +224,7 @@ design_decisions:
 #   priority: high | medium | low
 
 open_questions: []
+
 
 # =============================================================================
 # USER EXPERTISE PROFILE

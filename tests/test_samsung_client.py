@@ -14,6 +14,7 @@ the connection it can no longer reason about.
 
 import asyncio
 import json
+import logging
 
 import pytest
 from samsungtvws.exceptions import HttpApiError, ResponseError
@@ -29,6 +30,7 @@ class StubArt:
     def __init__(self) -> None:
         self.entries: list[dict] = []
         self.closed = 0
+        self.close_raises: Exception | None = None
         self.selected: list[str] = []
         self.slideshow_duration: int | None = None
         self.brightness: list[int] = []
@@ -102,6 +104,8 @@ class StubArt:
 
     async def close(self) -> None:
         self.closed += 1
+        if self.close_raises is not None:
+            raise self.close_raises
 
     async def available(self, category: str | None = None) -> list[dict]:
         if self.listing_raises is not None:
@@ -816,3 +820,16 @@ async def test_the_rest_only_client_opens_no_remote_control_channel_and_no_art_c
     finally:
         await client.close()
     assert client.session.closed, "the REST session outlived the read"
+
+
+async def test_a_close_that_fails_reaches_the_journal(tv: SamsungTv, art: StubArt, caplog):
+    """A set still holding an abandoned art channel refuses the next connection for
+    minutes. The failed close is the only trace of that, so it must clear the
+    journal's INFO floor (`logs.py`), not sit below it as DEBUG."""
+    art.close_raises = OSError("connection reset")
+    with caplog.at_level(logging.INFO):
+        await tv.close()
+
+    failures = [r for r in caplog.records if getattr(r, "event", None) == "tv.close_failed"]
+    assert failures, "the failed close never reached the journal"
+    assert all(r.levelno >= logging.WARNING for r in failures)

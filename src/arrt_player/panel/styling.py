@@ -19,7 +19,7 @@ what is being set.
 
 **Nothing here is a markup language, and that is the whole point.** The 2024
 label interpolated museum text into a Pango markup string, so a title containing
-`<` produced mangled type or a parse failure (`data-model.md`). Styling a run by
+`<` produced mangled type or a parse failure (Arrt's `data-model.md`). Styling a run by
 wrapping it in `<b>` would reintroduce that defect on the exact surface it was
 fixed for, so a run is a *range* with properties and the renderer applies
 attributes to ranges. A title may contain any character at all and none of it

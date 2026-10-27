@@ -6,7 +6,7 @@ thing it reads from the contract, the routes, comes through the package.
 
 **Narrowed 2026-09-30 (wave 2b Chunk 04), as the norm's own row scheduled.** The
 channel from curation is now the per-wall manifest and content-addressed media,
-pulled into a Player-local cache (`architecture.md` § Direction). So one module,
+pulled into a Player-local cache (Arrt's `architecture.md` § Direction). So one module,
 `src/arrt_player/pull.py`, may open an HTTP client. The paths it spells are only
 the routes the contract's `routes()` names; renders it fetches from the addresses
 the manifest's entries give, which is the contract's design. Only the entry point
@@ -31,7 +31,7 @@ here.** A check over an empty package passes vacuously, which is the green test
 that cannot fail this repo explicitly rejects — and the window in which display
 code exists unguarded is exactly the window in which the shortcut gets written.
 The norm index named this file for three sessions while it did not exist; that is
-recorded in `project-preferences.md` as this repo's cautionary example, and the
+recorded in Arrt's `project-preferences.md` as that repo's cautionary example, and the
 row moves back to `Test` naming this path because the file now does what the row
 claims.
 

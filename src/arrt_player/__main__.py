@@ -70,7 +70,7 @@ def label_surface(settings: PanelSettings) -> LabelSurface | None:
 
     **The three outcomes are three different things and are reported
     differently.** No `EPD_DEVICE` means this device draws no label, which
-    `architecture.md` § Direction makes a supported deployment rather than a
+    Arrt's `architecture.md` § Direction makes a supported deployment rather than a
     fault — `None`, and nothing said. A configured panel that will not open is a
     device that is *meant* to have a label and does not, which is worth saying
     out loud — hence a raise rather than a second `None`, because two roads to

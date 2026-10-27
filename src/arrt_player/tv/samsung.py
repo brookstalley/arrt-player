@@ -395,8 +395,10 @@ class SamsungTv(TvClient):
         except _LIBRARY_FAILURES as exc:
             # Closing is best-effort by definition: this runs while something has
             # already gone wrong, and a failure here must not replace the real
-            # error with a tidier one. Said out loud rather than swallowed.
-            log.debug("closing the television connection raised %s", _named(exc), extra={"event": "tv.close_failed"})
+            # error with a tidier one. Said out loud rather than swallowed, and at
+            # WARNING: a set still holding the abandoned channel refuses the next
+            # connection for minutes, and this line is the only trace of why.
+            log.warning("closing the television connection raised %s", _named(exc), extra={"event": "tv.close_failed"})
 
     async def disable_native_slideshow(self) -> None:
         """Tell the set to stop rotating on its own.
@@ -569,7 +571,7 @@ class SamsungTv(TvClient):
         is `_rest_request("")` with the default method, a GET of `/api/v2/`, which
         is what `power_probe.py` samples as its read-only half. It presses no key
         and changes nothing on the set, so the rule that the television belongs to
-        whoever is using it (`nonfunctional-requirements.md`) is not engaged.
+        whoever is using it (Arrt's `nonfunctional-requirements.md`) is not engaged.
 
         **Through the art client's own REST helper**, which is what the library's
         `on()` uses: it rides the HTTP session the art client already owns and

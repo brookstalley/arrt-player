@@ -22,7 +22,7 @@ whole object through untouched.
 
 **Written every 60 seconds, and that number is a wear budget as much as a
 freshness one.** This file is rewritten forever on the same SD card the
-catalogue lives on, and the storage risk in `operational-spec.md` rests on this
+catalogue lives on, and the storage risk in Arrt's `operational-spec.md` rests on this
 product having no unbounded small-write source. Borrowing the manifest poll's
 one-second cadence by symmetry would commit ~86,400 write-and-rename cycles a
 day to that medium in perpetuity. The ceiling on the other side is how long a

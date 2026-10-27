@@ -121,7 +121,7 @@ cost one call on every rotation that is about to succeed" — a trade priced aga
 a wasted call, with the cost on the other side unmeasured. Measured, it is a
 television that grabs itself back from its owner every few minutes. The plane now
 asks `get_artmode` before every selection and declines unless it says `on`; see
-`nonfunctional-requirements.md` § "The television belongs to whoever is using
+Arrt's `nonfunctional-requirements.md` § "The television belongs to whoever is using
 it".
 
 **The asymmetry is worth holding on to**, because it decides what a fix can rely
@@ -167,7 +167,7 @@ Two exits were tried and neither works:
   packet is reaching an interface that is not listening.
 
 `KEY_POWER` over the remote-control channel **works, and this document was wrong
-to call it untried** — `platform-and-dependency-findings.md` § Waking the set
+to call it untried** — `platform-and-dependency-findings.md` § Detecting that the set is actually in art mode
 records it measured, needing *two* presses from standby: the first brings
 `PowerState` to `'on'` with no art app running, the second brings the art app up.
 That is the same two-step this document's own state table implies, since the

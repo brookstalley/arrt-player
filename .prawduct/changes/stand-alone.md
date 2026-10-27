@@ -20,8 +20,8 @@ its own, with its history.
   learnings and the Pi move runbook. The runbook now drives the standalone checkout
   and has a one-time move off the monorepo checkout.
 
-### Waiting on the owner
-The `/opt/arrt-player` path needs confirming before the Pi moves (Arrt's chunk 06).
+### Confirmed by the owner
+The `/opt/arrt-player` path, on 2026-10-26, before the Pi moves (Arrt's chunk 06).
 
 ## Consumer note
 none: the repository moved and the running Player did not; the Pi is unchanged until it moves.

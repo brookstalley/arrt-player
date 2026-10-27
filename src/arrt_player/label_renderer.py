@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 #:
 #: **The whole of the product's label budget rather than a fraction of it.** The
 #: label must match what the television is showing within 15 s of the picture
-#: changing (`nonfunctional-requirements.md` § Performance), and the panel's own
+#: changing (Arrt's `nonfunctional-requirements.md` § Performance), and the panel's own
 #: refresh is most of that — so this is the loosest bound that still honours the
 #: requirement, and a draw that has passed it has already missed the thing it was
 #: for. A healthy 16-level frame takes well under that (`platform-and-dependency-findings.md` § The e-paper panel);

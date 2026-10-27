@@ -148,7 +148,7 @@ class Geometry:
     **Geometry is a parameter, never a constant.** The deployment may hold
     several devices with panels of different sizes, and a device may draw its
     label into the mat area around an artwork rather than onto a panel at all
-    (`architecture.md` § Direction). A module-level 1448×1072 would make the
+    (Arrt's `architecture.md` § Direction). A module-level 1448×1072 would make the
     second device a rewrite instead of a configuration.
     """
 
@@ -565,7 +565,7 @@ class _Placement:
         always mandatory — but so is the title, so a record with no maker reported
         its wrapping title as a name too narrow to set. That fires the warning on
         an ordinary label, which is how a warning stops being read, and this one
-        is load-bearing beyond its own report (`observability-strategy.md`).
+        is load-bearing beyond its own report (Arrt's `observability-strategy.md`).
 
         **Asked of every line the name occupies, not the leading one.** The ladder
         exists to spread a name across two lines, so a check that looked only at
