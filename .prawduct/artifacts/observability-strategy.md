@@ -10,8 +10,8 @@ last_validated: 2026-10-27
 # Observability Strategy — Arrt Player
 
 **What this covers.** What the Player says about itself, where it goes, and how
-an operator finds a failure from it. It describes the code as it stands on
-`feature/discovery` at 2026-10-27; every claim names the `file:symbol` it rests
+an operator finds a failure from it. It describes the code as it stood on
+2026-10-27; every claim names the `file:symbol` it rests
 on.
 
 **Why it matters more here than usual.** The Player runs unattended and its only
@@ -374,7 +374,9 @@ The `tools/` scripts drive hardware and are not observability tools.
 
 ## Known gaps
 
-Observed in the code while writing this; none is fixed here.
+Observed in the code while writing this. Item 2 was fixed with this artifact.
+Items 1 and 3–5 are open as issues #10 and #12; item 6 is part of the
+`deploy/README.md` update due when the Pi moves.
 
 1. **Most `pull.*` lines do not say which wall.** With several walls in one
    process, `pull.unreachable`, `pull.refused`, `pull.manifest_refused`,

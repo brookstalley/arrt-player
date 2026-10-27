@@ -14,7 +14,7 @@ last_validated: 2026-10-27
 **What this covers.** The Player's own topology: its one process, what runs
 inside it, the channels it holds open, what it keeps on disk, and the seams that
 let the suite run with no television, screen or panel. It describes the code as
-it stands on `feature/discovery` at 2026-10-27; every claim names the
+it stood on 2026-10-27; every claim names the
 `file:symbol` it rests on.
 
 **What it points at instead of restating.** The server, and every rule the two
