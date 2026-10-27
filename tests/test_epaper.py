@@ -220,7 +220,7 @@ class TestTheFrameIsTurnedToMatchTheMounting:
 class TestTheSurfaceSaysWhatItKnowsAndNeverStopsTheWall:
     def test_the_geometry_is_the_configured_one(self):
         """Configuration wins because the layout is arranged before anything is
-        drawn, and `operational-spec.md` § Configuration makes the panel a
+        drawn, and Arrt's `operational-spec.md` § Configuration makes the panel a
         deployment value."""
         assert a_surface().geometry == GEOMETRY
 

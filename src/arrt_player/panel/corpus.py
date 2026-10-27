@@ -38,7 +38,7 @@ optimistic case.
 
 **Copied rather than imported, and the duplication is the architecture.** The
 Player does not depend on Arrt: it reads its feed and nothing else
-(`architecture.md` § Direction). Nor can it read these from the contract
+(Arrt's `architecture.md` § Direction). Nor can it read these from the contract
 package at run time, because the preview tool that draws them runs on a Player
 where that package, a test dependency, is not installed. What these records are
 *for* is being the feed's label blocks, which is exactly what they are: the keys

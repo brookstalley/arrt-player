@@ -77,7 +77,7 @@ PANEL_OUTPUT: Final[str] = "epd-0"
 
 #: How often a label renderer asks the server for its label document. **The
 #: label's latency budget is 15 s from a picture changing**
-#: (`nonfunctional-requirements.md`), and most of that is the panel's own redraw;
+#: (Arrt's `nonfunctional-requirements.md`), and most of that is the panel's own redraw;
 #: a one-second poll with an ETag costs a 304 a second.
 DEFAULT_LABEL_POLL_SECONDS: Final[float] = 1.0
 
@@ -163,7 +163,7 @@ DEFAULT_TV_CONNECT_TIMEOUT_SECONDS: Final[float] = 30.0
 #: **A television that is reachable and refuses one image is a different fault
 #: from one that is asleep**, and it does not back off with the connection: the
 #: pass would otherwise retry it every second, each attempt costing a round trip,
-#: a WARNING and a row rewritten. `observability-strategy.md` sizes writes on this
+#: a WARNING and a row rewritten. Arrt's `observability-strategy.md` sizes writes on this
 #: medium deliberately, and an unbounded small-write source on an SD card is the
 #: thing it says not to build. Wall time rather than elapsed, so the wait survives
 #: a restart — a crash loop must not turn into a retry loop.
@@ -351,7 +351,7 @@ class PanelSettings:
 
     #: omni-epd's identifier for this device's panel, or empty for a device that
     #: has none. **Empty is a supported deployment, not a broken one**
-    #: (`architecture.md` § Direction): a wall whose device drives a television
+    #: (Arrt's `architecture.md` § Direction): a wall whose device drives a television
     #: and nothing else is exactly what most of them are, and it must not be
     #: reported as a fault. `omni_epd.mock` drives the library's own no-op device
     #: on a machine where the panel is absent but the driver is installed.
@@ -371,7 +371,7 @@ class PanelSettings:
     def panel_lines(self) -> dict[str, object]:
         """The panel's part of the client's startup line.
 
-        This plane's own panel geometry, per `operational-spec.md`
+        This plane's own panel geometry, per Arrt's `operational-spec.md`
         § Configuration — a wrong panel otherwise shows up as a label that renders
         off the edge of a display nobody is looking at closely.
         """

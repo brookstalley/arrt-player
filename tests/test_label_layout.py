@@ -810,7 +810,7 @@ class TestTheNameLadder:
         contrivance.** The break is chosen because the *name* will not hold at this
         width, and the height is what leaves slack to grow into; a cramped surface
         reaches rung two with nothing left. Such a surface is the mat strip beside
-        an artwork rather than this wall's panel, and `architecture.md`
+        an artwork rather than this wall's panel, and Arrt's `architecture.md`
         § Direction names that device.
         """
         narrow_and_tall = Geometry(width_px=1000, height_px=1300, margin_px=40)
@@ -873,7 +873,7 @@ class TestTheNameLadder:
         **Narrow rather than short, because that is where the two diverge.** On a
         wide surface the name wraps to two rows at most and breaking it costs a
         line box for nothing; on a narrow one — a device drawing its label into a
-        strip beside the artwork, which `architecture.md` § Direction names — the
+        strip beside the artwork, which Arrt's `architecture.md` § Direction names — the
         joined line wraps far enough that the break wins by several sizes.
 
         Compared against the same name handed in pre-joined, which is the

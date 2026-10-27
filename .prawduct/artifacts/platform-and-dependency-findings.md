@@ -39,7 +39,7 @@ upstream repositories on 2026-07-19 — it is not recalled from the original wor
 > product-wide. It is not any more: the two-plane split (2026-07-19) gave the
 > curation plane its own interpreter, and **the curation plane runs Python 3.14**
 > on a uv-managed standalone build, with `3tears` left unmodified. See
-> `operational-spec.md` § The Curation Interpreter and `project-preferences.md`,
+> Arrt's `operational-spec.md` § The Curation Interpreter and `project-preferences.md`,
 > which records the version per plane.
 >
 > **The "3.14 was rejected" bullet below is retired and must not be cited.** Its
@@ -190,7 +190,7 @@ the only thing that changes these.
 
 **The panel loads clean and reports 1448x1072**, matching § Target hardware.
 Full-frame draw took **1.5–1.9 s** against the 15 s label budget in
-`nonfunctional-requirements.md` — roughly 10× headroom, so that
+Arrt's `nonfunctional-requirements.md` — roughly 10× headroom, so that
 `[ASSUMPTION: 15 s | LOW impact]` is safe by a wide margin. `gray16` (1.49 s)
 measured *faster* than `bw` (1.86 s), which is counterintuitive; that is one
 sample and nothing should be designed around it.
@@ -199,7 +199,7 @@ sample and nothing should be designed around it.
 
 **`modes_available` is `('bw', 'gray16')` and the driver's default is `bw`.**
 Every legibility claim this product makes — the 16-level greyscale panel in
-`nonfunctional-requirements.md`, the whole of `design_decisions.accessibility_approach`
+Arrt's `nonfunctional-requirements.md`, the whole of `design_decisions.accessibility_approach`
 — assumes 16 grey levels. A driver that does not explicitly set `mode = "gray16"`
 gets 1 bit.
 
@@ -640,7 +640,7 @@ over SSH:
   2026-08-11 at the cutover**: `tvpi` was created (uid 102, `--system`, `nologin`,
   groups `spi` and `gpio`, home `/var/lib/tvpi` for tool state), and the
   `/home/tvpi/` paths both units named were retired to `/srv/art` and
-  `/opt/samsung-frame-art-loader` rather than created. See `operational-spec.md`
+  `/opt/samsung-frame-art-loader` rather than created. See Arrt's `operational-spec.md`
   § The Service Account and `deploy/README.md` § The cutover.
 - ~~**The art tree is effectively empty.**~~ **Restored, and then moved.** It was
   refilled after this was written, and the cutover moved it to `/srv/art` — 168

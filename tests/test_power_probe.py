@@ -13,7 +13,7 @@ be convenient, and neither is exercised by running it:
 
 - **it refuses to send a power key without `--i-am-at-the-set`**, because it presses
   power on a real television and one measurement is deliberately taken from the
-  television state — the state `nonfunctional-requirements.md` § The television
+  television state — the state Arrt's `nonfunctional-requirements.md` § The television
   belongs to whoever is using it forbids shipped code to press at, legitimate here
   only because somebody is standing in front of the set; and
 - **it refuses to write the art channel's token file**, because both channels

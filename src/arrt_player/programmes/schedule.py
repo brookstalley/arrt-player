@@ -34,7 +34,7 @@ programme switched to from another major puts its own picture of that work up
 work the feed names is composed for the display's geometry and the feed's mat
 mode, in a thread, one at a time, and before its slot where the cache allows:
 a compose takes seconds on a Pi, and the loop must keep polling, beating and
-watching the set meanwhile (`nonfunctional-requirements.md` § Performance). A
+watching the set meanwhile (Arrt's `nonfunctional-requirements.md` § Performance). A
 work whose picture is not composed yet is passed over for this pass, as a work
 whose media is not cached is. Its file is named by its composition key, so a
 display can learn what to prepare before the file exists.

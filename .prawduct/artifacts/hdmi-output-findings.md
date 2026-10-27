@@ -61,7 +61,7 @@ deep sleep both fit (inference).
 What it means for the Player: **an HDMI wall whose screen is not seen looks
 exactly like an empty socket**, and the Player says so (`screen.absent`) and
 reports `connected: false` for the output. It does not try to wake the screen:
-nothing over CEC, which is a power act (`nonfunctional-requirements.md`
+nothing over CEC, which is a power act (Arrt's `nonfunctional-requirements.md`
 § The television belongs to whoever is using it). The firmware's log
 (`sudo vclog --msg`) is the place to look when a screen that is plugged in is
 not seen.

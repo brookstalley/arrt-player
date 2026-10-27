@@ -121,7 +121,7 @@ cost one call on every rotation that is about to succeed" — a trade priced aga
 a wasted call, with the cost on the other side unmeasured. Measured, it is a
 television that grabs itself back from its owner every few minutes. The plane now
 asks `get_artmode` before every selection and declines unless it says `on`; see
-`nonfunctional-requirements.md` § "The television belongs to whoever is using
+Arrt's `nonfunctional-requirements.md` § "The television belongs to whoever is using
 it".
 
 **The asymmetry is worth holding on to**, because it decides what a fix can rely

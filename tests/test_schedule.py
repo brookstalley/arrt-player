@@ -574,7 +574,7 @@ async def test_a_directory_inside_the_composed_one_is_left_alone(schedule, displ
 
 
 async def test_every_line_a_composition_logs_names_its_work(schedule, display, media_root, caplog):
-    """`observability-strategy.md` § Correlation: a work's journal is one filter on its id, the thread's lines included."""
+    """Arrt's `observability-strategy.md` § Correlation: a work's journal is one filter on its id, the thread's lines included."""
     from arrt_player.logs import WorkCorrelationFilter
 
     caplog.handler.addFilter(WorkCorrelationFilter())

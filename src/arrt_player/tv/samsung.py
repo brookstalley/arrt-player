@@ -569,7 +569,7 @@ class SamsungTv(TvClient):
         is `_rest_request("")` with the default method, a GET of `/api/v2/`, which
         is what `power_probe.py` samples as its read-only half. It presses no key
         and changes nothing on the set, so the rule that the television belongs to
-        whoever is using it (`nonfunctional-requirements.md`) is not engaged.
+        whoever is using it (Arrt's `nonfunctional-requirements.md`) is not engaged.
 
         **Through the art client's own REST helper**, which is what the library's
         `on()` uses: it rides the HTTP session the art client already owns and

@@ -29,10 +29,16 @@ needs is filed against Arrt.
 
 **Where artifacts live.** The Player's own findings, the deployment record and the
 Pi runbook are here (`.prawduct/`, `deploy/`). An artifact that code or a norm
-cites and that is not under `.prawduct/artifacts/` here
-(`player-contract.md`, `accessibility-spec.md`, `labels-and-surfaces.md`,
-`nonfunctional-requirements.md`, `architecture.md` and the rest) is Arrt's, in
-its `.prawduct/artifacts/`.
+cites and that is not under `.prawduct/artifacts/` here (`player-contract.md`,
+`accessibility-spec.md`, `labels-and-surfaces.md` and the rest) is Arrt's, in its
+`.prawduct/artifacts/`.
+
+Six names exist in both repositories: `architecture.md`, `data-model.md`,
+`security-model.md`, `nonfunctional-requirements.md`, `operational-spec.md` and
+`observability-strategy.md`. Arrt's hold the norms (each `§ Direction`, and
+§ The television belongs to whoever is using it); the ones here describe what the
+Player's code does and point at Arrt's for the rule. **Cite Arrt's as "Arrt's
+`<name>.md`"**, so a bare name means this repo's copy.
 
 ## Dev commands
 
@@ -80,7 +86,7 @@ and `tools/power_probe.py`, all run by hand.
 **`tools/power_probe.py` presses power on the real television, and it is the only
 thing in this repo that does.** It refuses to send anything without
 `--i-am-at-the-set`, because one measurement is taken from the state that
-`nonfunctional-requirements.md` § The television belongs to whoever is using it
+Arrt's `nonfunctional-requirements.md` § The television belongs to whoever is using it
 forbids shipped code to press at, which is legitimate only with somebody watching
 the set. Stop the daemon first. Its docstring carries the rest, and
 `deploy/README.md` § Measuring what the power keys do carries the paths.
