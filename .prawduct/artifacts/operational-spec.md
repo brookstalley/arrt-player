@@ -48,8 +48,7 @@ least 45 and `KillSignal=SIGTERM`.
 § The first time moves a Pi off the shared monorepo checkout once, and § Steps
 moves it between revisions of this repository. The release's own asks are in
 `deploy/README.md`'s dated sections and `.env.example`, which runbook step 2 diffs.
-The runbook's header records that it has not yet been run against the standalone
-checkout and that § The first time has never been run.
+The runbook's header records when each section last ran.
 
 **Order with the server.** Server first unless a release says otherwise (runbook
 § When to use this; `deploy/README.md` § Displays and labels). A Player older than
@@ -162,7 +161,9 @@ Nothing pages anyone. A failure is noticed when somebody looks at one of these.
   § Risks); after a reboot, diagnose from the server's heartbeat age.
 
 Events worth searching for: `client.started`, `client.wall_started`,
-`pull.adopted`, `rotation.selected` (a working start); `pull.unreachable`,
+`manifest.adopted`, `rotation.selected` (a working start; `pull.adopted` appears
+only when the server serves a feed the cache does not already hold, so a restart
+on a current cache has none); `pull.unreachable`,
 `client.unreachable` (server gone, wall unaffected); `pull.refused`,
 `client.refused` (a 401 or 403 is configuration); `pull.media_failing`,
 `pull.work_skipped`; `pull.crashed`, `client.worker_crashed`,

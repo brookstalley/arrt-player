@@ -86,7 +86,10 @@ the television.
 - Settings › Clients shows the client's outputs (`hdmi-a-1` connected at its
   screen's size) and how long ago it reported.
 - The Player's journal shows `client.started`, then `client.wall_started`,
-  `pull.adopted` and `rotation.selected` for each work.
+  `manifest.adopted` and `rotation.selected` for each work. `pull.adopted`
+  follows only when the server serves a feed the cache does not already hold:
+  a start on a current cache gets a 304 and logs none. `rotation.selected`
+  needs a lit screen; a wall reporting `dark` draws nothing.
 - On an HDMI wall, `screen.absent` means the Pi sees no screen on that
   connector. Unless the cable has been pulled, `sudo vclog --msg` is where to
   look (`hdmi-output-findings.md`).

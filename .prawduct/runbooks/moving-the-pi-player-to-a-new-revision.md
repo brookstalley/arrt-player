@@ -1,9 +1,11 @@
 # Moving the Pi's Arrt Player to a new revision
 
-Owner: the operator · Last executed: 2026-10-11, 81e2d15e → 75770fe8, in the
-monorepo checkout (no new setting or unit, so steps 7, 10–11 and the way back
-were not exercised). Not yet run against the standalone checkout, and § The first
-time has never been run.
+Owner: the operator · Last executed: 2026-10-27, § The first time, F1–F7, from
+the monorepo checkout to f7937da in the standalone one (F8 is the owner's call
+and the way back, F9, was not exercised). § Steps last ran 2026-10-11,
+81e2d15e → 75770fe8, in the monorepo checkout (no new setting or unit, so steps
+7, 10–11 and the way back were not exercised), and has not yet run against the
+standalone checkout.
 
 ## When to use this
 You have a newer commit of this repo and the Pi beside the wall runs an older
@@ -12,8 +14,9 @@ one. Check on the Pi which checkout the running unit uses:
     systemctl show -p WorkingDirectory display.service
 
 - `WorkingDirectory=/opt/arrt-player` → read the commit with
-  `git -C /opt/arrt-player rev-parse --short HEAD`. If it already prints the
-  commit you want → nothing to do. Otherwise → § Steps.
+  `sudo -u tvpi git -C /opt/arrt-player rev-parse --short HEAD` (as your own
+  user, git refuses another account's checkout as "dubious ownership"). If it
+  already prints the commit you want → nothing to do. Otherwise → § Steps.
 - `WorkingDirectory=/opt/samsung-frame-art-loader/arrt-player` → the Pi still
   runs from the checkout of Arrt's repository both products shared before
   2026-10-26. That checkout cannot reach this repo's commits → § The first time,
