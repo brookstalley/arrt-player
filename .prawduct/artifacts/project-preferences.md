@@ -33,8 +33,9 @@ Arrt's `.prawduct/artifacts/`.
 - **Type annotations**: every function signature in `src/` and `tools/` (ruff
   `ANN`); the test tree is exempt.
 - **Imports**: strict stdlib / third-party / local grouping (ruff `I`).
-- **Logging vs print**: `logging` only in `src/`; `print()` is the output of the
-  hand-run tools in `tools/`, and of nothing else.
+- **Logging vs print**: `logging` only in `src/`; `print()` only where a
+  `T201` carve-out in `pyproject.toml` `[tool.ruff.lint.per-file-ignores]` says
+  why, or a per-line waiver does.
 
 ## Testing
 
@@ -142,7 +143,7 @@ the Direction entry it points at.
 | black formatting, line-length 130 | Linter | `[tool.black]` in `pyproject.toml`; CI's `lint` job | janitor | Removes formatting from review entirely. |
 | snake_case functions, PascalCase classes | Linter | ruff `N` (in `ALL`), `N818` ignored, `pyproject.toml` | janitor | Mechanical. `N818` is ignored because exception class names are public and already read as errors. |
 | Strict stdlib / third-party / local import grouping | Linter | ruff `I` (in `ALL`), `pyproject.toml` | janitor | Mechanical; it should cost no review attention. |
-| `logging` only; `print()` reserved for deliberate CLI output | Linter | ruff `T20` (in `ALL`), `pyproject.toml`, with one per-file carve-out: `tools/*`, hand-run at a terminal, where `print()` is the output; anywhere else a deliberate report is waived per line as `# noqa: T201 -- <reason>` | janitor | The daemon runs unattended under systemd, where a `print()` has no level and no timestamp and a failure is invisible in the journal. |
+| `logging` only; `print()` reserved for deliberate CLI output | Linter | ruff `T20` (in `ALL`), `pyproject.toml`, with the per-file carve-outs `pyproject.toml` lists under `[tool.ruff.lint.per-file-ignores]`, each with its reason there; anywhere else a deliberate report is waived per line as `# noqa: T201 -- <reason>` | janitor | The daemon runs unattended under systemd, where a `print()` has no level and no timestamp and a failure is invisible in the journal. |
 | **Every lint waiver says why**: `# noqa: CODES -- reason`, or a `noqa` beside a prawduct pragma that carries its reason | Test | `tests/test_waivers.py::test_every_waiver_says_why` | advisory | Under `select = ["ALL"]` a per-line waiver is the record of every deliberate exception, and one without a reason reads the same whether it was argued for or copied from the line above. |
 | Type-annotate every function signature in shipped code | Linter | ruff `ANN` (in `ALL`), `pyproject.toml`, excluding `tests/*` | janitor | Annotations are how a reader of a seam such as `Measure` or the television's interface knows what crosses it. |
 | Catch specific exceptions; broad catch needs `# prawduct:allow prawduct/broad-except -- reason` | Linter (a catch that swallows) + Critic (that the pragma's reason holds) | ruff `BLE001` (in `ALL`), `pyproject.toml` | advisory | A swallowed exception in an unattended Player shows up as "the TV just stopped changing", with nothing in the log to say why. |

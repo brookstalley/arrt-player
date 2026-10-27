@@ -20,6 +20,7 @@ records that.
 > deploy), it is there for the order the two had to go in. Arrt's deployment
 > record carries the same section for the server's half.
 
+> **Since 2026-10-02 the Pi is a client of the Arrt
 > server on the NAS** (§ The Player as a client of the NAS, below). Its
 > `curation.service` is stopped and disabled. The sections after that one
 > describe the one-wall Player of released v0.1.0, with `WALL_ID`,
@@ -295,7 +296,9 @@ which outlives every plan — cannot rest its procedure on one.)*
 ## The cutover
 
 Performed 2026-08-11 on the wall Pi (Debian 13 trixie, aarch64). This is the record
-of what was run, in order, and it is the procedure for doing it again.
+of what was run, in order, in the monorepo checkout. It is not a procedure for
+this repository: its paths and `curation.service` belong to the shared checkout.
+There is no current procedure for installing a new Pi from this repository.
 
     # uv where any account can reach it, and the account itself.
     # Copying the operator's own binary takes whatever version that account holds

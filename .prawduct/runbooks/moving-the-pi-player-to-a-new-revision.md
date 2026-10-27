@@ -1,18 +1,90 @@
 # Moving the Pi's Arrt Player to a new revision
 
-Owner: the operator · Last executed: 2026-10-11, 81e2d15e → 75770fe8 (no new
-setting or unit, so steps 7, 10–11 and the way back were not exercised)
+Owner: the operator · Last executed: 2026-10-11, 81e2d15e → 75770fe8, in the
+monorepo checkout (no new setting or unit, so steps 7, 10–11 and the way back
+were not exercised). Not yet run against the standalone checkout, and § The first
+time has never been run.
 
 ## When to use this
 You have a newer commit of this repo and the Pi beside the wall runs an older
-one. Check on the Pi:
+one. Check on the Pi which checkout the running unit uses:
 
-    git -C /opt/samsung-frame-art-loader rev-parse --short HEAD
+    systemctl show -p WorkingDirectory display.service
 
-If it already prints the commit you want → nothing to do.
+- `WorkingDirectory=/opt/arrt-player` → read the commit with
+  `git -C /opt/arrt-player rev-parse --short HEAD`. If it already prints the
+  commit you want → nothing to do. Otherwise → § Steps.
+- `WorkingDirectory=/opt/samsung-frame-art-loader/arrt-player` → the Pi still
+  runs from the checkout of Arrt's repository both products shared before
+  2026-10-26. That checkout cannot reach this repo's commits → § The first time,
+  then stop: it ends on a running Player.
 
 **If the server on the NAS is also moving:** do it first (the homelab repo's
 Arrt deploy runbook), unless step 2 says this release goes Player-first.
+
+## The first time: off the monorepo checkout
+
+Once per Pi. **`/opt/arrt-player` is the path `deploy/display.service` names, and
+the owner has not yet confirmed it.** Confirm it before running this; if the path
+changes, the unit and this section change together first.
+
+Nothing here touches the old checkout, so it stays the way back (F9).
+
+F1. Stop the Player, as in step 3, and check it as in step 4.
+
+F2. Clone this repo as the account that runs it:
+
+        sudo install -d -o tvpi -g tvpi /opt/arrt-player
+        sudo -u tvpi git clone https://github.com/brookstalley/arrt-player /opt/arrt-player
+        sudo -u tvpi git -C /opt/arrt-player checkout --detach <new>
+
+    **Expected:** `HEAD is now at <new>`.
+
+F3. Copy the settings across, keeping their owner and mode:
+
+        sudo install -m 0640 -o tvpi -g tvpi /opt/samsung-frame-art-loader/.env /opt/arrt-player/.env
+
+    *Why copy and not move: the old checkout's unit reads the old file, and F9
+    starts it again.* `CACHE_DIR` and the token file are absolute paths, so the
+    cache and the pairing carry over without moving anything.
+
+F4. Compare the copied settings with the new checkout's example. Step 2's
+    `git diff` cannot do this, because the old commit is in Arrt's history and
+    not this repo's:
+
+        diff <(sudo grep -oE '^[A-Z_]+' /opt/arrt-player/.env | sort -u) \
+                  <(grep -oE '^#? ?[A-Z_]+=' /opt/arrt-player/.env.example | tr -d '#= ' | sort -u)
+
+    **Expected:** `<` lines are keys the server reads and the Player does not.
+    They can stay. `>` lines are keys the Player may read and `.env` lacks. Read
+    each one in `.env.example`, and add it with
+    `sudoedit /opt/arrt-player/.env` if it says it is required.
+
+F5. Sync the environment, as in step 8.
+
+F6. Install the unit and reload systemd:
+
+        sudo cp /opt/arrt-player/deploy/display.service /etc/systemd/system/
+        sudo systemctl daemon-reload
+
+F7. Steps 12–16. Then check the unit runs from the new checkout:
+
+        systemctl show -p WorkingDirectory display.service
+
+    **Expected:** `WorkingDirectory=/opt/arrt-player`.
+
+F8. Leave `/opt/samsung-frame-art-loader` in place until the owner says the
+    move held. Removing it is the owner's call, and it is the only way back.
+
+F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
+
+        sudo systemctl stop display.service
+        sudo cp /opt/samsung-frame-art-loader/deploy/display.service /etc/systemd/system/
+        sudo systemctl daemon-reload
+        sudo systemctl start display.service
+
+    **Expected:** step 14's two lines, and
+    `WorkingDirectory=/opt/samsung-frame-art-loader/arrt-player`.
 
 ## Steps
 
@@ -45,11 +117,11 @@ Arrt deploy runbook), unless step 2 says this release goes Player-first.
 
 5. Fetch:
 
-       sudo -u tvpi git -C /opt/samsung-frame-art-loader fetch origin
+       sudo -u tvpi git -C /opt/arrt-player fetch origin
 
 6. Check out the new commit:
 
-       sudo -u tvpi git -C /opt/samsung-frame-art-loader checkout --detach <new>
+       sudo -u tvpi git -C /opt/arrt-player checkout --detach <new>
 
    **Expected:** `HEAD is now at <new>`.
    **If not:** `error: Your local changes … would be overwritten`. Someone
@@ -58,13 +130,13 @@ Arrt deploy runbook), unless step 2 says this release goes Player-first.
 
 7. **IF step 2 showed a new Player setting:** add it.
 
-       sudoedit /opt/samsung-frame-art-loader/.env
+       sudoedit /opt/arrt-player/.env
 
    *Why `sudo`: `.env` is readable by `tvpi` and root only.*
 
 8. Sync the Player's environment:
 
-       cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
+       cd /opt/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
 
    **Expected:** ends with an `Installed …`, `Uninstalled …`, `Audited …`
    or `Checked …` line, and no `error:`.
@@ -73,14 +145,14 @@ Arrt deploy runbook), unless step 2 says this release goes Player-first.
 
 9. Compare the unit with the checkout's:
 
-       diff -q /opt/samsung-frame-art-loader/deploy/display.service /etc/systemd/system/display.service
+       diff -q /opt/arrt-player/deploy/display.service /etc/systemd/system/display.service
 
    **Expected:** nothing printed → step 12.
    **IF it prints `… differ`:** → step 10.
 
 10. Install the new unit:
 
-        sudo cp /opt/samsung-frame-art-loader/deploy/display.service /etc/systemd/system/
+        sudo cp /opt/arrt-player/deploy/display.service /etc/systemd/system/
 
 11. Reload systemd:
 
@@ -124,12 +196,13 @@ Arrt deploy runbook), unless step 2 says this release goes Player-first.
 
 ## Done when
 - `systemctl is-active display.service` prints `active`
-- `git -C /opt/samsung-frame-art-loader rev-parse --short HEAD` prints `<new>`
+- `git -C /opt/arrt-player rev-parse --short HEAD` prints `<new>`
 - step 16's command shows `"reads_feed":true` for the Pi's walls
 
 ## Going back
 
-Every step above can be undone. Nothing on the Pi migrates.
+Every step above can be undone. Nothing on the Pi migrates. (To go back from
+§ The first time, use F9 there.)
 
 17. **IF step 2's sections say the release goes back as a pair** (the server
     and the Player together): roll the server back first, using the homelab
@@ -139,7 +212,7 @@ Every step above can be undone. Nothing on the Pi migrates.
 
 19. Check out the old commit:
 
-        sudo -u tvpi git -C /opt/samsung-frame-art-loader checkout --detach <old>
+        sudo -u tvpi git -C /opt/arrt-player checkout --detach <old>
 
 20. Repeat steps 8–14, which put the old revision's environment and unit back
     and start it.

@@ -23,9 +23,9 @@ repository of its own.
 
 import importlib.util
 import pathlib
-import re
 
 import pytest
+from workflow_scan import PYTEST_INVOCATION
 
 GUARD = pathlib.Path(__file__).resolve().parents[1] / ".github" / "scripts" / "assert_tests_ran.py"
 
@@ -216,16 +216,6 @@ def test_every_workflow_that_runs_a_suite_calls_the_guard():
         assert "assert_tests_ran.py" in text, f"{workflow.name} runs pytest but never checks that anything actually ran"
 
 
-#: `uv run`, anything uv itself takes, then `pytest`. **Whatever sits between is
-#: the point.** Matching the literal `uv run pytest` skipped every `uv run --group
-#: raster pytest …` in silence, and that is the typesetting job: the one leg whose
-#: suite skips itself when its group is absent. A pattern spelling out which
-#: options may appear skips the next option it does not know in the same silence,
-#: so nothing between the two words is constrained. The CI-scope test reads the
-#: workflows with the same shape.
-_INVOCATION = re.compile(r"\buv run\b.*?\bpytest\b")
-
-
 def _ci_pytest_invocations(directory: pathlib.Path) -> list[tuple[str, str]]:
     """Every line in a workflow directory that actually runs pytest.
 
@@ -238,7 +228,7 @@ def _ci_pytest_invocations(directory: pathlib.Path) -> list[tuple[str, str]]:
     over one has a hole exactly the width of someone typing `.yaml`.
 
     Comment lines are skipped: a workflow may legitimately document the unscoped
-    *local* command in prose — `api-drift.yml` does — and nothing runs a comment.
+    *local* command in prose (Arrt's `api-drift.yml` did) and nothing runs a comment.
     """
     workflows = sorted(set(directory.glob("*.yml")) | set(directory.glob("*.yaml")))
     assert workflows, f"no workflows found in {directory} — the caller is asserting nothing"
@@ -246,7 +236,7 @@ def _ci_pytest_invocations(directory: pathlib.Path) -> list[tuple[str, str]]:
     for workflow in workflows:
         for line in workflow.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            if stripped.startswith("#") or not _INVOCATION.search(stripped):
+            if stripped.startswith("#") or not PYTEST_INVOCATION.search(stripped):
                 continue
             found.append((workflow.name, stripped))
     return found
@@ -258,7 +248,7 @@ def _is_scoped(line: str) -> bool:
     The path comes first by convention, and it is the token that is neither the
     command nor an option nor an option's value.
     """
-    after = _INVOCATION.split(line, maxsplit=1)[1].split()
+    after = PYTEST_INVOCATION.split(line, maxsplit=1)[1].split()
     return bool(after) and not after[0].startswith("-")
 
 
@@ -294,7 +284,7 @@ def test_every_ci_pytest_invocation_scopes_a_path():
     thrice-recurring defect, blind to the form the documentation teaches.
 
     Comment lines are skipped, because a workflow may legitimately document the
-    unscoped *local* command in prose — `api-drift.yml` does — and nothing runs a
+    unscoped *local* command in prose (Arrt's `api-drift.yml` did) and nothing runs a
     comment.
 
     **What is still not checked, stated as the limitation it is.** The breadth

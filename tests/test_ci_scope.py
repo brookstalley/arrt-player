@@ -20,6 +20,7 @@ import pathlib
 import re
 
 import pytest
+from workflow_scan import PYTEST_INVOCATION
 
 PROJECT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = PROJECT / ".github" / "workflows" / "suites.yml"
@@ -61,7 +62,7 @@ def _pytest_invocations_by_job() -> dict[str, list[str]]:
         opening = _JOB.match(line)
         if opening:
             job = opening.group(1)
-        elif job and not line.strip().startswith("#") and re.search(r"uv run .*\bpytest\b", line):
+        elif job and not line.strip().startswith("#") and PYTEST_INVOCATION.search(line):
             invocations.setdefault(job, []).append(line.strip())
     return invocations
 
