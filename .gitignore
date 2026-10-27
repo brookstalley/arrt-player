@@ -26,3 +26,26 @@ __pycache__/
 
 # Prawduct plugin version marker (per-repo last-seen)
 .prawduct/.prawduct-version
+
+# Python and the tools' caches
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+results.xml
+
+# Deployment values and the television's pairing token. Never commit either:
+# this repository is public, and the token was committed to one once.
+# `tests/test_repository.py` refuses a tracked copy of both.
+.env
+token_file
+
+# macOS Finder metadata, one per directory Finder has opened.
+.DS_Store
+
+# Agent worktrees, created per subagent and removed with them.
+.claude/worktrees/

@@ -114,14 +114,14 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     # **The Player contract's schemas are checked with this**, against real
-    # documents, so the contract under contract/ is tested rather than trusted.
+    # documents, so the contract is tested rather than trusted.
     # Declared rather than inherited, because an indirect copy disappears the
     # day the package that brings it changes its own dependencies.
     "jsonschema>=4.23",
     # **The contract both sides are tested against**, read through the package
     # rather than by a path of this project's own, so the version a project
-    # depends on is the contract it is tested against. Arrt owns the source in
-    # `contract/`; a Player outside this repository takes a released tag.
+    # depends on is the contract it is tested against. Arrt owns the source;
+    # this repository takes a released tag (`[tool.uv.sources]` below).
     "arrt-contract",
     "ruff>=0.6",
     "black>=24",
@@ -180,9 +180,13 @@ build-backend = "hatchling.build"
 packages = ["src/arrt_player"]
 
 [tool.uv.sources]
-# An editable path while the contract lives in this repository, so a contract
-# change and the code it changes land in one commit with every suite behind it.
-arrt-contract = { path = "../contract", editable = true }
+# **A released tag of Arrt's contract package, never a path.** Arrt owns the
+# contract: a change to it is a pull request there and a new tag, and this Player
+# takes that version when it is ready, so the skew between the two is a version
+# number anyone can read here. A tag is named and does not move, which is what
+# "published" asks of it without an index account to hold; swapping to PyPI is
+# this one line.
+arrt-contract = { git = "https://github.com/brookstalley/arrt", tag = "contract-v1.0.0", subdirectory = "contract" }
 
 [tool.uv]
 # **The pin that a `[dependency-groups]` entry cannot express, and the decision it
@@ -314,6 +318,14 @@ ignore = [
 # their output through the logging configuration would put a JSON envelope around
 # a sentence somebody is reading.
 "tools/*" = ["T201"]
+# **The CI guard is carried byte-for-byte from Arrt**, so the two copies can be
+# compared by `diff` rather than by reading. Its stdout is the interface: GitHub
+# Actions raises annotations from `::error::` lines on a step's standard output,
+# so `print()` is the mechanism (T201). The XML it parses is the report this
+# job's own pytest wrote a step earlier, not outside input (S314). `main` is one
+# verdict read top to bottom, in the order the checks must run (C901), and its
+# one literal is the usage's argument count (PLR2004).
+".github/scripts/*.py" = ["T201", "S314", "C901", "PLR2004"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
