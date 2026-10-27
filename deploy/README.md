@@ -441,8 +441,7 @@ a refusal naming the variable, which is correct and is not a fault to debug.
 carries.** The manifest is written at activation, not at startup, so a plane that
 restarts against an existing manifest serves the old label text — including after
 a seed re-run that has just filled in new fields. **The block above this one is a
-read** — it recovers `WALL_ID` from `/api/walls` — and this sentence used to point
-at it as though it were the activation. The activation is this `POST`:
+read** — it recovers `WALL_ID` from `/api/walls`. The activation is this `POST`:
 
     curl -sX POST localhost:"$CURATION_PORT"/api/themes/"$THEME_ID"/activate \
          -H 'content-type: application/json' -d '{"wall_id":"'"$WALL_ID"'"}'
