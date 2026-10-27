@@ -39,7 +39,7 @@ upstream repositories on 2026-07-19 — it is not recalled from the original wor
 > product-wide. It is not any more: the two-plane split (2026-07-19) gave the
 > curation plane its own interpreter, and **the curation plane runs Python 3.14**
 > on a uv-managed standalone build, with `3tears` left unmodified. See
-> Arrt's `operational-spec.md` § The Curation Interpreter and `project-preferences.md`,
+> Arrt's `operational-spec.md` § The Curation Interpreter and Arrt's `project-preferences.md`,
 > which records the version per plane.
 >
 > **The "3.14 was rejected" bullet below is retired and must not be cited.** Its

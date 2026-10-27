@@ -31,7 +31,7 @@ here.** A check over an empty package passes vacuously, which is the green test
 that cannot fail this repo explicitly rejects — and the window in which display
 code exists unguarded is exactly the window in which the shortcut gets written.
 The norm index named this file for three sessions while it did not exist; that is
-recorded in `project-preferences.md` as this repo's cautionary example, and the
+recorded in Arrt's `project-preferences.md` as that repo's cautionary example, and the
 row moves back to `Test` naming this path because the file now does what the row
 claims.
 

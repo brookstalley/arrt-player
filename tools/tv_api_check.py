@@ -21,8 +21,9 @@ it uploaded itself, and it removes that one whether the run succeeds or not. It
 does not change brightness or the slideshow, and it selects its image only when
 the set says it is in art mode, because a selection on a set showing a programme
 switches it to art (`samsung-tv-state-findings.md` § What works in each state).
-Until 2026-10-27 it selected without asking, and this paragraph said it did not
-change art mode.
+A skipped selection is a note, not a failure, so it exits 0 without having tested
+the change callbacks; its note says so. Run it again with the set in art mode
+before relying on that result.
 """
 
 import argparse

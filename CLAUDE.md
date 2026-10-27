@@ -33,10 +33,10 @@ cites and that is not under `.prawduct/artifacts/` here (`player-contract.md`,
 `accessibility-spec.md`, `labels-and-surfaces.md` and the rest) is Arrt's, in its
 `.prawduct/artifacts/`.
 
-Six names exist in both repositories: `architecture.md`, `data-model.md`,
-`security-model.md`, `nonfunctional-requirements.md`, `operational-spec.md` and
-`observability-strategy.md`. Arrt's hold the norms (each `§ Direction`, and
-§ The television belongs to whoever is using it); the ones here describe what the
+Every name under `.prawduct/artifacts/` here also exists in Arrt: the findings
+and the preferences came across with the move, and the strategy artifacts were
+written here after it. Arrt's hold the norms (each `§ Direction`, and § The
+television belongs to whoever is using it); the ones here describe what the
 Player's code does and point at Arrt's for the rule. **Cite Arrt's as "Arrt's
 `<name>.md`"**, so a bare name means this repo's copy;
 `tests/test_artifact_citations.py` checks the part of that it can reach.

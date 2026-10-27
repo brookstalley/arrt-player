@@ -1,7 +1,7 @@
 """A section cited by a bare artifact name resolves in this repository's copy.
 
-Six artifact names exist both here and in Arrt (`CLAUDE.md` § Where artifacts
-live): Arrt's hold the norms, these describe the Player's code. The convention is
+Every artifact name here also exists in Arrt (`CLAUDE.md`, "Where artifacts
+live"): Arrt's hold the norms, these describe the Player's code. The convention is
 that a citation meaning Arrt's copy says "Arrt's", so a bare name means this
 repository's. Prose stating that convention keeps nothing apart, so this checks
 the one part of it a test can reach: **a bare `<name>.md` § <section> must name a
@@ -25,15 +25,12 @@ import subprocess
 
 PROJECT = pathlib.Path(__file__).resolve().parents[1]
 
-#: The names both repositories carry. A name only Arrt has needs no qualifier.
-SHARED_NAMES = (
-    "architecture",
-    "data-model",
-    "security-model",
-    "nonfunctional-requirements",
-    "operational-spec",
-    "observability-strategy",
-)
+#: Every artifact here, read from the directory rather than listed: on
+#: 2026-10-27 each also existed in Arrt (the findings and the preferences came
+#: across with the move), and a hand-copied list of six had already missed
+#: `project-preferences.md`. A name only Arrt has needs no qualifier and is not
+#: here to resolve against.
+SHARED_NAMES = tuple(sorted(path.stem for path in (PROJECT / ".prawduct" / "artifacts").glob("*.md")))
 
 _CITATION = re.compile(r"`(" + "|".join(SHARED_NAMES) + r")\.md`\s*§\s*\"?([^\n]*)")
 #: Comment and quote markers a qualifier may sit behind when a line wraps.
@@ -46,10 +43,18 @@ def _qualified_as_arrts(text: str, start: int) -> bool:
     return before.endswith("Arrt's")
 
 
+def _stem(heading: str) -> str:
+    """A heading's short form, as prose cites it: "The television" for "The television, verified ..."."""
+    return re.split(r"[,;:(]", heading, maxsplit=1)[0].strip()
+
+
 def _resolves(cited: str, headings: list[str]) -> bool:
-    """The heading is a prefix of the citation, or a wrapped citation of the heading."""
+    """The heading or its short form opens the citation, or a wrapped citation opens the heading."""
     fragment = re.split(r"[.,;:)|`\"]", cited, maxsplit=1)[0].strip()
-    return any(cited.startswith(h) or (fragment and h.startswith(fragment)) for h in headings)
+    return any(
+        cited.startswith(h) or (_stem(h) and cited.startswith(_stem(h))) or (fragment and h.startswith(fragment))
+        for h in headings
+    )
 
 
 def _bare_citations() -> list[tuple[str, int, str, str]]:
