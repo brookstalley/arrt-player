@@ -38,7 +38,8 @@ Six names exist in both repositories: `architecture.md`, `data-model.md`,
 `observability-strategy.md`. Arrt's hold the norms (each `§ Direction`, and
 § The television belongs to whoever is using it); the ones here describe what the
 Player's code does and point at Arrt's for the rule. **Cite Arrt's as "Arrt's
-`<name>.md`"**, so a bare name means this repo's copy.
+`<name>.md`"**, so a bare name means this repo's copy;
+`tests/test_artifact_citations.py` checks the part of that it can reach.
 
 ## Dev commands
 

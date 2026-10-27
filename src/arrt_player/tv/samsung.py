@@ -395,8 +395,10 @@ class SamsungTv(TvClient):
         except _LIBRARY_FAILURES as exc:
             # Closing is best-effort by definition: this runs while something has
             # already gone wrong, and a failure here must not replace the real
-            # error with a tidier one. Said out loud rather than swallowed.
-            log.debug("closing the television connection raised %s", _named(exc), extra={"event": "tv.close_failed"})
+            # error with a tidier one. Said out loud rather than swallowed, and at
+            # WARNING: a set still holding the abandoned channel refuses the next
+            # connection for minutes, and this line is the only trace of why.
+            log.warning("closing the television connection raised %s", _named(exc), extra={"event": "tv.close_failed"})
 
     async def disable_native_slideshow(self) -> None:
         """Tell the set to stop rotating on its own.

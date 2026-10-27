@@ -24,9 +24,9 @@ rule (caption, card or blank, and the 30-minute hold) is Arrt's
 
 **No § Direction here.** This file ratifies no norm. The norm index row
 "Derived artifacts are regenerated, never transported" in
-`project-preferences.md` names `data-model.md` § Direction; that is Arrt's
-`data-model.md` § Direction, which also carries "Per-device runtime state never
-lives in the catalogue", the norm `tv_binding` below exists for.
+`project-preferences.md` lives in Arrt's `data-model.md` § Direction, which also
+carries "Per-device runtime state never lives in the catalogue", the norm
+`tv_binding` below exists for.
 
 ## Entities
 

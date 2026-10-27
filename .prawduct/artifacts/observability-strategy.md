@@ -101,7 +101,7 @@ prescribed anywhere):
 | ERROR | Will not fix itself: a deployment value, a refusal by the server, a document the Player will not read, an assignment it cannot place, a crash (with traceback) |
 | WARNING | A degraded condition that may pass, or a device the operator must look at: server or set unreachable, a draw refused, a label set below the legibility floor |
 | INFO | A state change or the end of an episode: started, adopted, selected, drawn, recovered |
-| DEBUG | One call site, `tv.close_failed`. Never emitted: `__main__.main` calls `logs.configure()` at INFO |
+| DEBUG | Not used. `__main__.main` calls `logs.configure()` at INFO, so a DEBUG line would never be emitted |
 
 **Episodes, not repetition.** A condition that persists is logged when it starts
 and when it ends, through `episodes.ReportOnce` (`begin()` / `end()`). This is
@@ -176,7 +176,7 @@ and misses those 13.
 | `tv.selection_unreadable` | WARNING | `SamsungTv._on_image_selected` | An `image_selected` announcement could not be read |
 | `tv.selection_observer_failed` | ERROR (traceback) | `SamsungTv._tell_observers` | An observer of selections raised; the others still ran |
 | `tv.native_slideshow_disabled` | INFO | `FrameDisplay._connected` | The set's own slideshow was switched off (once per store) |
-| `tv.close_failed` | DEBUG | `SamsungTv._quietly_close` | Closing the connection raised. Not emitted at the configured level |
+| `tv.close_failed` | WARNING | `SamsungTv._quietly_close` | Closing the connection raised; the set may hold the abandoned channel and refuse the next connection for minutes |
 | `brightness.set` | INFO | `FrameDisplay._apply_brightness` | Brightness set from the sun's angle |
 | **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`) | | | |
 | `screen.absent` / `screen.returned` | WARNING / INFO | `KmsOutput._gone`, `_draw` | No screen on the connector, then one (drawn at once) |
@@ -387,8 +387,9 @@ Observed in the code while writing this; none is fixed here.
    Frame-only events (`tv.*`, `binding.*`, `brightness.set`, the Frame's
    `rotation.*`) are unambiguous because a client has at most one Frame;
    `manifest.*` lines carry `manifest_path`, which contains the wall's directory.
-2. **`tv.close_failed` is never emitted.** It logs at DEBUG and the root level is
-   INFO; its comment says the failure is "said out loud rather than swallowed".
+2. *(Closed 2026-10-27: `tv.close_failed` logged at DEBUG under an INFO root and
+   was never emitted. It logs at WARNING, held by
+   `test_samsung_client.py:test_a_close_that_fails_reaches_the_journal`.)*
 3. **The Frame's `last_error` carries only unreachability.** Upload failures,
    unconfirmed removals and a wall that will not change are journal-only.
 4. **Pull and supervisor failures never reach a heartbeat.** A wall whose feed is

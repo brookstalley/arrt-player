@@ -166,10 +166,10 @@ not about art mode).
   thread. The unit's comment records it as left to SIGKILL, after the television
   is closed.
 
-### The television belongs to whoever is using it
+### Leaving the television to whoever is using it
 
-The requirement is Arrt § Availability › The television belongs to whoever is
-using it. What this repository's code enforces is narrower than "never touch a
+The requirement is Arrt's `nonfunctional-requirements.md` § Availability › The
+television belongs to whoever is using it. What this repository's code enforces is narrower than "never touch a
 set that is not in art mode":
 
 - **Selection is gated.** The schedule asks `display.is_ours()` before every
