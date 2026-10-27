@@ -178,7 +178,7 @@ user_expertise:
 # tooling). Optional — only when the user expresses preferences.
 
 build_preferences:
-  file_path: null             # Path to project-preferences.md (relative to .prawduct/)
+  file_path: artifacts/project-preferences.md
   last_updated: null
   source: null                # discovery | inferred | iteration
 
@@ -211,7 +211,7 @@ artifact_manifest:
 # Runtime tracking during building. Updated after each chunk.
 
 build_state:
-  source_root: null           # Where source code lives (e.g., "src/")
+  source_root: "src/"
 
 # =============================================================================
 # OPTIONAL KEYS
@@ -296,3 +296,16 @@ distribution: plugin
 # starts on markdown sets this later, at the scrub/cutover.
 # `/prawduct:backlog` routes on this scalar.
 backlog_service_repo: brookstalley/arrt-player
+
+# `--group raster` because the typesetter is the Player's most important
+# accessibility surface and the group is what makes it runnable. Without it
+# `tests/raster` skips itself and the recorded evidence covers every tier of the
+# label except the one that puts ink on the panel. CI's separate `typesetting`
+# job holds the same claim on a runner.
+test_command: uv run --group raster pytest --junit-xml={junit_xml} -q
+
+tests_dirs: tests
+
+# Gitflow, as Arrt runs it: features PR into develop, and develop releases to
+# main. The remote's default is main, so the resolver cannot infer this.
+base_branch: develop
