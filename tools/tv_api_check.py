@@ -5,7 +5,7 @@ library is a two-year-old fork of an unowned websocket protocol, its failure
 modes differ across TV generations, and reading its source only establishes what
 it intends to do. This establishes what this television does.
 
-    cd arrt-player && uv run python tools/tv_api_check.py --image <a 4K composite>.jpg
+    uv run python tools/tv_api_check.py --image <a 4K composite>.jpg
 
 It reads the Player's own configuration (`arrt_player.config`), so it runs from
 the Player's checkout with the Player's `.env`. Stop the daemon first, for the
@@ -18,7 +18,11 @@ failed, so it can gate a deploy.
 
 It is safe to run against the wall in use: the only image it removes is the one
 it uploaded itself, and it removes that one whether the run succeeds or not. It
-does not change art mode, brightness, or the slideshow.
+does not change brightness or the slideshow, and it selects its image only when
+the set says it is in art mode, because a selection on a set showing a programme
+switches it to art (`samsung-tv-state-findings.md` § What works in each state).
+Until 2026-10-27 it selected without asking, and this paragraph said it did not
+change art mode.
 """
 
 import argparse
@@ -330,6 +334,13 @@ async def check_callbacks(tv_art: SamsungTVAsyncArt, report: Report, content_id:
 
     if content_id is None:
         report.note("callbacks", "registered, but nothing was selected to provoke one — pass --image to test properly")
+        return
+
+    # The daemon's rule (`SamsungTv.showing_art`): anything but a plain "on" is a
+    # no, because the selection below would take over somebody's programme.
+    mode = await tv_art.get_artmode()
+    if mode != "on":
+        report.note("callbacks", f"nothing selected: the set reports art mode {mode!r}, and selecting would switch it to art")
         return
 
     await tv_art.select_image(content_id)

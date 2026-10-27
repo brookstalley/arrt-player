@@ -109,7 +109,7 @@ parts are tested (`tests/test_tools.py`, `test_power_probe.py`,
 
 | Tool | What it is for | Touches |
 |---|---|---|
-| `tools/tv_api_check.py` | Exercises the art API against the live set and reports what it does; non-zero exit if any check failed. Re-run after any firmware update (Arrt's `operational-spec.md` § Routine Operations) | Uploads, and with `--image` selects, an image, then removes the one it uploaded |
+| `tools/tv_api_check.py` | Exercises the art API against the live set and reports what it does; non-zero exit if any check failed. Re-run after any firmware update (Arrt's `operational-spec.md` § Routine Operations) | With `--image`, uploads an image, selects it only if the set reports art mode `on`, then removes the one it uploaded |
 | `tools/panel_check.py` | Not a command. The decision `tv_api_check.py` uses to warn when `TV_PANEL_DIAGONAL_INCHES` disagrees with the set's `modelName` | Nothing itself |
 | `tools/tv_delete.py` | Not a command. Deletion confirmed by re-reading the set's list; `tv_api_check.py` uses it | The set's art list |
 | `tools/label_preview.py` | Renders the label chain (metadata, layout, Pango) to a PNG, or with `--panel` onto the panel, so legibility can be judged at the wall (`deploy/README.md` § Looking at the label without the daemon) | The panel, with `--panel` |

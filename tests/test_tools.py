@@ -498,3 +498,46 @@ def test_the_api_check_says_why_it_cannot_start_rather_than_raising(deployment, 
 
     assert api_check.main() == 2
     assert "TV_ADDRESS" in capsys.readouterr().out
+
+
+class _ArtModeArt:
+    """As much of the art client as `check_callbacks` touches: its art mode, and what it selected."""
+
+    def __init__(self, mode: object) -> None:
+        self.mode = mode
+        self.selected: list[str] = []
+
+    def set_callback(self, _trigger: str, _handler: object) -> None:
+        return None
+
+    async def get_artmode(self) -> object:
+        return self.mode
+
+    async def select_image(self, content_id: str) -> None:
+        self.selected.append(content_id)
+
+
+@pytest.mark.parametrize("mode", ["off", None, "On", {"value": "on"}])
+async def test_the_api_check_selects_nothing_on_a_set_not_plainly_in_art_mode(api_check, mode):
+    """A selection on a set showing a programme switches it to art; the tool must not be the thing that does."""
+    art = _ArtModeArt(mode)
+    report = api_check.Report()
+
+    await api_check.check_callbacks(art, report, "MY-F0001")
+
+    assert art.selected == []
+    assert any("nothing selected" in line[2] for line in report.lines)
+
+
+async def test_the_api_check_selects_on_a_set_in_art_mode(api_check, monkeypatch):
+    """The other half: a refusal on every reply would pass the test above and test nothing."""
+    art = _ArtModeArt("on")
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(api_check.asyncio, "sleep", no_wait)
+
+    await api_check.check_callbacks(art, api_check.Report(), "MY-F0001")
+
+    assert art.selected == ["MY-F0001"]
