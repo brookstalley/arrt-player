@@ -55,8 +55,11 @@ dependencies = [
     # `panel/epaper.py` except its one `open_panel` import runs on a laptop, so
     # the greyscale-mode read-back, the rotation and the conversion of a silent
     # driver failure into a raised one are exercised by the default suite instead
-    # of only on a Pi with a panel screwed to it.
-    "pillow",
+    # of only on a Pi with a panel screwed to it. The floor is a security floor:
+    # 13.0.0 fixes JPEG and TIFF decoder overflows and decompression-bomb
+    # bypasses (5 critical), and the Player decodes every picture its server hands
+    # it. Lowering it to resolve a conflict reopens those.
+    "pillow>=13.0.0",
     # The HTTP mode's one client, in `src/arrt_player/pull.py` and nowhere else
     # (`tests/test_plane_isolation.py` holds that). Already installed
     # through the fork above, at the version the lockfile resolves; declared
