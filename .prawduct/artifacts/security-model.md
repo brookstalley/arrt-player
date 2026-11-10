@@ -37,7 +37,7 @@ No norm is ratified here, so there is no § Direction.
 
 ## Authentication
 
-The Player authenticates outward only. Nothing authenticates to it.
+The Player authenticates outward to two peers, the server and the television. One thing authenticates to it: its owner, at the settings page (§ To the Player: the settings page).
 
 ### To the server: the client token
 
