@@ -45,7 +45,7 @@ Player's code does and point at Arrt's for the rule. **Cite Arrt's as "Arrt's
 
 | | |
 |---|---|
-| Test | `uv run --group raster pytest` |
+| Test | `testament run --json` (the pool; `AGENTS.md` § Running tests), else `uv run --group raster pytest` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run black .` |
 
