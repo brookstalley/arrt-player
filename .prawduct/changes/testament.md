@@ -24,9 +24,9 @@ move out of Arrt's repository did not bring that setup along.
 
 ### Verified
 - In the image, built locally: `uv sync --frozen --group raster`, then the whole
-  suite, 1263 passed and none skipped, the same count as a local run of this tree.
+  suite passed with none skipped, the same count as a local run of the same tree.
 - On the pool: `testament onboard -- tests/test_config.py` ran on a runner, and
-  `testament run` ran the whole suite, 1263 passed, with no fallback and nothing
+  `testament run` ran the whole suite, all passed, with no fallback and nothing
   missing.
 
 ### Also carried: the settings page's records, after its deploy

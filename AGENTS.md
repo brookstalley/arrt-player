@@ -41,7 +41,7 @@ tests here under this machine's test-slot cap and says so.
 
 If `testament` isn't installed: `uv tool install --python 3.14
 git+ssh://git@github.com/brookstalley/testament@main` (or `git+https://…`), then
-`testament guide client`. Until it is, run `pytest` as before. To set testament up here,
+`testament guide client`. Until it is, run `uv run --group raster pytest` as before (CLAUDE.md says why the group). To set testament up here,
 ask the person for their pool's console address and follow `<console>/public/docs/start`
 (a pool too old to serve that page has `<console>/public/docs/client` instead).
 
