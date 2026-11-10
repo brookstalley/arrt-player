@@ -265,8 +265,11 @@ its name. Nothing changes on the server, and the walls run as before.
 **Check `.env` before deploying.** At start, the Player now refuses (exit 2,
 naming the key) a `SERVER_URL` that is not an http(s) address with a host, or
 that carries a user name, password, query or fragment; a `CLIENT_TOKEN` with
-whitespace in it; and a `PLAYER_NAME` over 64 characters. The reference Pi's
-`SERVER_URL` and token are of the accepted shape.
+whitespace in it; and a `PLAYER_NAME` over 64 characters. Not yet checked
+against the reference Pi's `.env`. Check it before switching revisions: on the
+new revision, `uv run python -c 'from arrt_player.config import load; load()'`
+as `tvpi` prints nothing when the values are accepted, and names the key when
+one is not.
 
 **The first start prints where to set the page's password.** No password is set
 yet, so the page accepts one only with a code minted for this start, printed
