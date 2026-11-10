@@ -25,9 +25,10 @@ SCRYPT_N: Final[int] = 2**14
 SCRYPT_R: Final[int] = 8
 SCRYPT_P: Final[int] = 1
 
-#: The shortest password the page accepts. It sits on a LAN, behind a throttle,
-#: and guards a client token, so length is the cheapest strength there is.
-MINIMUM_PASSWORD_LENGTH: Final[int] = 10
+#: The shortest password the page accepts: 8, the owner's choice (2026-11-10).
+#: The page sits on a LAN behind a throttle that doubles to a minute per wrong
+#: guess, which is what makes a short floor tolerable for a client token.
+MINIMUM_PASSWORD_LENGTH: Final[int] = 8
 
 #: How long a login lasts.
 SESSION_SECONDS: Final[int] = 30 * 24 * 60 * 60

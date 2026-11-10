@@ -242,6 +242,13 @@ class TestTheFirstRun:
         assert said in await response.text()
         assert store.read(cache_dir).password is None
 
+    @pytest.mark.parametrize(("password", "status"), [("7chars!", 400), ("8chars!!", 303)])
+    async def test_the_floor_is_eight_characters(self, page, password, status):
+        """Owner, 2026-11-10: eight, no more."""
+        response = await post(page, "/setup", {"code": CODE, "password": password, "again": password})
+
+        assert response.status == status
+
     async def test_setting_a_password_signs_you_in_and_spends_the_code(self, page, cache_dir, state):
         response = await post(page, "/setup", {"code": CODE, "password": PASSWORD, "again": PASSWORD})
 

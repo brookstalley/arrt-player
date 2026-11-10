@@ -77,6 +77,7 @@ last_validated: 2026-11-10
 - Chunk 02: a token entered with no server address is refused with a reason, not silently dropped. Settled by "never silently drop".
 - Chunk 02: `config.load` now validates `SERVER_URL` (http(s), a host, no userinfo, query or fragment), `CLIENT_TOKEN` (no whitespace) and `PLAYER_NAME`, using the same functions as the form. This is a new refusal at start. *Not settled by the goals:* it is inferred from "validate the way config.load does", which needed `load` to validate something.
 - Chunk 02: the setup code is spent before the new password is hashed, closing a race between two concurrent setups.
+- Chunk 02: the minimum password length is 8, not the 10 first written (owner, 2026-11-10).
 
 **Level:** Medium-High. Requirements are settled and the mechanisms are all stdlib or aiohttp, which the repo already uses. To raise it: chunk 01's first test, aiohttp's test server against the setup flow, proves that the server, the store and the startup path connect.
 
