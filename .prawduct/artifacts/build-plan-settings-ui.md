@@ -80,6 +80,7 @@ last_validated: 2026-11-10
 - Chunk 02: the minimum password length is 8, not the 10 first written (owner, 2026-11-10).
 - Chunk 02: [DECISION: the page wears Arrt's look: its tokens, its two typefaces (upright Latin only) and the component rules this page uses, all copied into `settings_ui/static/` with the Arrt commit they came from | The owner asked for the page to be "in keeping with the arrt design patterns". Arrt's `design-direction.md` says the two products share no stylesheet, and that adopting the browser's palette is "a design decision to make then, not an inheritance". This is that decision, made as a copy, not a link, so the separation stands. The copy is held to Arrt's own rules here (AA in both schemes, no colour outside the token blocks) by `tests/test_settings_ui_style.py`, because Arrt's test does not reach it. | owner can veto]
 - Chunk 02: the fonts are given their type explicitly (`STATIC_TYPES`). aiohttp's own MIME table lacks `.woff2`, and a font served as octet-stream beside `nosniff` may be refused, with the page then drawn in its fallback face.
+- Chunk 03: the acceptance check on the Pi (page reachable from the LAN, a save restarts the unit, walls come back) can only be run once the branch is deployed. It is owed after merge, by the steps in `deploy/README.md` § The settings page, and the PR must say so. It has not been run.
 
 **Level:** Medium-High. Requirements are settled and the mechanisms are all stdlib or aiohttp, which the repo already uses. To raise it: chunk 01's first test, aiohttp's test server against the setup flow, proves that the server, the store and the startup path connect.
 
@@ -107,12 +108,12 @@ No new dependencies: `aiohttp.web` (already pinned at >=3.14), and stdlib `hashl
   - the printed "go to" line;
   - the plane-isolation amendment.
 - **Depends on:** none
-- **Artifacts consumed:** `security-model.md`, `nonfunctional-requirements.md` § Start-up, `project-preferences.md` § Enforcement
+- **Artifacts consumed:** `.prawduct/artifacts/security-model.md`, `.prawduct/artifacts/nonfunctional-requirements.md` § Start-up, `.prawduct/artifacts/project-preferences.md` § Enforcement
 - **Deliverables:**
-  - new `src/arrt_player/settings_ui/` (`store.py`, `auth.py`, `server.py`);
+  - new `src/arrt_player/settings_ui/` (store.py, auth.py and server.py);
   - `config.load` reads the store, and raises a distinct `SetupRequired` when the server keys are missing;
   - `__main__` runs setup mode, and in normal mode starts the settings server beside the supervisor;
-  - `UI_BIND` and `UI_PORT` in `config.py` and `.env.example`;
+  - `UI_BIND` and `UI_PORT` in `src/arrt_player/config.py` and `.env.example`;
   - the guard amendment in `tests/test_plane_isolation.py`;
   - the NFR § Start-up amendment and a new security-model section on the settings page.
 - **Tests:**
@@ -146,7 +147,7 @@ No new dependencies: `aiohttp.web` (already pinned at >=3.14), and stdlib `hashl
   - the password can be changed, which rotates the session secret.
 - **Depends on:** Chunk 01
 - **Artifacts consumed:** this plan's Constraints
-- **Deliverables:** the form and save routes in `settings_ui/server.py`; `PLAYER_NAME` in `config.py`, the startup line and `.env.example`; the self-restart.
+- **Deliverables:** the form and save routes in `src/arrt_player/settings_ui/server.py`; `PLAYER_NAME` in `src/arrt_player/config.py`, the startup line and `.env.example`; the self-restart.
 - **Tests:**
   - a key pinned by the environment cannot be changed from the page;
   - the token never appears in any response body;
@@ -165,12 +166,12 @@ No new dependencies: `aiohttp.web` (already pinned at >=3.14), and stdlib `hashl
 
 - **Description:** The Pi path and the records:
   - `deploy/README.md`: the page, the port, and recovering a forgotten password;
-  - `architecture.md`: a new task and channel;
+  - `.prawduct/artifacts/architecture.md`: a new task and channel;
   - `project-state.yaml`: the structural flags, since the Player now exposes a human interface on the web;
   - the change fragment;
   - checking that the unit's `Restart=always` brings a self-SIGTERM back.
 - **Depends on:** Chunk 02
-- **Artifacts consumed:** `deploy/README.md`, `architecture.md`
+- **Artifacts consumed:** `deploy/README.md`, `.prawduct/artifacts/architecture.md`
 - **Deliverables:** the records above, current with the code, and the change fragment's narrative and consumer note.
 - **Tests:** `tests/test_deploy_unit.py` still passes; any claim the README makes about the unit is checked there if it is checkable.
 - **Acceptance criteria:** on the Pi, the page is reachable from the LAN, saving restarts the unit, and the walls come back.

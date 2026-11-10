@@ -35,6 +35,7 @@ from aiohttp.web import (
     AppKey,
     Application,
     AppRunner,
+    HTTPException,
     Request,
     Response,
     StreamResponse,
@@ -183,7 +184,13 @@ def home_url(ui: UiSettings) -> str:
 
 @middleware
 async def _headers(request: Request, handler: Handler) -> StreamResponse:
-    response = await handler(request)
+    try:
+        response = await handler(request)
+    except HTTPException as raised:
+        # aiohttp's own 404 and 405 are raised, not returned; they carry the
+        # headers too, so that "every response" is true of them as well.
+        raised.headers.update(SECURITY_HEADERS)
+        raise
     response.headers.update(SECURITY_HEADERS)
     if request.path.startswith("/static/"):
         response.headers["Cache-Control"] = STATIC_CACHE_CONTROL
@@ -262,7 +269,8 @@ async def _save(request: Request) -> Response:
     if values == dict(stored.values):
         return _settings_page(state, stored, notice="Nothing changed.")
 
-    store.write(state.ui.cache_dir, stored.with_values(values))
+    if not _wrote(state, stored.with_values(values)):
+        return _settings_page(state, stored, problem=_WRITE_FAILED, status=500)
     log.info(
         "the settings page saved new settings; restarting onto them",
         extra={"event": "settings_page.saved", "changed": sorted(_changed(stored.values, values))},
@@ -309,6 +317,25 @@ def _next_values(before: Mapping[str, str], locked: frozenset[str], *, url: str,
 _RESTART_DELAY_SECONDS: Final[float] = 0.5
 
 
+#: Said when the settings file could not be written: nothing changed, and why to look.
+_WRITE_FAILED: Final[str] = "The settings could not be saved, so nothing changed. The journal says why."
+
+
+def _wrote(state: PageState, stored: store.Stored) -> bool:
+    """Write the settings file; False, logged, when the disk refuses. Nothing is restarted on a False."""
+    try:
+        store.write(state.ui.cache_dir, stored)
+    except OSError as exc:
+        log.error(  # noqa: TRY400 -- a full disk or a permission is the fact; a stack adds nothing
+            "the settings page could not write %s: %s",
+            store.path_in(state.ui.cache_dir),
+            exc,
+            extra={"event": "settings_page.write_failed"},
+        )
+        return False
+    return True
+
+
 def _put(values: dict[str, str], name: str, value: str) -> None:
     if value:
         values[name] = value
@@ -343,7 +370,8 @@ async def _change_password(request: Request) -> Response:
         return _settings_page(state, stored, problem=problem, status=400)
     secret = auth.new_session_secret()
     encoded = await asyncio.to_thread(auth.hash_password, password)
-    store.write(state.ui.cache_dir, state.stored().with_auth(password=encoded, session_secret=secret))
+    if not _wrote(state, state.stored().with_auth(password=encoded, session_secret=secret)):
+        return _settings_page(state, stored, problem=_WRITE_FAILED, status=500)
     log.info("the settings page's password is changed", extra={"event": "settings_page.password_changed"})
     return _signed_in_redirect(secret, state)
 
@@ -376,7 +404,11 @@ async def _setup(request: Request) -> Response:
     state.setup_code = None
     secret = auth.new_session_secret()
     encoded = await asyncio.to_thread(auth.hash_password, password)
-    store.write(state.ui.cache_dir, state.stored().with_auth(password=encoded, session_secret=secret))
+    if not _wrote(state, state.stored().with_auth(password=encoded, session_secret=secret)):
+        # Given back, since no password was set: without it every retry would be
+        # told the link is not this start's until somebody restarted the Player.
+        state.setup_code = code
+        return _setup_page(code, problem=_WRITE_FAILED, status=500)
     log.info("the settings page's password is set", extra={"event": "settings_page.password_set"})
     return _signed_in_redirect(secret, state)
 

@@ -500,6 +500,19 @@ def test_the_api_check_says_why_it_cannot_start_rather_than_raising(deployment, 
     assert "TV_ADDRESS" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("missing", ["SERVER_URL", "CLIENT_TOKEN"])
+def test_the_api_check_says_why_a_player_with_no_server_cannot_be_checked(deployment, api_check, monkeypatch, capsys, missing):
+    """No server is setup mode for the daemon, and `SetupRequired` is not a `ConfigError` on
+    purpose, so the tool names it rather than ending in a traceback."""
+    monkeypatch.delenv(missing)
+    monkeypatch.setattr(sys, "argv", ["tv_api_check.py"])
+
+    assert api_check.main() == 2
+    printed = capsys.readouterr().out
+    assert missing in printed
+    assert "settings page" in printed
+
+
 class _ArtModeArt:
     """As much of the art client as `check_callbacks` touches: its art mode, and what it selected."""
 

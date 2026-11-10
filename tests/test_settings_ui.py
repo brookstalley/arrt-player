@@ -764,3 +764,116 @@ class TestTheNameAPlayerGoesBy:
         (cache_dir / CLIENT_DOCUMENT_FILENAME).write_bytes(document.encode("utf-8", "surrogateescape"))
 
         assert player_name(cache_dir, "Hall") == "Hall"
+
+
+# -- what the review of the whole branch found -----------------------------------------------
+
+
+def test_a_thousand_wrong_guesses_still_wait_a_minute_and_never_overflow():
+    """`2.0 ** 1024` overflows a float: uncapped, the 1025th wrong password would make every
+    later login a server error, the right password's included, until a restart."""
+    clock = Clock()
+    throttle = auth.Throttle(monotonic=clock)
+
+    for _ in range(2000):
+        throttle.failed()
+
+    assert throttle.wait_seconds() == auth.MAXIMUM_THROTTLE_SECONDS
+
+
+class TestAWriteTheDiskRefuses:
+    @pytest.fixture
+    def refusing(self, monkeypatch):
+        """The disk refusing the next write, then accepting again."""
+        real = store.write
+        calls = {"left": 1}
+
+        def write(cache_dir, stored):
+            if calls["left"]:
+                calls["left"] -= 1
+                raise PermissionError(13, "Permission denied")
+            real(cache_dir, stored)
+
+        monkeypatch.setattr(store, "write", write)
+        return calls
+
+    async def test_a_failed_first_password_gives_the_code_back_so_a_retry_works(self, page, cache_dir, state, refusing, caplog):
+        failed = await post(page, "/setup", {"code": CODE, "password": PASSWORD, "again": PASSWORD})
+
+        assert failed.status == 500
+        assert "could not be saved" in await failed.text()
+        assert state.setup_code == CODE, "the code was spent on a password that was never set"
+        assert any(getattr(record, "event", None) == "settings_page.write_failed" for record in caplog.records)
+
+        retried = await post(page, "/setup", {"code": CODE, "password": PASSWORD, "again": PASSWORD})
+        assert retried.status == 303
+        assert auth.password_matches(PASSWORD, store.read(cache_dir).password)
+
+    async def test_a_failed_save_says_so_and_does_not_restart(self, signed_in, cache_dir, restarts, refusing):
+        response = await save(signed_in, player_name="Hall")
+        await settled()
+
+        assert response.status == 500
+        assert "could not be saved" in await response.text()
+        assert restarts.count == 0
+        assert store.read(cache_dir).values == {}
+
+    async def test_a_failed_password_change_keeps_the_old_password_and_session(self, signed_in, cache_dir, refusing):
+        response = await post(
+            signed_in, "/password", {"current": PASSWORD, "password": "a brand new one", "again": "a brand new one"}
+        )
+
+        assert response.status == 500
+        assert auth.password_matches(PASSWORD, store.read(cache_dir).password)
+        assert (await signed_in.get("/", allow_redirects=False)).status == 200
+
+
+@pytest.mark.parametrize(("method", "path"), [("GET", "/nowhere"), ("PUT", "/settings")])
+async def test_aiohttps_own_errors_carry_the_security_headers_too(page, method, path):
+    response = await page.request(method, path, headers=origin(page))
+
+    assert response.status in {404, 405}
+    for name, value in SECURITY_HEADERS.items():
+        assert response.headers.get(name) == value, f"{method} {path} answered without {name}"
+
+
+async def test_the_flows_leave_their_events_in_the_journal(page, clock, caplog):
+    """`deploy/README.md` tells the operator to look for these, so each is asserted by name."""
+    caplog.set_level(logging.INFO)
+    await set_up(page)
+    page.session.cookie_jar.clear()
+    await post(page, "/login", {"password": "wrong"})
+    clock.now += 2
+    await post(page, "/login", {"password": PASSWORD})
+    await post(page, "/password", {"current": "wrong", "password": "irrelevant!", "again": "irrelevant!"})
+    clock.now += 2
+    await post(page, "/password", {"current": PASSWORD, "password": "a brand new one", "again": "a brand new one"})
+
+    events = {getattr(record, "event", None) for record in caplog.records}
+
+    assert {
+        "settings_page.password_set",
+        "settings_page.login_refused",
+        "settings_page.password_refused",
+        "settings_page.password_changed",
+    } <= events
+
+
+async def test_setup_mode_says_so_in_the_journal_and_names_the_page(monkeypatch, cache_dir, capsys, caplog):
+    caplog.set_level(logging.INFO)
+    port = free_port()
+    monkeypatch.setattr(entry, "load_ui", lambda: loopback(cache_dir, port))
+
+    def no_server():
+        raise SetupRequired(("SERVER_URL",))
+
+    monkeypatch.setattr(entry, "load", no_server)
+    running = asyncio.create_task(entry._run())
+    await _printed(capsys)
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(running, timeout=5)
+
+    by_event = {getattr(record, "event", None): record for record in caplog.records}
+    assert by_event["daemon.setup_mode"].missing == ["SERVER_URL"]
+    listening = by_event["settings_page.listening"]
+    assert (listening.bind, listening.port, listening.setup_mode) == ("127.0.0.1", port, True)

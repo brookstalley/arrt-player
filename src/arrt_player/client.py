@@ -476,7 +476,13 @@ class Supervisor:
         log.info(
             "client starting against %s",
             self._settings.server_url,
-            extra={"event": "client.started", **self._settings.startup_lines()},
+            extra={
+                "event": "client.started",
+                **self._settings.startup_lines(),
+                # The name it goes by, which is the server's once there is one:
+                # the local PLAYER_NAME alone would contradict the settings page.
+                "player_name": player_name(self._settings.cache_dir, self._settings.player_name) or "(none)",
+            },
         )
         try:
             cached = self._link.cached()

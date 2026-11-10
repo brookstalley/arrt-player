@@ -240,7 +240,7 @@ def server_url_problem(value: str) -> str | None:
     """
     try:
         parts = urlsplit(value)
-        port = parts.port
+        _ = parts.port  # reading it is what raises on a port that is not a number
     except ValueError as exc:
         return f"SERVER_URL is not an address ({exc})."
     if parts.scheme not in {"http", "https"} or not parts.hostname:
@@ -249,7 +249,6 @@ def server_url_problem(value: str) -> str | None:
         return "SERVER_URL must not carry a user name or password; it is logged, and the token is sent separately."
     if parts.query or parts.fragment:
         return "SERVER_URL must not carry a query or a fragment."
-    del port
     return None
 
 
@@ -295,10 +294,6 @@ class UiSettings:
     #: What the environment sets the pinned keys to, for the page to show. Never
     #: `CLIENT_TOKEN`'s value: the page says only whether one is set.
     pinned_values: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def settings_path(self) -> Path:
-        return settings_store.path_in(self.cache_dir)
 
     def startup_lines(self) -> dict[str, object]:
         return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned)}
@@ -689,7 +684,12 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
         bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
         port=port,
         pinned=frozenset(name for name in settings_store.MANAGED_KEYS if env.get(name)),
-        pinned_values={name: env[name] for name in ("SERVER_URL", "PLAYER_NAME") if env.get(name)},
+        # Cleaned as `load` cleans them, so the page shows the value the Player uses.
+        pinned_values={
+            name: clean(env[name])
+            for name, clean in (("SERVER_URL", lambda value: value.rstrip("/")), ("PLAYER_NAME", str.strip))
+            if env.get(name)
+        },
     )
 
 

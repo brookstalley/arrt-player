@@ -319,6 +319,26 @@ async def test_a_client_restarted_while_the_server_is_down_starts_the_walls_it_l
         assert restarted.running == {"hall": "hdmi-a-1"}
 
 
+async def test_the_startup_line_names_the_player_as_its_server_does(client, drm, caplog):
+    """The name it goes by is the server's once there is one; the startup line saying the local
+    `PLAYER_NAME` instead would contradict the settings page for the same Player."""
+    client = replace(client, player_name="Our own name")
+    client.cache_dir.mkdir(parents=True, exist_ok=True)
+    client.client_document_path.write_text(
+        json.dumps({"client_id": CLIENT_ID, "name": "The server's name", "walls": []}), encoding="utf-8"
+    )
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.client"):
+        async with Running(supervisor_for(client, drm)):
+            await eventually(
+                lambda: any(record.__dict__.get("event") == "client.started" for record in caplog.records),
+                what="the startup line",
+            )
+
+    started = next(record for record in caplog.records if record.__dict__.get("event") == "client.started")
+    assert started.player_name == "The server's name"
+
+
 @pytest.mark.parametrize(
     "fault",
     ["token-refused", "document-unreadable", "server-error"],

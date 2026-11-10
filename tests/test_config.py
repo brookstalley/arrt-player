@@ -512,7 +512,9 @@ class TestThePlayersName:
             load(an_environment(cache_dir, frame=False, PLAYER_NAME="x" * 65))
 
     def test_the_page_is_shown_what_the_environment_pins_but_never_the_token(self, cache_dir: Path):
-        ui = load_ui(an_environment(cache_dir, frame=False, PLAYER_NAME="Hall"))
+        """Cleaned as `load` cleans them (no trailing slash, no surrounding space), so the page
+        shows the value the Player actually uses, not the one typed into `.env`."""
+        ui = load_ui(an_environment(cache_dir, frame=False, PLAYER_NAME="  Hall "))
 
-        assert ui.pinned_values == {"SERVER_URL": "http://127.0.0.1:8770/", "PLAYER_NAME": "Hall"}
+        assert ui.pinned_values == {"SERVER_URL": "http://127.0.0.1:8770", "PLAYER_NAME": "Hall"}
         assert "the-clients-token" not in repr(ui)

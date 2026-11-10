@@ -39,6 +39,9 @@ COOKIE_NAME: Final[str] = "arrt_player_session"
 #: The longest a throttled login waits.
 MAXIMUM_THROTTLE_SECONDS: Final[float] = 60.0
 
+#: The doubling past which the wait is the maximum anyway: 2**6 = 64 > 60.
+_LARGEST_DOUBLING: Final[int] = 6
+
 
 def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
@@ -111,7 +114,11 @@ class Throttle:
 
     def failed(self) -> None:
         self.failures += 1
-        self._not_before = self.monotonic() + min(2.0 ** (self.failures - 1), MAXIMUM_THROTTLE_SECONDS)
+        # The exponent is capped before it is raised, not after: 2.0 ** 1024
+        # overflows a float, which would turn the 1025th wrong guess into a
+        # server error on every login, the right password's included.
+        exponent = min(self.failures - 1, _LARGEST_DOUBLING)
+        self._not_before = self.monotonic() + min(2.0**exponent, MAXIMUM_THROTTLE_SECONDS)
 
     def succeeded(self) -> None:
         self.failures = 0
