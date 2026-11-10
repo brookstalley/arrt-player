@@ -29,6 +29,12 @@ move out of Arrt's repository did not bring that setup along.
   `testament run` ran the whole suite, 1263 passed, with no fallback and nothing
   missing.
 
+### Also carried: the settings page's records, after its deploy
+The runbook, the settings-ui plan and `deploy/README.md` § The settings page
+said the on-Pi checks had not been run. They ran when the wall Pi moved to
+9ca66b2 on 2026-11-10, and all three records now say so. They ride this branch
+because `develop` takes changes only by PR.
+
 ### Confirmed by the owner
 The container executor and one suite, 2026-11-10.
 
