@@ -22,6 +22,7 @@ already accepts.
 """
 
 import asyncio
+import hashlib
 import html
 import logging
 import socket
@@ -81,9 +82,18 @@ STATIC_DIRECTORY: Final[Path] = Path(__file__).parent / "static"
 #: only when the response carries no `Content-Type`, so naming it here wins.
 STATIC_TYPES: Final[dict[str, str]] = {".css": "text/css", ".woff2": "font/woff2"}
 
-#: A static file is the same for a whole release, so a browser may keep it for a
-#: day rather than fetch the typefaces again on every page.
+#: A static file may be kept a day rather than fetched again on every page. That
+#: is safe only because the stylesheet's address changes with its content
+#: (`stylesheet_href`): a release that changes it is fetched at once, not a day
+#: later in a browser still drawing the old layout.
 STATIC_CACHE_CONTROL: Final[str] = "public, max-age=86400"
+
+
+def stylesheet_href(directory: Path = STATIC_DIRECTORY) -> str:
+    """The stylesheet's address, carrying a hash of its content, so a changed sheet is a new address."""
+    digest = hashlib.sha256((directory / "settings.css").read_bytes()).hexdigest()[:12]
+    return f"/static/settings.css?v={digest}"
+
 
 #: An address no packet is sent to (TEST-NET-1, RFC 5737). Connecting a UDP
 #: socket to it only asks the kernel which local address would route there.
@@ -603,7 +613,7 @@ def _page(title: str, body: str, *, heading: str | None = None, status: int = 20
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>{html.escape(title)} · Arrt Player</title>"
-        '<link rel="stylesheet" href="/static/settings.css"></head>'
+        f'<link rel="stylesheet" href="{stylesheet_href()}"></head>'
         '<body><header class="masthead"><div class="column">'
         '<span class="brand">Arrt<span class="brand-part">Player</span></span></div></header>'
         f'<main class="column"><h1>{html.escape(heading or title)}</h1>{body}</main></body></html>'

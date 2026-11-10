@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from arrt_player.config import UiSettings
 from arrt_player.settings_ui import auth
-from arrt_player.settings_ui.server import STATIC_CACHE_CONTROL, STATIC_DIRECTORY, PageState, build
+from arrt_player.settings_ui.server import STATIC_CACHE_CONTROL, STATIC_DIRECTORY, PageState, build, stylesheet_href
 
 STYLESHEET = STATIC_DIRECTORY / "settings.css"
 
@@ -127,6 +127,18 @@ def test_every_typeface_the_stylesheet_names_is_on_disk():
     assert [source for source in sources if not (STATIC_DIRECTORY / source).is_file()] == []
 
 
+def test_a_changed_stylesheet_is_a_new_address(tmp_path: Path):
+    """The stylesheet may be cached a day, so a release that changes it must change its address,
+    or a browser keeps drawing the old layout until the day is out."""
+    (tmp_path / "settings.css").write_text("main { padding: 0; }", encoding="utf-8")
+    before = stylesheet_href(tmp_path)
+
+    (tmp_path / "settings.css").write_text("main { padding: 1rem; }", encoding="utf-8")
+
+    assert stylesheet_href(tmp_path) != before
+    assert before.startswith("/static/settings.css?v=")
+
+
 class TestTheStyleIsServed:
     @pytest.fixture
     async def page(self, cache_dir: Path):
@@ -144,8 +156,14 @@ class TestTheStyleIsServed:
     async def test_the_pages_link_the_stylesheet_and_no_inline_style(self, page):
         text = await (await page.get("/")).text()
 
-        assert '<link rel="stylesheet" href="/static/settings.css">' in text
+        assert f'<link rel="stylesheet" href="{stylesheet_href()}">' in text
         assert "<style" not in text, "an inline style, which the page's CSP refuses"
+
+    async def test_the_stylesheets_address_answers(self, page):
+        response = await page.get(stylesheet_href())
+
+        assert response.status == 200
+        assert response.content_type == "text/css"
 
     @pytest.mark.parametrize(
         ("path", "kind"),
