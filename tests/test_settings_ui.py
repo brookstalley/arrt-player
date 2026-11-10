@@ -1094,6 +1094,35 @@ class TestWhatTheSlideshowSays:
         assert "Running" in text
         assert "a Reddit slideshow" in text
 
+    async def test_downloads_are_said_by_the_tier_that_gave_them(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(
+            outcome=Outcome.LISTED, items=47, downloaded=47, tiers=Counter({"reddit": 45, "host:imgur": 2}), failed=3
+        )
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "Downloaded since start: 47 (reddit 45, host:imgur 2)." in text
+        assert "3 would not download last time" in text
+
+    async def test_nothing_downloaded_and_nothing_failed_says_neither(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(outcome=Outcome.LISTED, items=4)
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "Downloaded since start" not in text
+        assert "would not download" not in text
+
+    async def test_a_cookie_claiming_an_impossible_expiry_still_draws_the_page(self, signed_in, restarts):
+        body = base64.urlsafe_b64encode(b'{"exp": 1e300}').decode().rstrip("=")
+        await save_slideshow(signed_in, reddit_session=f"eyJh.{body}.sig")
+
+        response = await signed_in.get("/")
+
+        assert response.status == 200
+        assert "It does not say when it expires." in await response.text()
+
     async def test_an_outage_says_it_plays_on_from_what_was_listed(self, signed_in, state):
         state.missing = ()
         state.slideshow = SlideshowStatus(outcome=Outcome.UNREACHABLE, items=12)

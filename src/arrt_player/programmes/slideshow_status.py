@@ -28,10 +28,12 @@ class SlideshowStatus:
     #: True while the listing being played is the one saved before this start,
     #: because Reddit has not listed anything since.
     from_saved: bool = False
-    #: The last fill: downloads by tier, failures, and whether it stopped at the cap or for the network.
+    #: Downloads since this start, and by the tier that gave each, so a resolver
+    #: that always falls back to Reddit's copy shows on the page.
     downloaded: int = 0
-    failed: int = 0
     tiers: Counter[str] = field(default_factory=Counter)
+    #: The last fill's failures, and whether it stopped at the cap or for the network.
+    failed: int = 0
     cap_reached: bool = False
     network_down: bool = False
     #: The title of what is on the screen, or None when nothing is.

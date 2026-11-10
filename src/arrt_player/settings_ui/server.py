@@ -698,6 +698,11 @@ def _slideshow_status(status: SlideshowStatus | None, *, now: float) -> str:
     if status.answered_at is not None:
         said += f" Asked {_ago(now - status.answered_at)}."
     said += _listing_words(status)
+    if status.downloaded:
+        by_tier = ", ".join(f"{tier} {count}" for tier, count in status.tiers.most_common())
+        said += f" Downloaded since start: {status.downloaded} ({by_tier})."
+    if status.failed:
+        said += f" {status.failed} would not download last time; each is tried again in half an hour."
     if status.cap_reached:
         said += " The cache is full, so later items wait."
     if status.network_down:

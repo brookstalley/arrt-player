@@ -55,3 +55,9 @@ def test_a_value_that_cannot_ride_in_a_cookie_header_is_refused(value: str):
 
 def test_a_real_shaped_value_is_taken():
     assert session_problem(jwt({"exp": 1})) is None
+
+
+@pytest.mark.parametrize("exp", [10**400, 1e300, float("inf"), -1, 0, 32_503_680_000])
+def test_an_expiry_no_date_can_be_written_for_is_none(exp):
+    """`json.dumps` writes 10**400 as an integer and inf as `Infinity`; either crashed the page's date before."""
+    assert session_expiry(jwt({"exp": exp})) is None

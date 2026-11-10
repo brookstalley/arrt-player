@@ -37,6 +37,9 @@ _LISTING_DEPTH: Final[int] = 2
 #: What a browser's cookie panel shows before the value, which people paste too.
 _COOKIE_NAME_PREFIX: Final[str] = "reddit_session="
 
+#: The latest expiry read as one, the start of the year 3000.
+_LATEST_EXPIRY: Final[float] = 32_503_680_000.0
+
 #: The longest value accepted. Reddit's is about 700 characters; this is a typo guard, not a format.
 _MAX_SESSION_LENGTH: Final[int] = 8192
 
@@ -99,4 +102,8 @@ def session_expiry(value: str) -> float | None:
     except (binascii.Error, ValueError):
         return None
     expiry = claims.get("exp") if isinstance(claims, dict) else None
-    return float(expiry) if isinstance(expiry, int | float) and not isinstance(expiry, bool) else None
+    if not isinstance(expiry, int | float) or isinstance(expiry, bool):
+        return None
+    # A claim no date can be written for (beyond what `time.gmtime` takes) is
+    # read as no claim: the page would otherwise fail on every render.
+    return float(expiry) if 0 < expiry < _LATEST_EXPIRY else None

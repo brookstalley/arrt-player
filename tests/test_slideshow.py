@@ -462,6 +462,34 @@ async def test_a_caption_asked_for_while_the_panel_is_busy_is_drawn_while_its_po
     assert drawn_during[:2] == [("Title a", "t3_a"), ("Title b", "t3_b")]
 
 
+async def test_a_fill_that_fails_unforeseen_ends_the_run_and_still_closes_the_screen(tmp_path):
+    """Neither a fill that stops for good nor an mpv left running: the run fails, so systemd restarts it."""
+    rig = Rig(tmp_path, Source(listed(item("a"))))
+
+    async def broken(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("a defect in the fill")
+
+    rig.cache.fill = broken  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="a defect in the fill"):
+        await rig.run_until(lambda: rig.time.now > 1000 + 60)
+
+    assert rig.screen.closed == 1
+
+
+async def test_a_listing_read_that_fails_unforeseen_still_closes_the_screen(tmp_path):
+    class Broken(Source):
+        async def listing(self) -> Listing:
+            raise RuntimeError("a defect in the source")
+
+    rig = Rig(tmp_path, Broken(listed(item("a"))))
+
+    with pytest.raises(RuntimeError, match="a defect in the source"):
+        await rig.run_until(lambda: rig.time.now > 1000 + 60)
+
+    assert rig.screen.closed == 1
+
+
 # -- the status the page reads ---------------------------------------------------------
 
 
@@ -472,7 +500,17 @@ async def test_the_status_says_what_reddit_answered_and_what_is_up(tmp_path):
 
     assert rig.status.outcome is Outcome.LISTED
     assert (rig.status.items, rig.status.unresolved, rig.status.downloaded) == (1, Counter({"gfycat.com": 2}), 1)
+    assert rig.status.tiers == Counter({"reddit": 1})
     assert rig.status.showing == "Title a"
+
+
+async def test_downloads_are_counted_by_tier_across_fills_since_the_start(tmp_path):
+    rig = Rig(tmp_path, Source(listed(item("a")), listed(item("a"), item("b"))))
+
+    await rig.run_until(lambda: rig.time.now >= TAKEN + 31)
+
+    assert rig.status.downloaded == 2
+    assert rig.status.tiers == Counter({"reddit": 2})
 
 
 # -- the composition --------------------------------------------------------------------

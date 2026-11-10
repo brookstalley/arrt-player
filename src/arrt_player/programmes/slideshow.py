@@ -237,23 +237,34 @@ class Slideshow:
         self._fill_wanted.set()
         try:
             while not stop.is_set():
+                if filling.done():
+                    # The fill never ends on its own. One that did raised
+                    # something unforeseen: ended here, the run fails and
+                    # systemd restarts it, rather than the cache quietly
+                    # never filling again.
+                    filling.result()
                 self._take_a_finished_refresh()
                 await self._show_next(stop)
         finally:
             await self._wind_down(filling)
 
     async def _wind_down(self, filling: "asyncio.Task[None]") -> None:
-        for task in (filling, self._refreshing):
-            if task is not None:
+        """Stop the tasks and close the screen. The screen is closed whatever the tasks ended with."""
+        try:
+            tasks = [task for task in (filling, self._refreshing) if task is not None]
+            for task in tasks:
                 task.cancel()
+            # Gathered as results, so a task that already failed cannot raise
+            # here and skip the close below; its error is the run's, raised by
+            # whoever saw it first.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if self._drawing is not None and not self._drawing.done():
+                # The panel's own budget bounds this; cancelling would leave its draw gate open.
                 with contextlib.suppress(asyncio.CancelledError):
-                    await task
-        if self._drawing is not None and not self._drawing.done():
-            # The panel's own budget bounds this; cancelling would leave its draw gate open.
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._drawing
-        # On a thread: a load in flight holds the renderer's lock until it returns.
-        await asyncio.to_thread(self._screen.close)
+                    await self._drawing
+        finally:
+            # On a thread: a load in flight holds the renderer's lock until it returns.
+            await asyncio.to_thread(self._screen.close)
 
     # -- the listing -------------------------------------------------------------------------
 
@@ -332,7 +343,9 @@ class Slideshow:
 
     def _report_fill(self, report: FillReport) -> None:
         status = self.status
-        status.downloaded, status.failed, status.tiers = len(report.downloaded), len(report.failed), report.tiers
+        status.downloaded += len(report.downloaded)
+        status.tiers += report.tiers
+        status.failed = len(report.failed)
         status.cap_reached, status.network_down = report.cap_reached, report.network_down
         if report.downloaded or report.failed:
             log.info(
