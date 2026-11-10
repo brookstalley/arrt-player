@@ -67,7 +67,12 @@ last_validated: 2026-11-10
 - Sessions are invalidated only by changing the password (a new session secret) or by expiry. That is acceptable for one owner.
 - Plain HTTP means the password crosses the LAN in the clear. Revisit if the Player is ever reachable from outside the LAN.
 
-**Decisions made mid-build:** *(appended while building)*
+**Decisions made mid-build:**
+- Chunk 01: `_run` installs its signal handlers before resolving any config, so a SIGTERM during start-up is always handled. Settled by "shutdown is SIGTERM" (NFR).
+- Chunk 01: `store.write` creates `CACHE_DIR`, because in setup mode it may be the first thing to touch it. Settled by setup mode itself.
+- Chunk 01: `Referrer-Policy: same-origin`, not `no-referrer`, because under `no-referrer` a browser's form POST carries `Origin: null` and the origin check would refuse it. Settled by the origin check.
+- Chunk 01: a login attempt is charged to the throttle before its password is checked, and scrypt runs on a thread. Settled by "the throttle bounds guessing" and "a wall never waits on its settings".
+- Chunk 01: still owed is a check in a real browser, which the suite cannot make. It rides chunk 02's visual check.
 
 **Level:** Medium-High. Requirements are settled and the mechanisms are all stdlib or aiohttp, which the repo already uses. To raise it: chunk 01's first test, aiohttp's test server against the setup flow, proves that the server, the store and the startup path connect.
 

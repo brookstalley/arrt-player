@@ -111,6 +111,9 @@ sensitive as the token itself.
   (`auth.hash_password`, n=2^14, r=8), at least `auth.MINIMUM_PASSWORD_LENGTH`
   characters. Wrong passwords are throttled per process, doubling to a minute
   (`auth.Throttle`; `::test_wrong_passwords_are_throttled_and_the_right_one_waits_too`).
+  Each attempt is charged before its password is checked, so concurrent attempts
+  cannot share one window (`::test_concurrent_wrong_passwords_share_one_window`),
+  and scrypt runs on a thread, off the loop that drives the walls.
   To recover a forgotten one, delete `auth.password` from the file and restart.
 - **The session** is a cookie holding an expiry and an HMAC-SHA256 over it under
   `auth.session_secret`, stored with the password, so it survives a restart. It
@@ -120,7 +123,8 @@ sensitive as the token itself.
   own (`server._same_origin_posts`); one with none or another is refused before
   the handler runs (`TestWhatThePageRefuses`). Every response sets a CSP that
   loads nothing from elsewhere, `X-Frame-Options: DENY`, `nosniff`,
-  `no-referrer` and `no-store` (`server.SECURITY_HEADERS`).
+  `Referrer-Policy: same-origin` (not `no-referrer`, under which a browser sends
+  `Origin: null` and every form would be refused) and `no-store` (`server.SECURITY_HEADERS`).
 - **Plain HTTP.** The password and the cookie cross the LAN in the clear, as
   the server's traffic does; this is Arrt's LAN-only boundary
   (Arrt's `security-model.md` § Trust Boundary). `UI_BIND=127.0.0.1` keeps the page

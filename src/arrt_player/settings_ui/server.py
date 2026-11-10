@@ -53,7 +53,10 @@ SECURITY_HEADERS: Final[dict[str, str]] = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    # `same-origin`, never `no-referrer`: under that policy a browser sends
+    # `Origin: null` on a form POST (Fetch, "append a request Origin header"),
+    # and `_same_origin_posts` would refuse every form the page serves.
+    "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
 
@@ -118,12 +121,18 @@ def address_to_visit(ui: UiSettings) -> str:
         return socket.gethostname()
 
 
+def _authority(ui: UiSettings) -> str:
+    host = address_to_visit(ui)
+    # An IPv6 literal needs brackets in a URL, or the port reads as part of it.
+    return f"[{host}]:{ui.port}" if ":" in host else f"{host}:{ui.port}"
+
+
 def setup_url(ui: UiSettings, code: str) -> str:
-    return f"http://{address_to_visit(ui)}:{ui.port}/setup?code={code}"
+    return f"http://{_authority(ui)}/setup?code={code}"
 
 
 def home_url(ui: UiSettings) -> str:
-    return f"http://{address_to_visit(ui)}:{ui.port}/"
+    return f"http://{_authority(ui)}/"
 
 
 # -- middleware ------------------------------------------------------------------
@@ -200,7 +209,8 @@ async def _setup(request: Request) -> Response:
         return _setup_page(code, problem=problem, status=400)
 
     secret = auth.new_session_secret()
-    store.write(state.ui.cache_dir, stored.with_auth(password=auth.hash_password(password), session_secret=secret))
+    encoded = await asyncio.to_thread(auth.hash_password, password)
+    store.write(state.ui.cache_dir, stored.with_auth(password=encoded, session_secret=secret))
     state.setup_code = None
     log.info("the settings page's password is set", extra={"event": "settings_page.password_set"})
     return _signed_in_redirect(secret, state)
@@ -217,12 +227,19 @@ async def _login(request: Request) -> Response:
     stored = state.stored()
     if stored.password is None:
         return _redirect("/")
+    form = await request.post()
+    # Checked and charged with no await between, so concurrent attempts cannot
+    # all pass the check before any is counted: each is a failure until proven
+    # otherwise, and a right password clears the charge below.
     wait = state.throttle.wait_seconds()
     if wait > 0:
         return _login_page(problem=f"Too many wrong passwords. Try again in {int(wait) + 1} s.", status=429)
-    form = await request.post()
-    if stored.session_secret is None or not auth.password_matches(str(form.get("password", "")), stored.password):
-        state.throttle.failed()
+    state.throttle.failed()
+    # scrypt is tenths of a second and 16 MiB on a Pi, so it runs on a thread
+    # rather than on the loop that drives the walls.
+    offered = str(form.get("password", ""))
+    matched = await asyncio.to_thread(auth.password_matches, offered, stored.password)
+    if stored.session_secret is None or not matched:
         log.warning("a wrong password was offered to the settings page", extra={"event": "settings_page.login_refused"})
         return _login_page(problem="That is not the password.", status=403)
     state.throttle.succeeded()

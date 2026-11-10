@@ -163,6 +163,11 @@ def test_the_settings_page_names_no_client():
     assert _client_names(SETTINGS_PAGE_MODULE) == set()
 
 
+def test_the_settings_page_takes_aiohttp_only_as_from_aiohttp_web():
+    """`import aiohttp.web` binds the name `aiohttp`, which reaches `aiohttp.request` by attribute."""
+    assert _aiohttp_spellings(SETTINGS_PAGE_MODULE) == []
+
+
 def test_only_the_entry_point_imports_the_settings_page():
     """As with the pull: an exemption for a file must not become an exemption for whatever imports it."""
     importers = sorted(
@@ -223,6 +228,17 @@ def _exempt(offence: "Offence", pull: pathlib.Path = PULL_MODULE, page: pathlib.
     return importer == page and (offence.name == WEB_SERVER or offence.name.startswith(f"{WEB_SERVER}."))
 
 
+def _aiohttp_spellings(path: pathlib.Path) -> list[str]:
+    """Every import of aiohttp in a file that is not `from aiohttp.web import …`."""
+    wrong: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            wrong += [f"import {alias.name}" for alias in node.names if alias.name.split(".")[0] == "aiohttp"]
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "aiohttp" and node.module != WEB_SERVER:
+            wrong.append(f"from {node.module} import …")
+    return wrong
+
+
 def _client_names(path: pathlib.Path) -> set[str]:
     """Every client name a file spells, as a name, an attribute or an imported alias."""
     spelled: set[str] = set()
@@ -258,11 +274,12 @@ class TestTheGuardCanFail:
             "from aiohttp import web\n",
             "from aiohttp.web import Application\nfrom aiohttp import ClientSession\n",
             "import aiohttp.web\n\naiohttp.ClientSession()\n",
+            "import aiohttp.web\n\naiohttp.request('GET', 'http://elsewhere')\n",
+            "from aiohttp.web_app import Application\n",
         ):
             page = _plant(tmp_path, "server.py", source)
             caught = [offence for offence in _audit([page], roots=(tmp_path,)) if not _exempt(offence, page=page)]
-            spelled = _client_names(page)
-            assert caught or spelled, f"the page's exemption let this through: {source!r}"
+            assert caught or _client_names(page) or _aiohttp_spellings(page), f"the page's exemption let this through: {source!r}"
 
     def test_the_server_half_is_not_exempt_beside_the_page(self, tmp_path: pathlib.Path):
         page = _plant(tmp_path, "server.py", "from aiohttp.web import Application\n")

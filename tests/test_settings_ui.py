@@ -299,6 +299,15 @@ class TestSigningIn:
         clock.now += 1.5
         assert (await post(page, "/login", {"password": PASSWORD})).status == 303
 
+    async def test_concurrent_wrong_passwords_share_one_window(self, page):
+        """Bodies sent together must not all pass the check before any is counted."""
+        await set_up(page)
+        page.session.cookie_jar.clear()
+
+        answers = await asyncio.gather(*(post(page, "/login", {"password": f"wrong {n}"}) for n in range(4)))
+
+        assert sorted(answer.status for answer in answers) == [403, 429, 429, 429]
+
     async def test_a_cookie_signed_under_another_secret_is_refused(self, page, cache_dir, clock):
         await set_up(page)
         page.session.cookie_jar.clear()
@@ -331,6 +340,14 @@ class TestWhatThePageRefuses:
 
         assert response.status == 403
         assert store.read(cache_dir).password is None
+
+    async def test_the_pages_referrer_policy_lets_a_browser_send_its_origin(self, page):
+        """Under `no-referrer` a browser sends `Origin: null` on a form POST (Fetch, "append a request
+        Origin header"), and the origin check would refuse every form the page serves. Only these
+        policies leave a same-origin POST its real Origin."""
+        policy = (await page.get("/login")).headers["Referrer-Policy"]
+
+        assert policy in {"same-origin", "strict-origin", "strict-origin-when-cross-origin", "origin"}
 
     @pytest.mark.parametrize("path", ["/", f"/setup?code={CODE}", "/setup", "/login"])
     async def test_every_answer_carries_the_security_headers(self, page, path):
@@ -395,6 +412,13 @@ async def test_once_a_password_is_set_the_printed_line_carries_no_code(cache_dir
 
     assert state.setup_code is None
     assert entry.where_to_go(state) == "go to http://127.0.0.1:8771/ to configure"
+
+
+@pytest.mark.parametrize(("bind", "expected"), [("127.0.0.1", "http://127.0.0.1:8771/"), ("::1", "http://[::1]:8771/")])
+def test_the_printed_address_is_one_a_browser_can_parse(cache_dir, bind, expected):
+    ui = UiSettings(cache_dir=cache_dir, bind=bind, port=8771, pinned=frozenset())
+
+    assert entry.server.home_url(ui) == expected
 
 
 async def test_a_page_that_cannot_listen_says_so_and_returns(cache_dir, caplog):
