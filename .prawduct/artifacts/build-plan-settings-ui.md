@@ -73,6 +73,10 @@ last_validated: 2026-11-10
 - Chunk 01: `Referrer-Policy: same-origin`, not `no-referrer`, because under `no-referrer` a browser's form POST carries `Origin: null` and the origin check would refuse it. Settled by the origin check.
 - Chunk 01: a login attempt is charged to the throttle before its password is checked, and scrypt runs on a thread. Settled by "the throttle bounds guessing" and "a wall never waits on its settings".
 - Chunk 01: still owed is a check in a real browser, which the suite cannot make. It rides chunk 02's visual check.
+- Chunk 02: when the environment pins either `SERVER_URL` or `CLIENT_TOKEN`, the page locks both. Settled by "the address and the token move together": otherwise the page could point the environment's token at a new host.
+- Chunk 02: a token entered with no server address is refused with a reason, not silently dropped. Settled by "never silently drop".
+- Chunk 02: `config.load` now validates `SERVER_URL` (http(s), a host, no userinfo, query or fragment), `CLIENT_TOKEN` (no whitespace) and `PLAYER_NAME`, using the same functions as the form. This is a new refusal at start. *Not settled by the goals:* it is inferred from "validate the way config.load does", which needed `load` to validate something.
+- Chunk 02: the setup code is spent before the new password is hashed, closing a race between two concurrent setups.
 
 **Level:** Medium-High. Requirements are settled and the mechanisms are all stdlib or aiohttp, which the repo already uses. To raise it: chunk 01's first test, aiohttp's test server against the setup flow, proves that the server, the store and the startup path connect.
 

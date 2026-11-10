@@ -459,3 +459,60 @@ class TestTheGeometryThePlayerComposesFor:
         """A screen draws a mat too, so the mat is the client's and not the Frame's."""
         with pytest.raises(ConfigError, match="MAT_BOTTOM_WEIGHT"):
             load(an_environment(cache_dir, frame=False, MAT_BOTTOM_WEIGHT="0"))
+
+
+class TestWhatTheServerKeysMayBe:
+    """`config.load` and the settings page judge these by the same functions, so neither accepts what the other refuses."""
+
+    @pytest.mark.parametrize(
+        ("url", "said"),
+        [
+            ("arrt.local:8770", "http://"),
+            ("ftp://arrt.local", "http://"),
+            ("http://", "with a host"),
+            ("http://user:secret@arrt.local:8770", "user name or password"),
+            ("http://arrt.local:8770/?a=1", "query"),
+            ("http://arrt.local:port", "not an address"),
+        ],
+    )
+    def test_a_server_url_that_is_not_one_is_refused_with_the_reason(self, cache_dir: Path, url: str, said: str):
+        with pytest.raises(ConfigError, match=said):
+            load(an_environment(cache_dir, frame=False, SERVER_URL=url))
+
+    def test_a_password_in_the_server_url_is_never_echoed(self, cache_dir: Path):
+        """`SERVER_URL` is logged at start, which is why userinfo is refused; the refusal must not log it either."""
+        with pytest.raises(ConfigError) as raised:
+            load(an_environment(cache_dir, frame=False, SERVER_URL="http://user:hunter2-secret@arrt.local"))
+
+        assert "hunter2-secret" not in str(raised.value)
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.1:8770", "https://arrt.example", "http://[::1]:8770/"])
+    def test_an_ordinary_address_is_taken(self, cache_dir: Path, url: str):
+        assert load(an_environment(cache_dir, frame=False, SERVER_URL=url)).server_url == url.rstrip("/")
+
+    def test_a_token_with_whitespace_is_refused_and_not_echoed(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="CLIENT_TOKEN") as raised:
+            load(an_environment(cache_dir, frame=False, CLIENT_TOKEN="half a-token"))
+
+        assert "half a-token" not in str(raised.value)
+
+
+class TestThePlayersName:
+    def test_it_is_read_trimmed_and_named_in_the_startup_line(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, frame=False, PLAYER_NAME="  Hall  "))
+
+        assert settings.player_name == "Hall"
+        assert settings.startup_lines()["player_name"] == "Hall"
+
+    def test_unset_it_is_said_to_be(self, cache_dir: Path):
+        assert "PLAYER_NAME is not set" in str(load(an_environment(cache_dir, frame=False)).startup_lines()["player_name"])
+
+    def test_one_too_long_is_refused(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="PLAYER_NAME"):
+            load(an_environment(cache_dir, frame=False, PLAYER_NAME="x" * 65))
+
+    def test_the_page_is_shown_what_the_environment_pins_but_never_the_token(self, cache_dir: Path):
+        ui = load_ui(an_environment(cache_dir, frame=False, PLAYER_NAME="Hall"))
+
+        assert ui.pinned_values == {"SERVER_URL": "http://127.0.0.1:8770/", "PLAYER_NAME": "Hall"}
+        assert "the-clients-token" not in repr(ui)

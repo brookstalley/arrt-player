@@ -8,6 +8,7 @@ log record.
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -20,8 +21,10 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from arrt_player import __main__ as entry
-from arrt_player.config import ConfigError, SetupRequired, UiSettings
+from arrt_player.client import player_name
+from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequired, UiSettings
 from arrt_player.settings_ui import auth, store
+from arrt_player.settings_ui import server as server_module
 from arrt_player.settings_ui.server import SECURITY_HEADERS, PageState, build
 
 CODE = "the-setup-code"
@@ -494,3 +497,263 @@ class TestClientFor:
 
     async def __aexit__(self, *_exc) -> None:
         await self.session.close()
+
+
+# -- the settings form ------------------------------------------------------------------
+
+TOKEN = "the-clients-secret-token"
+
+
+class Restarts:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self) -> None:
+        self.count += 1
+
+
+@pytest.fixture
+def restarts(state: PageState, monkeypatch) -> Restarts:
+    recorder = Restarts()
+    state.restart = recorder
+    monkeypatch.setattr(server_module, "_RESTART_DELAY_SECONDS", 0)
+    return recorder
+
+
+@pytest.fixture
+async def signed_in(page: TestClient) -> TestClient:
+    await set_up(page)
+    return page
+
+
+def pin(state: PageState, **values: str) -> None:
+    """The environment setting these keys, as `load_ui` would have resolved it."""
+    state.ui = UiSettings(
+        cache_dir=state.ui.cache_dir,
+        bind=state.ui.bind,
+        port=state.ui.port,
+        pinned=frozenset(values),
+        pinned_values={name: value for name, value in values.items() if name != "CLIENT_TOKEN"},
+    )
+
+
+async def save(client: TestClient, **fields: str):
+    form = {"server_url": "", "client_token": "", "player_name": "", **fields}
+    return await post(client, "/settings", form)
+
+
+async def settled() -> None:
+    """Let the restart scheduled with `call_later(0, …)` run."""
+    await asyncio.sleep(0.01)
+
+
+class TestSavingTheServer:
+    async def test_a_server_and_its_token_are_saved_and_the_player_restarts_onto_them(self, signed_in, cache_dir, restarts):
+        response = await save(signed_in, server_url="http://arrt.example:8770/", client_token=TOKEN)
+        await settled()
+
+        assert response.status == 200
+        assert store.read(cache_dir).values == {"SERVER_URL": "http://arrt.example:8770", "CLIENT_TOKEN": TOKEN}
+        assert restarts.count == 1
+
+    async def test_a_new_server_never_inherits_the_old_ones_token(self, signed_in, cache_dir, restarts):
+        await save(signed_in, server_url="http://old.example:8770", client_token=TOKEN)
+
+        await save(signed_in, server_url="http://new.example:8770")
+
+        assert store.read(cache_dir).values == {"SERVER_URL": "http://new.example:8770"}
+
+    async def test_a_new_server_with_its_own_token_keeps_the_new_token(self, signed_in, cache_dir, restarts):
+        await save(signed_in, server_url="http://old.example:8770", client_token=TOKEN)
+
+        await save(signed_in, server_url="http://new.example:8770", client_token="the-new-token")
+
+        assert store.read(cache_dir).values["CLIENT_TOKEN"] == "the-new-token"
+
+    async def test_the_same_server_with_the_token_left_empty_keeps_the_token(self, signed_in, cache_dir, restarts):
+        await save(signed_in, server_url="http://arrt.example:8770", client_token=TOKEN)
+
+        await save(signed_in, server_url="http://arrt.example:8770", player_name="Hall")
+
+        assert store.read(cache_dir).values["CLIENT_TOKEN"] == TOKEN
+
+    async def test_clearing_the_server_clears_its_token(self, signed_in, cache_dir, restarts):
+        await save(signed_in, server_url="http://arrt.example:8770", client_token=TOKEN)
+
+        await save(signed_in, server_url="")
+
+        assert store.read(cache_dir).values == {}
+
+    @pytest.mark.parametrize(
+        ("fields", "said"),
+        [
+            ({"server_url": "arrt.example:8770", "client_token": TOKEN}, "http://"),
+            ({"server_url": "http://user:pw@arrt.example", "client_token": TOKEN}, "user name or password"),
+            ({"server_url": "http://arrt.example:port", "client_token": TOKEN}, "not an address"),
+            ({"server_url": "http://arrt.example", "client_token": "two words"}, "no spaces"),
+            ({"client_token": TOKEN}, "belongs to a server"),
+            ({"player_name": "x" * 65}, "at most 64"),
+            ({"player_name": "bell\x07"}, "control characters"),
+        ],
+    )
+    async def test_a_value_config_would_refuse_is_refused_here_with_the_reason(
+        self, signed_in, cache_dir, restarts, fields, said
+    ):
+        response = await save(signed_in, **fields)
+        await settled()
+
+        assert response.status == 400
+        assert said in await response.text()
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0
+
+    async def test_nothing_changed_writes_nothing_and_does_not_restart(self, signed_in, cache_dir, restarts):
+        await save(signed_in, player_name="Hall")
+        await settled()
+        written = store.path_in(cache_dir).stat().st_mtime_ns
+
+        response = await save(signed_in, player_name="Hall")
+        await settled()
+
+        assert "Nothing changed" in await response.text()
+        assert restarts.count == 1, "an unchanged form restarted the Player"
+        assert store.path_in(cache_dir).stat().st_mtime_ns == written
+
+    async def test_a_save_needs_a_session(self, signed_in, cache_dir, restarts):
+        signed_in.session.cookie_jar.clear()
+
+        response = await save(signed_in, player_name="Hall")
+
+        assert response.status == 303
+        assert store.read(cache_dir).values == {}
+
+
+class TestWhatTheEnvironmentPins:
+    async def test_a_pinned_key_is_shown_read_only_and_a_post_cannot_change_it(self, signed_in, state, cache_dir, restarts):
+        pin(state, PLAYER_NAME="From env")
+
+        text = await (await signed_in.get("/")).text()
+        await save(signed_in, player_name="From the page")
+
+        assert 'name="player_name" value="From env" disabled' in text
+        assert "Set in the environment or .env" in text
+        assert "PLAYER_NAME" not in store.read(cache_dir).values
+
+    async def test_a_pinned_token_locks_the_server_address_too(self, signed_in, state, cache_dir, restarts):
+        """Otherwise the page could point the environment's token at a host of its choosing."""
+        pin(state, CLIENT_TOKEN=TOKEN)
+
+        text = await (await signed_in.get("/")).text()
+        response = await save(signed_in, server_url="http://elsewhere.example:8770")
+        await settled()
+
+        assert 'name="server_url" value="" disabled' in text
+        assert "managed together" in text
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0
+        assert response.status == 200
+
+    async def test_a_pinned_server_locks_the_token_too(self, signed_in, state, cache_dir, restarts):
+        pin(state, SERVER_URL="http://arrt.example:8770")
+
+        await save(signed_in, client_token="a-token-for-the-pinned-server")
+
+        assert "CLIENT_TOKEN" not in store.read(cache_dir).values
+
+
+class TestWhatThePageShows:
+    async def test_the_token_is_never_shown_only_whether_one_is_set(self, signed_in, cache_dir, restarts):
+        await save(signed_in, server_url="http://arrt.example:8770", client_token=TOKEN)
+
+        text = await (await signed_in.get("/")).text()
+
+        assert TOKEN not in text
+        assert "A token is set." in text
+
+    async def test_no_token_is_said_too(self, signed_in):
+        assert "No token is set." in await (await signed_in.get("/")).text()
+
+    async def test_the_servers_name_for_this_player_wins_over_its_own(self, signed_in, cache_dir, restarts):
+        await save(signed_in, player_name="Our name")
+        (cache_dir / CLIENT_DOCUMENT_FILENAME).write_text(
+            json.dumps({"client_id": "c1", "name": "The server's name", "walls": []}), encoding="utf-8"
+        )
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "<title>Settings · The server&#x27;s name · Arrt Player</title>" in text
+        assert "that name wins" in text
+
+    async def test_without_a_server_name_the_players_own_is_used(self, signed_in, restarts):
+        await save(signed_in, player_name="Our name")
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "<title>Settings · Our name · Arrt Player</title>" in text
+        assert "that name wins" not in text
+
+    async def test_names_are_escaped(self, signed_in, restarts):
+        await save(signed_in, player_name="<b>bold</b>")
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "<b>bold</b>" not in text
+        assert "&lt;b&gt;bold&lt;/b&gt;" in text
+
+
+class TestChangingThePassword:
+    async def test_the_right_current_password_changes_it_and_ends_other_sessions(self, signed_in, cache_dir, clock):
+        old_cookie = auth.session_cookie(store.read(cache_dir).session_secret, now=clock())
+
+        response = await post(
+            signed_in, "/password", {"current": PASSWORD, "password": "a brand new one", "again": "a brand new one"}
+        )
+
+        assert response.status == 303
+        assert auth.password_matches("a brand new one", store.read(cache_dir).password)
+        assert (await signed_in.get("/", allow_redirects=False)).status == 200, "the changer was signed out"
+        signed_in.session.cookie_jar.clear()
+        stale = await signed_in.get("/", cookies={auth.COOKIE_NAME: old_cookie}, allow_redirects=False)
+        assert stale.status == 303, "a session from before the change survived it"
+
+    async def test_a_wrong_current_password_changes_nothing_and_is_throttled(self, signed_in, cache_dir):
+        before = store.read(cache_dir).password
+
+        wrong = await post(signed_in, "/password", {"current": "nope", "password": "a brand new one", "again": "a brand new one"})
+        again = await post(
+            signed_in, "/password", {"current": PASSWORD, "password": "a brand new one", "again": "a brand new one"}
+        )
+
+        assert (wrong.status, again.status) == (403, 429)
+        assert store.read(cache_dir).password == before
+
+
+async def test_a_save_logs_which_keys_changed_and_never_their_values(signed_in, restarts, caplog):
+    caplog.set_level(logging.DEBUG)
+
+    await save(signed_in, server_url="http://arrt.example:8770", client_token=TOKEN)
+
+    saved = [record for record in caplog.records if getattr(record, "event", None) == "settings_page.saved"]
+    assert [record.changed for record in saved] == [["CLIENT_TOKEN", "SERVER_URL"]]
+    assert not any(TOKEN in str(vars(record)) for record in caplog.records)
+
+
+def test_a_restart_is_the_orderly_stop_systemd_sends(monkeypatch):
+    sent = []
+    monkeypatch.setattr(entry.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+
+    entry.restart_this_process()
+
+    assert sent == [(os.getpid(), signal.SIGTERM)]
+
+
+class TestTheNameAPlayerGoesBy:
+    def test_with_no_server_document_it_is_its_own(self, cache_dir: Path):
+        assert player_name(cache_dir, "Hall") == "Hall"
+
+    @pytest.mark.parametrize("document", ["not json", '{"name": "no id"}', "\udcff"])
+    def test_an_unreadable_server_document_falls_back_to_its_own(self, cache_dir: Path, document: str):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / CLIENT_DOCUMENT_FILENAME).write_bytes(document.encode("utf-8", "surrogateescape"))
+
+        assert player_name(cache_dir, "Hall") == "Hall"

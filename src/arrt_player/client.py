@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 
 from arrt_player import heartbeat as heartbeat_module
-from arrt_player.config import FRAME_OUTPUT, ClientSettings, WallIdUnusable, WallSettings
+from arrt_player.config import CLIENT_DOCUMENT_FILENAME, FRAME_OUTPUT, ClientSettings, WallIdUnusable, WallSettings
 from arrt_player.episodes import Backoff, ReportOnce
 
 log = logging.getLogger(__name__)
@@ -119,6 +119,22 @@ class ClientDocument:
     walls: tuple[Assignment, ...]
     #: Empty from a server that names no labels, which is the same as none.
     labels: tuple[LabelAssignment, ...] = ()
+
+
+def player_name(cache_dir: Path, local: str) -> str:
+    """The name this Player goes by: the server's, once it has given one, else `PLAYER_NAME`.
+
+    **The server's wins** (owner, 2026-11-10): a Player that has paired with a
+    server is called what the server calls it, read from the last client
+    document cached under `cache_dir`, so a rename on the server reaches here on
+    the next poll with nothing written locally. `local` is the name of a Player
+    that has no server yet, or whose cached document cannot be read; empty when
+    it has none either.
+    """
+    try:
+        return parse_client_document((cache_dir / CLIENT_DOCUMENT_FILENAME).read_text(encoding="utf-8")).name
+    except (OSError, UnicodeDecodeError, ClientDocumentUnreadable):
+        return local
 
 
 def parse_client_document(text: str) -> ClientDocument:

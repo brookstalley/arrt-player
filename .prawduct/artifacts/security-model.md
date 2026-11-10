@@ -101,7 +101,8 @@ sensitive as the token itself.
 
 - **First password needs the setup code.** `__main__.settings_page` mints one
   (`auth.new_setup_code`, 12 random bytes) only when no password is stored, and
-  prints it inside the page's address. `/setup` refuses without it
+  prints it inside the page's address. It is spent before the new password is
+  hashed, so two requests carrying it cannot both set one. `/setup` refuses without it
   (`tests/test_settings_ui.py::TestTheFirstRun`), refuses once a password is
   set, and clears it on use (`::test_setting_a_password_signs_you_in_and_spends_the_code`).
   **The code is the one credential the Player prints**, a recorded exception
@@ -125,6 +126,25 @@ sensitive as the token itself.
   loads nothing from elsewhere, `X-Frame-Options: DENY`, `nosniff`,
   `Referrer-Policy: same-origin` (not `no-referrer`, under which a browser sends
   `Origin: null` and every form would be refused) and `no-store` (`server.SECURITY_HEADERS`).
+- **What it can change, and how.** `SERVER_URL`, `CLIENT_TOKEN` and
+  `PLAYER_NAME`, and only where the environment does not set them
+  (`config.load_ui` › `pinned`); a pinned key is shown read-only and a POST
+  cannot change it. **The server's address and its token move together**: when
+  the environment pins either, the page locks both, and a new address saved
+  without a token clears the stored one, so the page can never send a token to
+  a host it was not issued for (`server._locked`, `server._next_values`;
+  `tests/test_settings_ui.py::TestSavingTheServer`, `::TestWhatTheEnvironmentPins`).
+  Values are judged by the functions `config.load` uses (`server_url_problem`,
+  which also refuses userinfo since the address is logged, `client_token_problem`,
+  `player_name_problem`). A save restarts the process with SIGTERM to itself.
+- **The token is written, never read back.** The token field is always empty;
+  the page says only whether one is set
+  (`::test_the_token_is_never_shown_only_whether_one_is_set`). A save logs the
+  names of the keys it changed, never their values
+  (`::test_a_save_logs_which_keys_changed_and_never_their_values`).
+- **Changing the password** needs the current one, is throttled like a login,
+  and mints a new session secret, which ends every other session
+  (`::TestChangingThePassword`).
 - **Plain HTTP.** The password and the cookie cross the LAN in the clear, as
   the server's traffic does; this is Arrt's LAN-only boundary
   (Arrt's `security-model.md` § Trust Boundary). `UI_BIND=127.0.0.1` keeps the page

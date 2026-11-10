@@ -38,9 +38,11 @@ shorter side.
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -220,8 +222,51 @@ DEFAULT_UI_PORT: Final[int] = 8771
 SERVER_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN")
 
 
+#: The longest name a Player may give itself. It is a label for a person, shown
+#: in the settings page's title and the startup line, not an identifier.
+MAXIMUM_PLAYER_NAME_LENGTH: Final[int] = 64
+
+
 class ConfigError(RuntimeError):
     """A deployment value is missing or unusable, and starting would be worse."""
+
+
+def server_url_problem(value: str) -> str | None:
+    """Why `value` cannot be `SERVER_URL`, or None when it can.
+
+    **No credentials in it.** `SERVER_URL` is logged at start, so a password
+    written into it as userinfo would reach the journal; the token travels in a
+    header, never in the address.
+    """
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+    except ValueError as exc:
+        return f"SERVER_URL is not an address ({exc})."
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return "SERVER_URL must be an http:// or https:// address with a host, e.g. http://arrt.local:8770."
+    if parts.username is not None or parts.password is not None:
+        return "SERVER_URL must not carry a user name or password; it is logged, and the token is sent separately."
+    if parts.query or parts.fragment:
+        return "SERVER_URL must not carry a query or a fragment."
+    del port
+    return None
+
+
+def client_token_problem(value: str) -> str | None:
+    """Why `value` cannot be `CLIENT_TOKEN`, or None when it can. It goes into a header, so no whitespace."""
+    if not value or any(character.isspace() for character in value):
+        return "CLIENT_TOKEN must be the token as issued, with no spaces or line breaks."
+    return None
+
+
+def player_name_problem(value: str) -> str | None:
+    """Why `value` cannot be `PLAYER_NAME`, or None when it can. Empty is allowed: no name."""
+    if len(value) > MAXIMUM_PLAYER_NAME_LENGTH:
+        return f"PLAYER_NAME must be at most {MAXIMUM_PLAYER_NAME_LENGTH} characters."
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        return "PLAYER_NAME must be plain text, with no control characters."
+    return None
 
 
 class SetupRequired(Exception):
@@ -247,6 +292,9 @@ class UiSettings:
     #: The page-managed keys the environment (or `.env`) sets. The environment
     #: wins over the page's file, so the page shows these read-only and says why.
     pinned: frozenset[str]
+    #: What the environment sets the pinned keys to, for the page to show. Never
+    #: `CLIENT_TOKEN`'s value: the page says only whether one is set.
+    pinned_values: dict[str, str] = field(default_factory=dict)
 
     @property
     def settings_path(self) -> Path:
@@ -529,6 +577,10 @@ class ClientSettings:
     frame: FrameSettings | None
     #: The label panel; `epd_device` empty for a client that has none.
     panel: PanelSettings
+    #: This Player's own name, empty when none is set. **The server's name for
+    #: this client wins once there is one** (`client.player_name`): this is the
+    #: name of a Player not yet paired, or the fallback while the server is out.
+    player_name: str = ""
     client_poll_seconds: float = DEFAULT_CLIENT_POLL_SECONDS
     label_poll_seconds: float = DEFAULT_LABEL_POLL_SECONDS
     mat_width_inches: float = DEFAULT_MAT_WIDTH_INCHES
@@ -566,6 +618,7 @@ class ClientSettings:
         """The client's startup line. Never the token: a journal is what gets pasted into an issue."""
         return {
             "server_url": self.server_url,
+            "player_name": self.player_name or "(none — PLAYER_NAME is not set)",
             "cache_dir": str(self.cache_dir),
             "frame": self.frame.frame_lines() if self.frame is not None else "(none — TV_ADDRESS is not set)",
             "panel": self.panel.panel_lines(),
@@ -596,9 +649,18 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
     missing = tuple(name for name in SERVER_KEYS if not env.get(name))
     if missing:
         raise SetupRequired(missing)
+    for name, problem in (
+        ("SERVER_URL", server_url_problem),
+        ("CLIENT_TOKEN", client_token_problem),
+        ("PLAYER_NAME", player_name_problem),
+    ):
+        said = problem(env.get(name, "").strip() if name == "PLAYER_NAME" else env[name])
+        if said:
+            raise ConfigError(said)
     return ClientSettings(
         server_url=_require(env, "SERVER_URL").rstrip("/"),
         client_token=_require(env, "CLIENT_TOKEN"),
+        player_name=(env.get("PLAYER_NAME") or "").strip(),
         cache_dir=cache_dir,
         poll_interval_seconds=_float(env, "MANIFEST_POLL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS),
         frame=_frame(env, cache_dir),
@@ -627,6 +689,7 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
         bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
         port=port,
         pinned=frozenset(name for name in settings_store.MANAGED_KEYS if env.get(name)),
+        pinned_values={name: env[name] for name in ("SERVER_URL", "PLAYER_NAME") if env.get(name)},
     )
 
 

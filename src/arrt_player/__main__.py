@@ -41,6 +41,7 @@ its address; it is new on every start and dies once a password is set.
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -363,8 +364,14 @@ def settings_page(ui: UiSettings, *, missing: tuple[str, ...] = ()) -> server.Pa
         setup_code=code,
         now=time.time,
         throttle=auth.Throttle(monotonic=time.monotonic),
+        restart=restart_this_process,
         missing=missing,
     )
+
+
+def restart_this_process() -> None:
+    """SIGTERM to this process: the same orderly stop systemd sends, after which `Restart=always` starts it again."""
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def where_to_go(state: server.PageState) -> str:

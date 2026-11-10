@@ -131,7 +131,11 @@ write failure, by contrast, is caught and reported once (`ClientPull.fetch`,
 
 `config.load` and `config.load_ui` refuse to start, naming the variable, when
 `CACHE_DIR` is unset; when `CACHE_DIR` or `TV_TOKEN_FILE` is not absolute; when
-a numeric value does not parse, or `UI_PORT` is not a port; when the settings
+a numeric value does not parse, or `UI_PORT` is not a port; when `SERVER_URL`
+is not an http(s) address with a host or carries a user name, password, query or
+fragment, `CLIENT_TOKEN` holds whitespace, or `PLAYER_NAME` is over 64
+characters or holds control characters (the same functions judge the settings
+page's form, so neither accepts what the other refuses); when the settings
 page's file cannot be trusted (`settings_ui.store.SettingsUnreadable`); and when
 a retired setting (`WALL_ID`, `WALL_TOKEN`, `MANIFEST_SOURCE`) is set
 (`config.RETIRED_SETTINGS`). `__main__.main` turns that `ConfigError` into exit
