@@ -10,7 +10,7 @@ Its outputs are a Samsung Frame television over the set's network API, the HDMI
 connectors of the machine it runs on, and an e-paper panel beside the picture
 that carries the work's museum label.
 
-- **Configure** by copying `.env.example` to `.env`; every key is described there.
+- **Configure** by copying `.env.example` to `.env`; every key is described there. With no server set, the Player starts its settings page and prints where to find it (`go to http://…:8771/… to configure`); the server, its token and the Player's name can be set there instead.
 - **Run** with `uv run python -m arrt_player`. It drives the real television, and
   it leaves alone a set that somebody is watching.
 - **Deploy** on a Raspberry Pi under systemd: `deploy/display.service`, with the

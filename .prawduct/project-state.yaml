@@ -25,14 +25,14 @@ classification:
   structural:
     # User-facing interface. modality: screen|terminal|voice|spatial|minimal; platform: mobile|web|desktop|cross-platform
     has_human_interface:
-      modality: screen     # the Frame, HDMI outputs, and the e-paper label; nobody operates it
-      platform: raspberry-pi
+      modality: screen     # the Frame, HDMI outputs and the e-paper label, which the household sees; and since 2026-11-10 one settings page the operator uses (settings_ui/server.py), wearing Arrt's design direction
+      platform: raspberry-pi  # the page is web, served by the Player on the LAN
     # Runs without user interaction. trigger: scheduled|event-driven|always-on
     runs_unattended:
       trigger: always-on   # display.service under systemd
     # Exposes or consumes APIs. consumers: internal|external|both
     # If it exposes one, record the API decisions in design_decisions below.
-    exposes_programmatic_interface: false  # it serves nothing; it consumes arrt-contract's routes and the Frame's art API
+    exposes_programmatic_interface: false  # it serves one human page (the settings page, a form, no API) and consumes arrt-contract's routes and the Frame's art API
     # Multiple distinct user types. parties: [list of distinct user types]
     has_multiple_party_types: false  # the operator; the household sees the wall but has no interface
     # Handles sensitive information. categories: [PII, financial, health, etc.]; regulatory: [list]

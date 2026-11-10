@@ -115,3 +115,15 @@ def test_the_unit_gives_the_television_time_to_let_go():
     assert timeout, "display.service must state TimeoutStopSec= rather than inherit it silently"
     assert int(timeout[0]) >= 45, f"TimeoutStopSec= must clear the ~45s worst-case television pass, got {timeout[0]}"
     assert directives.get("KillSignal") == ["SIGTERM"], "the Player closes the television on SIGTERM; nothing else does"
+
+
+def test_a_save_on_the_settings_page_comes_back():
+    """The page restarts the Player by sending itself SIGTERM and exiting cleanly
+    (`__main__.restart_this_process`). Only `Restart=always` restarts a clean
+    exit, so `on-failure` here would leave the Player stopped after a save; and
+    the signal it sends has to be the one the unit stops it with, so the stop
+    is the orderly one that closes the art channel."""
+    directives = _directives()
+
+    assert directives.get("Restart") == ["always"], "a save on the settings page would leave the Player stopped"
+    assert directives.get("KillSignal") == ["SIGTERM"]

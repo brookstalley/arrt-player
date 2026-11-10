@@ -256,6 +256,53 @@ revision. Nothing in the catalogue changed, so no copy is needed; a server from
 before this refuses the new Player's screenless heartbeats, so the Player goes
 back first.
 
+## The settings page (2026-11-10, `build-plan-settings-ui.md`)
+
+The Player now serves one page, on port 8771 on every interface by default
+(`UI_PORT`, `UI_BIND` in `.env`), for setting the server, the client token and
+its name. Nothing changes on the server, and the walls run as before.
+
+**Check `.env` before deploying.** At start, the Player now refuses (exit 2,
+naming the key) a `SERVER_URL` that is not an http(s) address with a host, or
+that carries a user name, password, query or fragment; a `CLIENT_TOKEN` with
+whitespace in it; and a `PLAYER_NAME` over 64 characters. The reference Pi's
+`SERVER_URL` and token are of the accepted shape.
+
+**The first start prints where to set the page's password.** No password is set
+yet, so the page accepts one only with a code minted for this start, printed
+with the address. It is in the journal:
+
+    journalctl -u display -g 'go to http' -n 1
+
+Open that link from a machine on the LAN, within this start (the code is new on
+every start), and set a password of at least 8 characters. The page then shows
+this Player's name, its state and its settings.
+
+**What `.env` sets, the page shows read-only.** The unit loads `.env` into the
+environment (`EnvironmentFile=`), and the environment wins over the page. The
+reference Pi's `.env` sets `SERVER_URL` and `CLIENT_TOKEN`, so those two are
+read-only there, and stay with `.env`. To manage them from the page instead,
+delete **both** from `.env` and restart; the page locks the pair when either
+is in `.env`, so a token from `.env` is never sent to an address typed into the
+page. The page keeps what it is told in `$CACHE_DIR/.settings.json`, mode 0600.
+
+**Saving restarts the Player.** It sends itself SIGTERM, stops as it would for
+systemd, and `Restart=always` brings it back after `RestartSec`: the walls
+are back in a few seconds, and the television's art channel is closed properly
+on the way down (`tests/test_deploy_unit.py`).
+
+**A forgotten password** is deleted, not reset: remove `"password"` from the
+`"auth"` object in `$CACHE_DIR/.settings.json`, `sudo systemctl restart
+display`, and use the new link from the journal. The page's settings are kept.
+
+**Check it worked:** the journal's `settings_page.listening` event names the
+address and port, and from another machine on the LAN the link opens the page.
+If the port is taken, `settings_page.unavailable` says so and the walls carry on
+without the page.
+
+**The way back** is the previous revision. `.settings.json` is ignored by a
+Player from before this, so it can stay where it is.
+
 ## The two new units, and where everything they name now lives
 
 `display.service` and `curation.service` are the planes this product is being
