@@ -187,11 +187,16 @@ and `arrt-contract` are dev-only (`pyproject.toml` `[dependency-groups] dev`).
 The hand-written readers above are held to the contract's fixtures by
 `tests/test_player_contract.py`. Unknown keys are accepted, as the schemas allow.
 
-**The requests the Player makes are the contract's.** Only `pull.py` opens an
-HTTP client, and it requests only the routes `arrt_contract.routes()` names
+**The requests the Player makes to its server are the contract's.** Only
+`pull.py` opens an HTTP client to the server, and it requests only the routes `arrt_contract.routes()` names
 (`tests/test_plane_isolation.py`). The one exception by design is a master's
 URL, which the feed names and `urljoin` resolves against the manifest URL; it
 may be any host, gets no token, and must match its hash.
+
+The slideshow, which has no server, makes its requests through
+`sources/fetch.py`: listing and API calls to a fixed host set, the Reddit
+cookie to `www.reddit.com` only, and media downloads from public addresses only,
+every redirect hop included (its docstring, and `tests/test_fetch.py`).
 
 ### What it does to the television
 

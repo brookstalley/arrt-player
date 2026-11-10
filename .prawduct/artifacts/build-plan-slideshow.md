@@ -111,7 +111,7 @@ last_validated: 2026-11-10
   - accepts only image and video content types, checked against the bytes, not just the header.
 
   mpv still plays only files from the cache.
-- **A 403 on a listing means "Reddit refused this listing"**, and the page says so and suggests `top`. A 401, or a redirect to login, means the cookie is no good. They are different states with different messages.
+- **A refused listing and a cookie Reddit no longer accepts are different states with different messages.** The page suggests `top` for the first and a new cookie for the second. *Corrected 2026-11-10 by measurement (chunk 02 verify-api):* both answer `403` with an HTML page, and so does no cookie at all; nothing answered `401` or redirected to log in. So after a `403` the source asks `/api/me.json`, which answers `200` with the account (`kind` `t2`) for a session Reddit accepts and `403` otherwise. Only `kind` is read.
 - **The page warns about the cookie's expiry** two weeks before its `exp`. *Inferred:* the margin. Whether Reddit renews the cookie is unmeasured, and chunk 05 checks it on the Pi's copy.
 - **The settings layout becomes version 2:** v1 plus the slideshow keys. A v1 file is read as v2. An older Player refuses a v2 file and names the version. *Inferred:* the store already refuses any unknown key, so without a version bump an older Player would refuse the file anyway, with a less helpful message. Rolling back across this wave means removing the slideshow keys by hand, and `deploy/README.md` says so.
 
@@ -137,6 +137,14 @@ last_validated: 2026-11-10
 **Decisions made mid-build:**
 - Chunk 01: mpv answers `property unavailable` for a `duration` it does not have (measured on the Pi, mpv 0.40). That reply is read as "no length", and the item shows as a still, as the Decision above says; it is not a failure. Settled by the plan's own Decision. The chunk review found the gap.
 - Chunk 01: the plan's "a cancelled task leaves no mpv" test moves to chunk 04, the first code that calls the renderer from asyncio. Cancellation leaves a `with` block exactly as an exception does, and that case is tested. Settled by the plan's Partition (04 composes the renderer). The chunk review raised it.
+- Chunk 02: the plan's "a 401 or a redirect to login means the cookie is no good" was wrong (measured; see Constraints). A refused listing is told apart from a refused cookie by one `/api/me.json` call after a `403`. Settled by "do it right": the owner asked for distinct messages, and the status alone cannot give them.
+- Chunk 02, measured: about 1,000 posts over 10 listings had no animated gallery entry and no media URL lacking Reddit's copy. Those two readings are unmeasured, are tested on cases derived from real posts, and say so. Reddit refused `/search.json` (403), as it does `/new`.
+- Chunk 02, *Inferred*: an imgur `.gifv` with no moving copy on Reddit is unresolved, not shown as Reddit's still of it, by the same rule as video pages. Chunk 03's imgur resolver gives it its mp4.
+- Chunk 02: the cache is `src/arrt_player/sources/cache.py`, not `media_cache.py`. It needs `fetch.py`'s error types, and the guard's rule stays simplest as "only `sources/`, the slideshow programme and `__main__` import `fetch.py`". Settled by the plan's own guard Decision (bounded importers).
+- Chunk 02: the address guard is enforced in the resolver aiohttp connects through, so a name cannot resolve public when checked and private when connected (DNS rebinding). aiohttp skips the resolver for an address written into the URL (`aiohttp/connector.py` `_resolve_host`, 3.14, read), so those are checked separately, through `yarl`, the parser aiohttp itself uses. `yarl` is now declared. IPv4-mapped and NAT64 addresses are judged by the IPv4 address they carry. Settled by "do it right".
+- Chunk 02, *Inferred*: a download that fails is not tried again for 30 minutes, and the fill moves on. Three unreachable items in a row mean the network is down: the fill stops and holds none of them back. Not settled by the goals; inferred from "an unreachable Reddit never blanks the screen" and "one bad item never stops the rest".
+- Chunk 02: `test_mpv.py::test_refresh_puts_the_still_back_after_mpv_died` (from chunk 01) failed 8 times in 12 runs on 2026-11-10, including on the Linux runner at bc1f49d. The test assumed mpv would be seen dead within two refreshes. *Inferred cause:* while a killed multithreaded mpv's threads are still exiting, its socket stays open and silent. The test now asserts the promise instead, a restart within bounded refreshes past the longest backoff, and it fails against a refresh that never restarts.
+- Chunk 02: `test_a_screen_failure_that_arrived_after_the_last_check_is_not_lost` (chunk 01) failed 1 of 4 runs on the Linux runner. Cause, read from the failure: the fake mpv failed commits the instant a file loaded, so a first `load` could itself be lost and the next load met the backoff. The real mpv's failures began 0.86 s after start, so the fake now waits `COMMIT_FAIL_ONSET_S` (0.2 s) first. This is also the likely cause of the 1-in-22 flake recorded for `test_failed_commits_with_no_dropped_frames_count_as_not_shown`.
 - Chunk 01: failures split into screen failures (mpv stopped, restart backoff) and file failures (that item only), so one bad file never restarts mpv or delays the next item. Not settled by the goals; inferred from "a screen held by another program must not spin".
 
 **Level:** Medium-High. Every boundary was probed live: Reddit with the owner's cookie, mpv on the Pi with the owner watching. What remains unmeasured is named: stills and transitions under the plane-swapped settings (chunk 01's first Pi check), whether the 403s are a fixed rule by path, and whether the cookie is renewed. To raise it: chunk 01's Pi check.
@@ -193,8 +201,8 @@ last_validated: 2026-11-10
     - Listing and API calls go only to the guard's constant host set.
     - Media downloads may reach any public host, through the address guard in Constraints: every hop is resolved and checked, at most 5 redirects, the size cap, and content sniffing.
     - The cookie is attached only to `www.reddit.com`.
-  - new `src/arrt_player/sources/reddit.py`: the listing parsed into items through tiers 2–4 (Reddit's own media, Reddit's copy of linked media, direct media URLs); unresolvable posts counted by domain; outcomes kept distinct: refused (403), cookie no good (401 or a redirect to login), rate-limited (429, honouring `x-ratelimit-reset`) and unreachable.
-  - new `src/arrt_player/media_cache.py`:
+  - new `src/arrt_player/sources/reddit.py`: the listing parsed into items through tiers 2–4 (Reddit's own media, Reddit's copy of linked media, direct media URLs); unresolvable posts counted by domain; outcomes kept distinct: refused (403), cookie no good (a 403 that `/api/me.json` confirms; see Constraints), rate-limited (429, honouring `x-ratelimit-reset`) and unreachable.
+  - new `src/arrt_player/sources/cache.py` (planned as `media_cache.py`; see Decisions made mid-build):
     - downloads ahead of the play position, through `fetch.py`;
     - files are named by item id;
     - eviction keeps the listing's items and deletes the rest;
@@ -220,7 +228,7 @@ last_validated: 2026-11-10
   - the size cap and the content check stop a download partway, and leave no file;
   - eviction under a listing that changes between runs (learning: vary the inputs between runs);
   - the cache cap stops downloads and is counted in bytes on disk;
-  - the guard fails a planted client in another module, a planted API host outside the set, and a planted import of `fetch.py` from anywhere but `sources/` and the slideshow's composition.
+  - the guard fails a planted client in another module, a planted API host outside the set, and a planted import of `fetch.py` from anywhere but `src/arrt_player/sources/` and the slideshow's composition.
 - **Acceptance criteria:**
   - A live fetch through `RedditSource` on the Mac, with the owner's cookie, over a listing that includes linked hosts, lists items whose media download and open.
   - The unresolved count names its domains.

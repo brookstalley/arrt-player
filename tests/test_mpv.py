@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from fakes import drm_tree
 
-from arrt_player.mpv import MPV_OPTIONS, Loaded, MpvOutput, NotShown, failure_in, stop_stale
+from arrt_player.mpv import MPV_OPTIONS, RESTART_BACKOFF_SECONDS, Loaded, MpvOutput, NotShown, failure_in, stop_stale
 
 FAKE = Path(__file__).with_name("fake_mpv.py")
 
@@ -384,14 +384,22 @@ def test_refresh_puts_the_still_back_after_mpv_died(bench: Bench) -> None:
     os.killpg(first, signal.SIGKILL)
     assert wait_until(lambda: not alive(first))
     # **On Linux a killed multithreaded process shows as a zombie before its
-    # parent can reap it**, while its other threads finish exiting, so the first
-    # refresh may still see mpv as running, read its closed socket, and count a
-    # screen failure with its 1 s backoff. Real mpv is multithreaded, so this is
-    # the Pi's behaviour too. Past the backoff, the next refresh starts it again.
-    bench.output.refresh()
-    bench.clock.now += 1.1
-    bench.output.refresh()
-    assert bench.pid() != first
+    # parent can reap it**, while its other threads finish exiting. Until they
+    # have, its socket can still be open and silent, so a refresh then sees mpv
+    # running and does nothing; once they have, a refresh reads the closed socket
+    # and counts a screen failure with its backoff. Real mpv is multithreaded, so
+    # this is the Pi's behaviour too, and how many refreshes that takes is the
+    # scheduler's. What is promised is that refreshes past the backoff bring it
+    # back, so each step here waits out the longest backoff.
+    restarted = False
+    for _ in range(50):
+        bench.output.refresh()
+        if bench.pid() != first:
+            restarted = True
+            break
+        bench.clock.now += RESTART_BACKOFF_SECONDS[-1] + 1.7
+        time.sleep(0.02)
+    assert restarted, "mpv was not started again within 50 refreshes over a second"
     assert bench.commands()[-3][:2] == ["loadfile", str(still.resolve())]
 
 

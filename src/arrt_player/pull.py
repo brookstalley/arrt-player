@@ -3,8 +3,9 @@
 A wall's feed (manifest major 2) names each work's presentation master and is
 cached whole (`_adopt_feed` says why).
 
-**The only module in this plane that speaks HTTP**, and
-`tests/test_plane_isolation.py` holds it to that. It spells five
+**The only module that speaks HTTP to the Arrt server**, and
+`tests/test_plane_isolation.py` holds it to that. (The slideshow, which has no
+server, has a client of its own in `sources/fetch.py`, bounded there.) It spells five
 routes — the client document and the client heartbeat, a wall's manifest at
 each major it asks for, a wall's heartbeat, and a label's document — as
 `contract/routes.json` spells them. Masters are fetched

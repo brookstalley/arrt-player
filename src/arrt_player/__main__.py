@@ -3,7 +3,7 @@
 The composition root, and the only module that knows a real television exists —
 everything above the seam is written against `TvClient`, so this is where the
 `samsungtvws` fork is named and where it stays. It is also the only module that
-imports the pull, which holds this plane's one HTTP client.
+imports the pull, which holds the HTTP client that talks to the Arrt server.
 
 **One process per client, one worker per wall** (`clients.md` § The Player). The
 supervisor (`client.Supervisor`) asks the server which walls this client drives

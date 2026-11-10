@@ -38,6 +38,9 @@ from pathlib import Path
 
 BEHAVIOUR = set(filter(None, os.environ.get("FAKE_MPV_BEHAVIOUR", "").split(",")))
 RECORD = os.environ.get("FAKE_MPV_RECORD")
+#: How long after a file loads `commit_fail` starts failing commits: after the
+#: load has answered, as with the real mpv, and well inside the tests' waits.
+COMMIT_FAIL_ONSET_S = 0.2
 
 
 def option(name: str) -> str | None:
@@ -142,6 +145,11 @@ class Fake:
             self.send({"request_id": rid, "error": "property not found"})
 
     def commit_failures(self) -> None:
+        # The real mpv's first failed commit came 0.86 s after it started, on the
+        # Pi on 2026-11-10, well after a load had answered. Failing at once would
+        # sometimes fail the load itself, which is not the case the tests ask about.
+        self.committing.wait()
+        time.sleep(COMMIT_FAIL_ONSET_S)
         while True:
             if self.committing.wait(timeout=0.5):
                 self.log("vo/gpu", "warn", "Failed to commit atomic request: Error number 22 occurred")
