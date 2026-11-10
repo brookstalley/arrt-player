@@ -43,7 +43,7 @@ from samsungtvws.rest import SamsungTVRest
 from tv_delete import UPLOADED_CATEGORY, DeleteNotConfirmed, delete_list_confirmed
 from websockets.exceptions import WebSocketException
 
-from arrt_player.config import ConfigError, FrameSettings, load
+from arrt_player.config import ConfigError, FrameSettings, SetupRequired, load
 
 #: The first art-API major that speaks the `slideshow_*` verbs; `_api_generation` says why the major is compared.
 NEW_API_MAJOR = 4
@@ -502,6 +502,12 @@ def main() -> int:
         # Before anything reaches for the set: a configuration that names no
         # television is an operator's fix, said in a sentence, not a traceback.
         print(f"Cannot check the television: {err}")
+        return 2
+    except SetupRequired as err:
+        # Not a `ConfigError` on purpose (setup mode is a state the daemon runs
+        # in), so it is caught by name: a Player with no server yet is still an
+        # operator's fix here, said in a sentence.
+        print(f"Cannot check the television: {err}; set them in .env or on the settings page")
         return 2
     return asyncio.run(run(args))
 

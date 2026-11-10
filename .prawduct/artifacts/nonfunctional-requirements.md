@@ -129,14 +129,31 @@ write failure, by contrast, is caught and reported once (`ClientPull.fetch`,
 
 ### Start-up
 
-`config.load` refuses to start, naming the variable, when `SERVER_URL`,
-`CLIENT_TOKEN` or `CACHE_DIR` is unset; when `CACHE_DIR` or `TV_TOKEN_FILE` is
-not absolute; when a numeric value does not parse; and when a retired setting
-(`WALL_ID`, `WALL_TOKEN`, `MANIFEST_SOURCE`) is set (`config.RETIRED_SETTINGS`).
-`__main__.main` turns that `ConfigError` into exit status 2 and a line on stderr
+`config.load` and `config.load_ui` refuse to start, naming the variable, when
+`CACHE_DIR` is unset; when `CACHE_DIR` or `TV_TOKEN_FILE` is not absolute; when
+a numeric value does not parse, or `UI_PORT` is not a port; when `SERVER_URL`
+is not an http(s) address with a host or carries a user name, password, query or
+fragment, `CLIENT_TOKEN` holds whitespace, or `PLAYER_NAME` is over 64
+characters or holds control characters (the same functions judge the settings
+page's form, so neither accepts what the other refuses); when the settings
+page's file cannot be trusted (`settings_ui.store.SettingsUnreadable`); and when
+a retired setting (`WALL_ID`, `WALL_TOKEN`, `MANIFEST_SOURCE`) is set
+(`config.RETIRED_SETTINGS`). `__main__.main` turns that `ConfigError` into exit
+status 2 and a line on stderr
 (`tests/test_main.py::test_a_missing_deployment_value_refuses_to_start_and_says_so_at_the_terminal`).
 Under `Restart=always` that is a restart every 5 s until `.env` is fixed, which
 is what keeps it visible.
+
+**No server is not a refusal: it is setup mode** (owner, 2026-11-10). With
+`SERVER_URL` or `CLIENT_TOKEN` set neither in the environment nor on the
+settings page, `config.load` raises `SetupRequired`, deliberately not a
+`ConfigError`, and the Player serves only its settings page and prints
+`go to http://<address>:<port>/… to configure`
+(`tests/test_config.py::TestWhatMustBeSet`,
+`tests/test_settings_ui.py::test_without_a_server_the_player_serves_only_its_page_and_says_where`).
+A setup-mode Player whose page cannot bind exits 1, for systemd to try again.
+Beside running walls, a page that cannot bind costs the page and nothing else
+(`::test_a_page_that_cannot_listen_says_so_and_returns`).
 
 **A label that cannot be drawn never stops the walls.** No `EPD_DEVICE` means no
 label output. A configured panel that will not open, a missing text stack, or

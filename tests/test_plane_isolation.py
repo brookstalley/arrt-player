@@ -43,6 +43,17 @@ exemption structural rather than a special case — `samsungtvws` reaches the se
 over a websocket and drags `aiohttp` in behind it, and neither is display's
 import to answer for. Talking to the television is this plane's whole job.
 
+**Narrowed again 2026-11-10, for the settings page, and only for a server.** The
+Player now listens for one thing, its own settings page
+(`src/arrt_player/settings_ui/server.py`). A listening socket requests nothing
+from anyone, so it is not the second channel this guard exists to stop, but it
+is built from the same package as a client. So that one module may import
+`aiohttp.web`, spelled `from aiohttp.web import …` and no other way, because `import
+aiohttp` or `from aiohttp import web` would put the package's client in reach
+by attribute; it may never name a client class; and only the entry point may
+import it, so nothing reaches aiohttp through it by re-export. Every other module
+is held as before.
+
 Both halves are proven able to fail below, against planted violations, because a
 guard nobody has watched go red is a guard nobody knows is wired up.
 """
@@ -61,6 +72,17 @@ DISPLAY_PACKAGE = PROJECT_ROOT / "src" / "arrt_player"
 #: The one module that may open an HTTP client: HTTP mode's pull of the manifest,
 #: its renders and the heartbeat.
 PULL_MODULE = DISPLAY_PACKAGE / "pull.py"
+
+#: The one module that may listen: the settings page. It may take `aiohttp.web`
+#: and nothing else from aiohttp.
+SETTINGS_PAGE_MODULE = DISPLAY_PACKAGE / "settings_ui" / "server.py"
+
+#: The server half of aiohttp, the only part the settings page may import.
+WEB_SERVER = "aiohttp.web"
+
+#: Names that are aiohttp's client, which the settings page must never spell,
+#: however it came by them.
+CLIENT_NAMES: frozenset[str] = frozenset({"ClientSession", "ClientRequest", "TCPConnector"})
 
 #: Where a module name may resolve to a file **in this project**, first match
 #: winning. Arrt's own source is not among them, and need not be: a server name
@@ -128,6 +150,35 @@ def test_the_pull_is_where_the_http_client_is():
     assert any(offence.kind == "http" and _exempt(offence) for offence in _audit(display_modules()))
 
 
+def test_the_settings_page_is_where_the_web_server_is():
+    """The page's exemption names a real module that really imports the server half, or it exempts nothing."""
+    assert SETTINGS_PAGE_MODULE.is_file(), f"{SETTINGS_PAGE_MODULE} does not exist; the exemption names nothing"
+    assert any(
+        offence.kind == "http" and _exempt(offence) and offence.chain[-1] == SETTINGS_PAGE_MODULE
+        for offence in _audit(display_modules())
+    )
+
+
+def test_the_settings_page_names_no_client():
+    assert _client_names(SETTINGS_PAGE_MODULE) == set()
+
+
+def test_the_settings_page_takes_aiohttp_only_as_from_aiohttp_web():
+    """`import aiohttp.web` binds the name `aiohttp`, which reaches `aiohttp.request` by attribute."""
+    assert _aiohttp_spellings(SETTINGS_PAGE_MODULE) == []
+
+
+def test_only_the_entry_point_imports_the_settings_page():
+    """As with the pull: an exemption for a file must not become an exemption for whatever imports it."""
+    importers = sorted(
+        str(path.relative_to(PROJECT_ROOT))
+        for path in display_modules()
+        if path != SETTINGS_PAGE_MODULE and "arrt_player.settings_ui.server" in set(imported_names(path))
+    )
+
+    assert importers == ["src/arrt_player/__main__.py"]
+
+
 def test_only_the_entry_point_imports_the_pull():
     """The exemption is for the pull, not for whatever the pull re-exports.
 
@@ -169,9 +220,36 @@ def test_the_pull_requests_only_the_routes_the_contract_names():
     assert spelled <= contract_paths, f"paths the contract does not name: {spelled - contract_paths}"
 
 
-def _exempt(offence: "Offence", pull: pathlib.Path = PULL_MODULE) -> bool:
-    """Whether the file that imports the client is the one module allowed to."""
-    return offence.chain[-1] == pull
+def _exempt(offence: "Offence", pull: pathlib.Path = PULL_MODULE, page: pathlib.Path = SETTINGS_PAGE_MODULE) -> bool:
+    """Whether the file that imports it is allowed to: the pull any client, the page only the server half."""
+    importer = offence.chain[-1]
+    if importer == pull:
+        return True
+    return importer == page and (offence.name == WEB_SERVER or offence.name.startswith(f"{WEB_SERVER}."))
+
+
+def _aiohttp_spellings(path: pathlib.Path) -> list[str]:
+    """Every import of aiohttp in a file that is not `from aiohttp.web import …`."""
+    wrong: list[str] = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            wrong += [f"import {alias.name}" for alias in node.names if alias.name.split(".")[0] == "aiohttp"]
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "aiohttp" and node.module != WEB_SERVER:
+            wrong.append(f"from {node.module} import …")
+    return wrong
+
+
+def _client_names(path: pathlib.Path) -> set[str]:
+    """Every client name a file spells, as a name, an attribute or an imported alias."""
+    spelled: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Name):
+            spelled.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            spelled.add(node.attr)
+        elif isinstance(node, ast.alias):
+            spelled.add(node.name.rsplit(".", 1)[-1])
+    return spelled & CLIENT_NAMES
 
 
 class TestTheGuardCanFail:
@@ -185,6 +263,36 @@ class TestTheGuardCanFail:
         offences = [offence for offence in _audit([pull, second], roots=(tmp_path,)) if not _exempt(offence, pull)]
 
         assert [offence.chain[-1].name for offence in offences] == ["second.py"]
+
+    def test_the_settings_page_may_take_the_server_half_and_nothing_else(self, tmp_path: pathlib.Path):
+        """The page's clause, planted: `from aiohttp.web import …` passes; every road to the client does not."""
+        allowed = _plant(tmp_path, "server.py", "from aiohttp.web import Application, TCPSite\n")
+        assert [offence for offence in _audit([allowed], roots=(tmp_path,)) if not _exempt(offence, page=allowed)] == []
+
+        for source in (
+            "import aiohttp\n",
+            "from aiohttp import web\n",
+            "from aiohttp.web import Application\nfrom aiohttp import ClientSession\n",
+            "import aiohttp.web\n\naiohttp.ClientSession()\n",
+            "import aiohttp.web\n\naiohttp.request('GET', 'http://elsewhere')\n",
+            "from aiohttp.web_app import Application\n",
+        ):
+            page = _plant(tmp_path, "server.py", source)
+            caught = [offence for offence in _audit([page], roots=(tmp_path,)) if not _exempt(offence, page=page)]
+            assert caught or _client_names(page) or _aiohttp_spellings(page), f"the page's exemption let this through: {source!r}"
+
+    def test_the_server_half_is_not_exempt_beside_the_page(self, tmp_path: pathlib.Path):
+        page = _plant(tmp_path, "server.py", "from aiohttp.web import Application\n")
+        second = _plant(tmp_path, "second.py", "from aiohttp.web import Application\n")
+
+        offences = [offence for offence in _audit([page, second], roots=(tmp_path,)) if not _exempt(offence, page=page)]
+
+        assert [offence.chain[-1].name for offence in offences] == ["second.py"]
+
+    def test_it_catches_a_client_name_on_the_page(self, tmp_path: pathlib.Path):
+        page = _plant(tmp_path, "server.py", "from aiohttp.web import Application\n\nsession = web.ClientSession()\n")
+
+        assert _client_names(page) == {"ClientSession"}
 
     def test_it_catches_a_curation_import(self, tmp_path: pathlib.Path):
         module = _plant(tmp_path, "shortcut.py", "from arrt.library.services.catalogue import CatalogueService\n")
@@ -331,6 +439,11 @@ def _forbidden(name: str) -> tuple[str, str] | None:
     """Which rule this import breaks, if any, and the package that identifies it."""
     if name == CURATION_PACKAGE or name.startswith(f"{CURATION_PACKAGE}."):
         return ("curation", CURATION_PACKAGE)
+    # The server half is its own package for de-duplication: a file importing
+    # both `aiohttp.web` and `aiohttp` must report both, or the exempt one would
+    # stand for the other.
+    if name == WEB_SERVER or name.startswith(f"{WEB_SERVER}."):
+        return ("http", WEB_SERVER)
     for client in HTTP_CLIENTS:
         if name == client or name.startswith(f"{client}."):
             return ("http", client)

@@ -38,9 +38,11 @@ shorter side.
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -48,6 +50,7 @@ from dotenv import load_dotenv
 # in the startup line.
 from arrt_player.compose import Geometry, pixels_per_inch
 from arrt_player.heartbeat import path_in as heartbeat_path_in
+from arrt_player.settings_ui import store as settings_store
 
 #: The Frame's own store, in the wall's directory beside the manifest it reads.
 #: The Frame worker is its sole writer and nothing else ever opens it.
@@ -206,8 +209,94 @@ DEFAULT_MAT_WIDTH_INCHES: Final[float] = 1.5
 DEFAULT_MAT_BOTTOM_WEIGHT: Final[float] = 1.15
 
 
+#: Where the settings page listens. Every interface, because the page is used
+#: from another machine on the LAN; `UI_BIND` narrows it (to `127.0.0.1` behind an
+#: ssh tunnel, say). Read from the environment only, never from the page: a page
+#: that could move its own address could lock its user out.
+DEFAULT_UI_BIND: Final[str] = "0.0.0.0"  # noqa: S104 -- the page is reached from another machine; UI_BIND narrows it
+#: Beside the server's 8770, and distinct from it, so one host can run both.
+DEFAULT_UI_PORT: Final[int] = 8771
+
+#: The keys without which there is no server to pull from. Missing either starts
+#: setup mode rather than refusing: the page is how they get set.
+SERVER_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN")
+
+
+#: The longest name a Player may give itself. It is a label for a person, shown
+#: in the settings page's title and the startup line, not an identifier.
+MAXIMUM_PLAYER_NAME_LENGTH: Final[int] = 64
+
+
 class ConfigError(RuntimeError):
     """A deployment value is missing or unusable, and starting would be worse."""
+
+
+def server_url_problem(value: str) -> str | None:
+    """Why `value` cannot be `SERVER_URL`, or None when it can.
+
+    **No credentials in it.** `SERVER_URL` is logged at start, so a password
+    written into it as userinfo would reach the journal; the token travels in a
+    header, never in the address.
+    """
+    try:
+        parts = urlsplit(value)
+        _ = parts.port  # reading it is what raises on a port that is not a number
+    except ValueError as exc:
+        return f"SERVER_URL is not an address ({exc})."
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return "SERVER_URL must be an http:// or https:// address with a host, e.g. http://arrt.local:8770."
+    if parts.username is not None or parts.password is not None:
+        return "SERVER_URL must not carry a user name or password; it is logged, and the token is sent separately."
+    if parts.query or parts.fragment:
+        return "SERVER_URL must not carry a query or a fragment."
+    return None
+
+
+def client_token_problem(value: str) -> str | None:
+    """Why `value` cannot be `CLIENT_TOKEN`, or None when it can. It goes into a header, so no whitespace."""
+    if not value or any(character.isspace() for character in value):
+        return "CLIENT_TOKEN must be the token as issued, with no spaces or line breaks."
+    return None
+
+
+def player_name_problem(value: str) -> str | None:
+    """Why `value` cannot be `PLAYER_NAME`, or None when it can. Empty is allowed: no name."""
+    if len(value) > MAXIMUM_PLAYER_NAME_LENGTH:
+        return f"PLAYER_NAME must be at most {MAXIMUM_PLAYER_NAME_LENGTH} characters."
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        return "PLAYER_NAME must be plain text, with no control characters."
+    return None
+
+
+class SetupRequired(Exception):
+    """There is no server to pull from yet, so the Player serves only its settings page.
+
+    **Not a `ConfigError`, deliberately.** That one exits 2 for systemd to restart
+    until `.env` is fixed; this one starts the page that fixes it. Kept apart so
+    a handler for one can never quietly take the other.
+    """
+
+    def __init__(self, missing: tuple[str, ...]) -> None:
+        super().__init__(f"{', '.join(missing)} not set")
+        self.missing = missing
+
+
+@dataclass(frozen=True)
+class UiSettings:
+    """Where the settings page listens, and what it may and may not change."""
+
+    cache_dir: Path
+    bind: str
+    port: int
+    #: The page-managed keys the environment (or `.env`) sets. The environment
+    #: wins over the page's file, so the page shows these read-only and says why.
+    pinned: frozenset[str]
+    #: What the environment sets the pinned keys to, for the page to show. Never
+    #: `CLIENT_TOKEN`'s value: the page says only whether one is set.
+    pinned_values: dict[str, str] = field(default_factory=dict)
+
+    def startup_lines(self) -> dict[str, object]:
+        return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned)}
 
 
 class WallIdUnusable(ValueError):
@@ -483,6 +572,10 @@ class ClientSettings:
     frame: FrameSettings | None
     #: The label panel; `epd_device` empty for a client that has none.
     panel: PanelSettings
+    #: This Player's own name, empty when none is set. **The server's name for
+    #: this client wins once there is one** (`client.player_name`): this is the
+    #: name of a Player not yet paired, or the fallback while the server is out.
+    player_name: str = ""
     client_poll_seconds: float = DEFAULT_CLIENT_POLL_SECONDS
     label_poll_seconds: float = DEFAULT_LABEL_POLL_SECONDS
     mat_width_inches: float = DEFAULT_MAT_WIDTH_INCHES
@@ -520,6 +613,7 @@ class ClientSettings:
         """The client's startup line. Never the token: a journal is what gets pasted into an issue."""
         return {
             "server_url": self.server_url,
+            "player_name": self.player_name or "(none — PLAYER_NAME is not set)",
             "cache_dir": str(self.cache_dir),
             "frame": self.frame.frame_lines() if self.frame is not None else "(none — TV_ADDRESS is not set)",
             "panel": self.panel.panel_lines(),
@@ -539,16 +633,29 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
     test that set a value globally would leak it into every test after it.
     """
     load_dotenv()
-    env = dict(os.environ) if environ is None else environ
+    env = dict(os.environ) if environ is None else dict(environ)
 
     for name, replaced_by in RETIRED_SETTINGS.items():
         if env.get(name):
             raise ConfigError(f"{name} is retired: {replaced_by}.")
 
     cache_dir = _absolute(_require(env, "CACHE_DIR"), "CACHE_DIR")
+    env = _beneath_the_environment(env, cache_dir)
+    missing = tuple(name for name in SERVER_KEYS if not env.get(name))
+    if missing:
+        raise SetupRequired(missing)
+    for name, problem in (
+        ("SERVER_URL", server_url_problem),
+        ("CLIENT_TOKEN", client_token_problem),
+        ("PLAYER_NAME", player_name_problem),
+    ):
+        said = problem(env.get(name, "").strip() if name == "PLAYER_NAME" else env[name])
+        if said:
+            raise ConfigError(said)
     return ClientSettings(
         server_url=_require(env, "SERVER_URL").rstrip("/"),
         client_token=_require(env, "CLIENT_TOKEN"),
+        player_name=(env.get("PLAYER_NAME") or "").strip(),
         cache_dir=cache_dir,
         poll_interval_seconds=_float(env, "MANIFEST_POLL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS),
         frame=_frame(env, cache_dir),
@@ -556,6 +663,54 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
         mat_width_inches=_positive_float(env, "MAT_WIDTH_INCHES", DEFAULT_MAT_WIDTH_INCHES),
         mat_bottom_weight=_positive_float(env, "MAT_BOTTOM_WEIGHT", DEFAULT_MAT_BOTTOM_WEIGHT),
     )
+
+
+def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
+    """Where the settings page listens. Needs only `CACHE_DIR`, so it resolves in setup mode too.
+
+    Raises `ConfigError` for a missing or relative `CACHE_DIR` (the page's file
+    lives there, so there is nowhere to keep settings without it), an unusable
+    port, or a settings file that cannot be trusted.
+    """
+    load_dotenv()
+    env = dict(os.environ) if environ is None else environ
+    cache_dir = _absolute(_require(env, "CACHE_DIR"), "CACHE_DIR")
+    _stored_values(cache_dir)
+    port = _int(env, "UI_PORT", DEFAULT_UI_PORT)
+    if not 0 < port < 65536:  # noqa: PLR2004 -- the range of a TCP port
+        raise ConfigError(f"UI_PORT must be a TCP port, not {port}.")
+    return UiSettings(
+        cache_dir=cache_dir,
+        bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
+        port=port,
+        pinned=frozenset(name for name in settings_store.MANAGED_KEYS if env.get(name)),
+        # Cleaned as `load` cleans them, so the page shows the value the Player uses.
+        pinned_values={
+            name: clean(env[name])
+            for name, clean in (("SERVER_URL", lambda value: value.rstrip("/")), ("PLAYER_NAME", str.strip))
+            if env.get(name)
+        },
+    )
+
+
+def _stored_values(cache_dir: Path) -> dict[str, str]:
+    try:
+        return dict(settings_store.read(cache_dir).values)
+    except settings_store.SettingsUnreadable as exc:
+        raise ConfigError(f"the settings page's file cannot be read: {exc}. Fix or remove it.") from exc
+
+
+def _beneath_the_environment(env: dict[str, str], cache_dir: Path) -> dict[str, str]:
+    """The environment, with the page's values filling only the keys it leaves empty.
+
+    Empty counts as unset, because `.env.example` ships `SERVER_URL=` and a `.env`
+    copied from it would otherwise pin an empty value over the page's.
+    """
+    merged = dict(env)
+    for name, value in _stored_values(cache_dir).items():
+        if not merged.get(name):
+            merged[name] = value
+    return merged
 
 
 def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
