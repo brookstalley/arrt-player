@@ -2,10 +2,11 @@
 
 Owner: the operator · Last executed: 2026-10-27, § The first time, F1–F7, from
 the monorepo checkout to f7937da in the standalone one (F8 is the owner's call
-and the way back, F9, was not exercised). § Steps last ran 2026-10-11,
-81e2d15e → 75770fe8, in the monorepo checkout (no new setting or unit, so steps
-7, 10–11 and the way back were not exercised), and has not yet run against the
-standalone checkout.
+and the way back, F9, was not exercised). § Steps last ran 2026-11-10,
+f7937da → 9ca66b2, in the standalone checkout (no required new setting and no
+unit change, so steps 7, 10–11 and the way back were not exercised). Its
+release's dated section had one Pi step, checking `.env` against the new
+start-up refusals, and it ran between steps 8 and 12.
 
 ## When to use this
 You have a newer commit of this repo and the Pi beside the wall runs an older

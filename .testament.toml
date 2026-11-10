@@ -1,0 +1,26 @@
+# How testament runs the Player's suite on the pool (`testament guide project`).
+#
+# One suite, the declared one: `uv run --group raster pytest` (CLAUDE.md), the
+# whole of `tests/` with the label's typesetter. CI splits off `tests/raster`
+# only because its main job installs no GTK; the image here has it, so nothing
+# is split and a bare `testament run` is the suite prawduct records.
+#
+# **`--group raster` in setup as well as in the command.** A plain `uv sync`
+# uninstalls every group outside the defaults, after which `tests/raster` skips
+# itself and the run stays green while it shrinks (CLAUDE.md). The panel driver
+# group (`epaper`) installs on a Pi only and nothing in the suite needs it.
+
+manifest_version = 2
+name = "arrt-player"
+executor = "container"
+command = ["uv", "run", "--frozen", "--group", "raster", "pytest"]
+default_selection = ["tests"]
+env_inputs = ["uv.lock", "pyproject.toml"]
+env = { UV_CACHE_DIR = "/tr/cache/uv" }
+
+[image]
+dockerfile = ".devcontainer/Dockerfile"
+inputs = [".devcontainer/Dockerfile"]
+
+[setup]
+steps = [["uv", "sync", "--frozen", "--group", "raster"]]
