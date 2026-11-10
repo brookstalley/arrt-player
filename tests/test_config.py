@@ -15,7 +15,17 @@ from pathlib import Path
 
 import pytest
 
-from arrt_player.config import RETIRED_SETTINGS, ConfigError, WallIdUnusable, load
+from arrt_player.config import (
+    DEFAULT_UI_BIND,
+    DEFAULT_UI_PORT,
+    RETIRED_SETTINGS,
+    ConfigError,
+    SetupRequired,
+    WallIdUnusable,
+    load,
+    load_ui,
+)
+from arrt_player.settings_ui import store
 
 FRAME = {
     "TV_ADDRESS": "10.0.0.1",
@@ -37,13 +47,96 @@ def an_environment(cache_dir: Path, *, frame: bool = True, **overrides: str) -> 
 
 
 class TestWhatMustBeSet:
-    @pytest.mark.parametrize("missing", ["SERVER_URL", "CLIENT_TOKEN", "CACHE_DIR"])
-    def test_a_client_without_its_server_its_token_or_its_cache_does_not_start(self, cache_dir: Path, missing: str):
+    def test_a_client_without_its_cache_does_not_start(self, cache_dir: Path):
+        """The cache is where the settings page keeps what it is told, so there is no page without it."""
+        environment = an_environment(cache_dir, frame=False)
+        del environment["CACHE_DIR"]
+
+        with pytest.raises(ConfigError, match="CACHE_DIR"):
+            load(environment)
+        with pytest.raises(ConfigError, match="CACHE_DIR"):
+            load_ui(environment)
+
+    @pytest.mark.parametrize("missing", ["SERVER_URL", "CLIENT_TOKEN"])
+    def test_a_client_without_its_server_or_its_token_starts_in_setup_mode(self, cache_dir: Path, missing: str):
+        """Owner, 2026-11-10: the settings page is how they get set, so their absence starts it rather than refusing.
+
+        `SetupRequired` is asserted not to be a `ConfigError`, because the entry
+        point answers that one with exit 2 and a handler catching it would turn
+        setup mode back into a refusal.
+        """
         environment = an_environment(cache_dir, frame=False)
         del environment[missing]
 
-        with pytest.raises(ConfigError, match=missing):
+        with pytest.raises(SetupRequired) as raised:
             load(environment)
+
+        assert raised.value.missing == (missing,)
+        assert not isinstance(raised.value, ConfigError)
+
+    def test_an_empty_value_is_as_missing_as_an_absent_one(self, cache_dir: Path):
+        """`.env.example` ships `SERVER_URL=`, so a `.env` copied from it says nothing rather than pinning an empty server."""
+        with pytest.raises(SetupRequired) as raised:
+            load(an_environment(cache_dir, frame=False, SERVER_URL="", CLIENT_TOKEN=""))
+
+        assert raised.value.missing == ("SERVER_URL", "CLIENT_TOKEN")
+
+
+class TestTheSettingsPagesFile:
+    """The page's values sit beneath the environment: they fill what it leaves empty and nothing else."""
+
+    def test_the_page_supplies_what_the_environment_does_not(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"SERVER_URL": "http://arrt.example:8770", "CLIENT_TOKEN": "from-page"}))
+        environment = an_environment(cache_dir, frame=False)
+        del environment["SERVER_URL"]
+        del environment["CLIENT_TOKEN"]
+
+        settings = load(environment)
+
+        assert (settings.server_url, settings.client_token) == ("http://arrt.example:8770", "from-page")
+
+    def test_the_environment_wins_over_the_page(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"SERVER_URL": "http://from-the-page:8770"}))
+
+        assert (
+            load(an_environment(cache_dir, frame=False, SERVER_URL="http://from-env:8770")).server_url == "http://from-env:8770"
+        )
+
+    def test_an_empty_environment_value_does_not_pin_over_the_page(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"SERVER_URL": "http://from-the-page:8770"}))
+
+        assert load(an_environment(cache_dir, frame=False, SERVER_URL="")).server_url == "http://from-the-page:8770"
+
+    def test_the_page_shows_read_only_exactly_the_managed_keys_the_environment_sets(self, cache_dir: Path):
+        ui = load_ui(an_environment(cache_dir, frame=False, PLAYER_NAME="", TV_ADDRESS="10.0.0.1"))
+
+        assert ui.pinned == {"SERVER_URL", "CLIENT_TOKEN"}
+
+    def test_an_untrustworthy_file_refuses_to_start_and_names_it(self, cache_dir: Path):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        store.path_in(cache_dir).write_text('{"version": 99}', encoding="utf-8")
+
+        for resolve in (load, load_ui):
+            with pytest.raises(ConfigError, match=r"\.settings\.json"):
+                resolve(an_environment(cache_dir, frame=False))
+
+
+class TestWhereThePageListens:
+    def test_every_interface_on_its_own_port_by_default(self, cache_dir: Path):
+        ui = load_ui(an_environment(cache_dir, frame=False))
+
+        assert (ui.bind, ui.port) == (DEFAULT_UI_BIND, DEFAULT_UI_PORT)
+        assert DEFAULT_UI_BIND == "0.0.0.0"  # noqa: S104 -- asserting the default, binding nothing
+
+    def test_bind_and_port_are_the_environments(self, cache_dir: Path):
+        ui = load_ui(an_environment(cache_dir, frame=False, UI_BIND="127.0.0.1", UI_PORT="9123"))
+
+        assert (ui.bind, ui.port) == ("127.0.0.1", 9123)
+
+    @pytest.mark.parametrize("port", ["0", "65536", "http"])
+    def test_a_port_that_is_not_one_is_refused_by_name(self, cache_dir: Path, port: str):
+        with pytest.raises(ConfigError, match="UI_PORT"):
+            load_ui(an_environment(cache_dir, frame=False, UI_PORT=port))
 
     @pytest.mark.parametrize("name", ["CACHE_DIR", "TV_TOKEN_FILE"])
     def test_a_relative_path_to_the_players_state_is_refused_by_name(self, cache_dir: Path, name: str):

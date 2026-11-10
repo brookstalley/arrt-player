@@ -4,7 +4,7 @@ version: 1
 depends_on:
   - artifact: product-brief
   - artifact: data-model
-last_validated: null
+last_validated: 2026-11-10
 ---
 
 # Security Model — Arrt Player
@@ -16,10 +16,13 @@ deploy unit runs it, and what it must never do to the television. Written
 was read from; where it says "never" or "only", it says what enforces it.
 
 **Proportion.** One household, one operator, a Pi on a home LAN. The Player
-serves nothing: no code in `src/` opens a listening socket (searched 2026-10-27
-for `web.Application`, `start_server`, `TCPSite`, `HTTPServer`, `.bind(`,
-`listen(`). It makes outbound requests to two peers and draws on local
-hardware. The realistic attacker is something already on the LAN.
+serves one thing, its own settings page (§ The settings page), and nothing else:
+`settings_ui/server.py` is the only file in `src/` that opens a listening socket
+(searched 2026-11-10 for `Application(`, `start_server`, `TCPSite`,
+`HTTPServer`, `.bind(`, `listen(`; `settings_ui/server.py:address_to_visit`'s UDP
+`connect` only asks the kernel for a route and sends nothing). It makes outbound
+requests to two peers and draws on local hardware. The realistic attacker is
+something already on the LAN.
 
 **What is Arrt's.** The server's side of the trust boundary (LAN-only, no login,
 the public-exposure cliff) is Arrt's `security-model.md` § Trust Boundary. The
@@ -87,6 +90,47 @@ The Player authenticates outward only. Nothing authenticates to it.
   `tests/test_logs.py::test_a_token_logged_at_info_by_that_logger_is_not_emitted`.
   The startup line names the token's path, never its contents
   (`config.py:FrameSettings.frame_lines`).
+
+### To the Player: the settings page
+
+The Player's one inbound surface (`settings_ui/server.py`, served from
+`__main__.run_settings_page` on `UI_BIND`:`UI_PORT`, default every interface and
+8771, `config.py:load_ui`). It can set `SERVER_URL` and `CLIENT_TOKEN`, so whoever
+holds it can point the Player at a host of their choosing, which makes it as
+sensitive as the token itself.
+
+- **First password needs the setup code.** `__main__.settings_page` mints one
+  (`auth.new_setup_code`, 12 random bytes) only when no password is stored, and
+  prints it inside the page's address. `/setup` refuses without it
+  (`tests/test_settings_ui.py::TestTheFirstRun`), refuses once a password is
+  set, and clears it on use (`::test_setting_a_password_signs_you_in_and_spends_the_code`).
+  **The code is the one credential the Player prints**, a recorded exception
+  (`build-plan-settings-ui.md` § Goals): it is new each start and stops working
+  when the password is set, so a journal read afterwards grants nothing.
+- **The password** is kept as a salted scrypt hash in `$CACHE_DIR/.settings.json`
+  (`auth.hash_password`, n=2^14, r=8), at least `auth.MINIMUM_PASSWORD_LENGTH`
+  characters. Wrong passwords are throttled per process, doubling to a minute
+  (`auth.Throttle`; `::test_wrong_passwords_are_throttled_and_the_right_one_waits_too`).
+  To recover a forgotten one, delete `auth.password` from the file and restart.
+- **The session** is a cookie holding an expiry and an HMAC-SHA256 over it under
+  `auth.session_secret`, stored with the password, so it survives a restart. It
+  is HttpOnly, `SameSite=Strict` and lasts 30 days. Setting a password mints a
+  new secret, which ends every older session (`TestTheCookie`).
+- **Cross-site requests.** Every POST must carry an `Origin` equal to the page's
+  own (`server._same_origin_posts`); one with none or another is refused before
+  the handler runs (`TestWhatThePageRefuses`). Every response sets a CSP that
+  loads nothing from elsewhere, `X-Frame-Options: DENY`, `nosniff`,
+  `no-referrer` and `no-store` (`server.SECURITY_HEADERS`).
+- **Plain HTTP.** The password and the cookie cross the LAN in the clear, as
+  the server's traffic does; this is Arrt's LAN-only boundary
+  (Arrt's `security-model.md` § Trust Boundary). `UI_BIND=127.0.0.1` keeps the page
+  to the host.
+- **What it never says.** No password, hash, session secret or cookie reaches a
+  log record (`tests/test_settings_ui.py::test_no_credential_reaches_a_log_record`).
+  The settings file is created 0600 (`store.FILE_MODE`) and is gitignored as
+  part of `CACHE_DIR`, which is outside the checkout.
+- **It is not the pull's channel.** It takes only `aiohttp.web`, never a client,
+  and only the entry point imports it (`tests/test_plane_isolation.py`).
 
 ## Authorization
 
@@ -184,7 +228,7 @@ may be any host, gets no token, and must match its hash.
 
 ## Abuse Prevention
 
-**Not applicable as abuse; the Player has no users and no inbound surface.** What
+**The Player has one user and one inbound surface, the settings page.** What
 a hostile or broken peer on the LAN can do, and what bounds it:
 
 | Peer | Can | Bounded by |
@@ -195,6 +239,10 @@ a hostile or broken peer on the LAN can do, and what bounds it:
 | A server | Name a wall id that is a path | `_PLAIN_COMPONENT` |
 | Anything on the LAN | Impersonate the television (no certificate check) and receive uploads | The LAN boundary; the uploads are public artworks |
 | Anything on the LAN with the TV token | Drive the set | Arrt § Inventory ("LAN-scoped") |
+| Anything on the LAN | Reach the settings page before its owner, and set its password | The setup code, printed at start and spent on use |
+| Anything on the LAN | Guess the page's password | Length floor; a throttle doubling to a minute per attempt |
+| A page elsewhere in the owner's browser | Post a form to the settings page | `Origin` check on every POST; `SameSite=Strict` cookie |
+| Anything on the LAN that sees the owner's traffic | Read the password or the cookie off the wire | Not bounded: plain HTTP, as for the server (Arrt § Trust Boundary) |
 
 ### The deploy unit (`deploy/display.service`)
 

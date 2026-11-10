@@ -29,12 +29,21 @@ waits a bounded time before SIGKILL; a process that ignored the first would be
 killed with the Frame's websocket open, and the set holds a half-closed art
 channel until it times out on its own. The stop event reaches every worker, and
 the supervisor waits for each to close what it holds.
+
+**The settings page runs beside all of it, and alone when there is no server
+yet.** A Player with no `SERVER_URL` or `CLIENT_TOKEN` starts in setup mode: it
+serves only the page (`settings_ui.server`) and says where to go. A Player that
+has both runs its walls and the page together, and a page that cannot bind its
+port costs the page and nothing else, because a wall never waits on its settings.
+Until a password is set the page needs the setup code minted here and printed with
+its address; it is new on every start and dies once a password is set.
 """
 
 import asyncio
 import logging
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from functools import partial
 
@@ -47,8 +56,11 @@ from arrt_player.config import (
     FrameSettings,
     PanelSettings,
     Settings,
+    SetupRequired,
+    UiSettings,
     WallSettings,
     load,
+    load_ui,
 )
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import ScreenOutput, screen_wall
@@ -58,6 +70,7 @@ from arrt_player.manifest import Watcher
 from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
 from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
 from arrt_player.pull import ClientPull, LabelPull, Pull
+from arrt_player.settings_ui import auth, server, store
 from arrt_player.state import DisplayState, StateSchemaTooNew
 from arrt_player.tv.samsung import SamsungTv
 from arrt_player.wall import Clock
@@ -342,12 +355,67 @@ def _pull_ended(task: asyncio.Task[None], ending: asyncio.Event, wall_id: str) -
     ending.set()
 
 
+def settings_page(ui: UiSettings, *, missing: tuple[str, ...] = ()) -> server.PageState:
+    """The page's state for this start, with a setup code when no password is set yet."""
+    code = auth.new_setup_code() if store.read(ui.cache_dir).password is None else None
+    return server.PageState(
+        ui=ui,
+        setup_code=code,
+        now=time.time,
+        throttle=auth.Throttle(monotonic=time.monotonic),
+        missing=missing,
+    )
+
+
+def where_to_go(state: server.PageState) -> str:
+    """The line printed at start, naming the page's address and, before a password is set, the setup code."""
+    if state.setup_code is not None:
+        return f"go to {server.setup_url(state.ui, state.setup_code)} to configure"
+    return f"go to {server.home_url(state.ui)} to configure"
+
+
+async def run_settings_page(state: server.PageState, stop: asyncio.Event) -> bool:
+    """Serve the page until `stop`. False when its address could not be bound, which is logged."""
+    # Printed rather than only logged: the reader is a person who has just started
+    # the Player, at a terminal or in `journalctl`. The setup code in it is the
+    # one value this process prints that grants anything, and it is spent the
+    # moment a password is set.
+    print(where_to_go(state), flush=True)  # noqa: T201 -- the operator is told where the settings page is
+    log.info(
+        "settings page listening",
+        extra={"event": "settings_page.listening", **state.ui.startup_lines(), "setup_mode": bool(state.missing)},
+    )
+    try:
+        await server.serve(server.build(state), state.ui, stop)
+    except OSError as exc:
+        log.error(  # noqa: TRY400 -- an address in use is a deployment fact, not a bug with a useful stack
+            "the settings page cannot listen on %s:%s: %s",
+            state.ui.bind,
+            state.ui.port,
+            exc,
+            extra={"event": "settings_page.unavailable"},
+        )
+        return False
+    return True
+
+
 async def _run() -> int:
-    settings = load()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for received in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(received, stop.set)
+
+    ui = load_ui()
+
+    try:
+        settings = load()
+    except SetupRequired as exc:
+        log.warning(
+            "no server is configured, so only the settings page runs",
+            extra={"event": "daemon.setup_mode", "missing": list(exc.missing)},
+        )
+        served = await run_settings_page(settings_page(ui, missing=exc.missing), stop)
+        return 0 if served else 1
 
     clock = Clock.system()
     identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
@@ -363,6 +431,7 @@ async def _run() -> int:
         label_outputs=lambda: [panel.report()] if panel is not None else [],
         frame_identity=identity,
     )
+    page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
     try:
         await supervisor.run(stop)
     finally:
@@ -370,6 +439,8 @@ async def _run() -> int:
         # this is the panel's power-down.
         if panel is not None:
             panel.close()
+        stop.set()
+        await page
     return 0
 
 

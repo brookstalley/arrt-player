@@ -12,11 +12,13 @@ import json
 import logging
 import os
 import signal
+import socket
 from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 from fakes import FakeTv, RecordingOutput, drm_tree
@@ -35,7 +37,7 @@ from arrt_player.client import (
     hdmi_outputs,
 )
 from arrt_player.compose import Geometry, composed_path, mat_mode
-from arrt_player.config import COMPOSED_DIRNAME, ClientSettings
+from arrt_player.config import COMPOSED_DIRNAME, ClientSettings, UiSettings
 from arrt_player.pull import ClientPull
 from arrt_player.wall import Clock
 
@@ -536,7 +538,20 @@ def test_a_connected_screen_with_no_mode_listed_has_no_size(tmp_path):
 # -- the process ----------------------------------------------------------------------------
 
 
-async def test_sigterm_stops_every_worker_and_closes_the_art_channel(monkeypatch, client, server, drm, screens):
+@pytest.fixture(autouse=True)
+def settings_page(monkeypatch, cache_dir: Path) -> UiSettings:
+    """Every `_run` here serves its settings page on loopback, on a port nothing else holds.
+
+    Without it `_run` would resolve the page from the real environment, which has
+    no `CACHE_DIR` in the suite, and refuse before installing its SIGTERM handler,
+    so a test's own SIGTERM would end pytest.
+    """
+    page = UiSettings(cache_dir=cache_dir, bind="127.0.0.1", port=free_port(), pinned=frozenset())
+    monkeypatch.setattr(entry, "load_ui", lambda: page)
+    return page
+
+
+async def test_sigterm_stops_every_worker_and_closes_the_art_channel(monkeypatch, client, server, drm, screens, settings_page):
     """The whole process as systemd runs it: `_run` until SIGTERM, then a clean exit.
 
     **The art channel is closed before the process returns, not merely asked
@@ -550,16 +565,42 @@ async def test_sigterm_stops_every_worker_and_closes_the_art_channel(monkeypatch
     server.publish("w1", wall_id="living-room")
     server.publish("h1", wall_id="hall")
     monkeypatch.setattr(entry, "load", lambda: client)
+    port = settings_page.port
     monkeypatch.setattr(entry, "client_outputs", partial(client_outputs, drm_root=drm))
 
     running = asyncio.create_task(entry._run())
     await eventually(lambda: television.on_the_wall is not None, what="the Frame to show its wall")
     await eventually(lambda: "hall" in screens and screens["hall"].shown, what="the screen to draw its wall")
+    assert await page_answers(port), "the settings page is not listening beside the walls"
 
     os.kill(os.getpid(), signal.SIGTERM)
 
     assert await asyncio.wait_for(running, timeout=5) == 0
     assert television.closed >= 1, "the art channel was left open at the set"
+    assert not listening(port), "the settings page outlived the process's own stop"
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def listening(port: int) -> bool:
+    with socket.socket() as probe:
+        return probe.connect_ex(("127.0.0.1", port)) == 0
+
+
+async def page_answers(port: int) -> bool:
+    """Whether the page answers a request, asked until it does or a few seconds pass."""
+    async with aiohttp.ClientSession() as session:
+        for _ in range(100):
+            try:
+                async with session.get(f"http://127.0.0.1:{port}/", allow_redirects=False) as response:
+                    return response.status in {200, 303}
+            except aiohttp.ClientConnectionError:
+                await asyncio.sleep(0.05)
+    return False
 
 
 # -- the Frame's identity ----------------------------------------------------------------------

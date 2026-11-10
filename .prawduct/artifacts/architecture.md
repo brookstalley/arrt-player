@@ -74,11 +74,12 @@ module docstring).
 nothing in `src/` starts a second process or a second event loop. Searched:
 `grep -rn "subprocess\|multiprocessing\|new_event_loop" src/` returns nothing.
 
-**The task tree.** All tasks are created by `asyncio.create_task` at five sites
+**The task tree.** All tasks are created by `asyncio.create_task` at six sites
 (`grep -rn create_task src/`):
 
 | Task | Created by | Runs | Lives |
 |---|---|---|---|
+| `settings-page` | `__main__._run`, beside the supervisor; in setup mode awaited directly and alone | `__main__.run_settings_page` → `settings_ui.server.serve`: the settings page on `UI_BIND`:`UI_PORT`. A bind failure ends this task and nothing else | the process |
 | the supervisor | `__main__._run` (awaited directly) | `client.Supervisor.run`: polls `GET /client` every `CLIENT_POLL_SECONDS` (default 30 s, `config.DEFAULT_CLIENT_POLL_SECONDS`), reconciles workers, POSTs the client heartbeat | the process |
 | `wall:<wall_id>` | `Supervisor._start` | `Supervisor._keep_running` around `__main__.run_wall` | while the wall is assigned |
 | `pull:<wall_id>`, `stop:<wall_id>` | `__main__._beside_its_pull` | `pull.Pull.run` beside the wall loop, and a relay of the supervisor's stop | with their wall's worker |
@@ -161,7 +162,10 @@ is that walk's output, not a recollection.
 | `heartbeat` | The wall heartbeat document and its atomic write | — |
 | `logs` | JSON log shape and `work_id` binding | — |
 | `episodes` | `ReportOnce`, `Backoff` | — |
-| `config` | `.env` into `ClientSettings` / `WallSettings` / `Settings` | `compose`, `heartbeat` |
+| `config` | `.env`, with the settings page's file beneath it, into `ClientSettings` / `WallSettings` / `Settings` / `UiSettings`; `SetupRequired` | `compose`, `heartbeat`, `settings_ui.store` |
+| `settings_ui/store` | The settings page's file, `$CACHE_DIR/.settings.json` | — |
+| `settings_ui/auth` | The page's password hash, session cookie, setup code and throttle | — |
+| `settings_ui/server` | The settings page (`aiohttp.web`); the Player's one listening socket | `config`, `settings_ui.auth`, `settings_ui.store` |
 | `brightness` | Sun-angle brightness (astral) | — |
 
 **Dependency direction, as the graph shows it.** `__main__` sits on top. Below it
@@ -174,7 +178,7 @@ sideways rather than down: `kms` imports `client` (for `DRM_ROOT`,
 document parser).
 
 **Third-party imports by module** (same walk, stdlib excluded): `aiohttp` in
-`pull` only; `samsungtvws`, `websockets` in `tv/samsung` only; `omni_epd` in
+`pull` only, and `aiohttp.web` (the server half) in `settings_ui/server` only; `samsungtvws`, `websockets` in `tv/samsung` only; `omni_epd` in
 `panel/epaper.open_panel` only, inside the function; `gi`, `cairo` in
 `panel/pango` only; `PIL` in `compose`, `kms`, `panel/epaper`; `astral` in
 `brightness`; `dotenv` in `config`. `arrt_contract` is imported by no module in
@@ -195,6 +199,12 @@ argument counted, followed transitively through repo-local files):
   `samsungtvws` and `websockets` are deliberately not on the list.
 - `pull.py` is imported by `__main__.py` and nothing else
   (`test_only_the_entry_point_imports_the_pull`).
+- The one exception beside the pull: `settings_ui/server.py` may import
+  `aiohttp.web`, spelled `from aiohttp.web import …`, and nothing else from aiohttp,
+  names no client class (`test_the_settings_page_names_no_client`), and is
+  imported only by `__main__.py`
+  (`test_only_the_entry_point_imports_the_settings_page`). It listens and
+  requests nothing.
 - Every string in `pull.py` that starts a path segment is a path in
   `arrt_contract.routes()` (`test_the_pull_requests_only_the_routes_the_contract_names`).
 - Each half is shown failing against a planted violation (`TestTheGuardCanFail`).
@@ -237,6 +247,7 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 | 9 | HDMI | `ioctl` on `/dev/dri/card*` through libdrm (`ctypes`) | Player → screen | blocking, on a thread | `kms.py`; `hdmi-output-findings.md` |
 | 10 | E-paper | SPI and GPIO through `omni_epd` | Player → panel | blocking, on a thread | `panel/epaper.py`; `platform-and-dependency-findings.md` § The e-paper panel |
 | 11 | Connector discovery | reads `/sys/class/drm` | kernel → Player | each client poll | `client.hdmi_outputs` |
+| 12 | Settings page | HTTP served on `UI_BIND`:`UI_PORT` (default all interfaces, 8771), session cookie | owner's browser → Player | request/response | `settings_ui/server.py`; `security-model.md` § To the Player: the settings page |
 
 **Trust boundaries.** Channels 1–6 cross the LAN and carry `CLIENT_TOKEN` as a
 Bearer header (`Pull._auth`, `ClientPull._auth`, `LabelPull.fetch`). A media URL
