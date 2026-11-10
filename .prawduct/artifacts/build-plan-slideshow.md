@@ -135,6 +135,9 @@ last_validated: 2026-11-10
 - mpv brings 148 packages onto the Pi.
 
 **Decisions made mid-build:**
+- Chunk 01: mpv answers `property unavailable` for a `duration` it does not have (measured on the Pi, mpv 0.40). That reply is read as "no length", and the item shows as a still, as the Decision above says; it is not a failure. Settled by the plan's own Decision. The chunk review found the gap.
+- Chunk 01: the plan's "a cancelled task leaves no mpv" test moves to chunk 04, the first code that calls the renderer from asyncio. Cancellation leaves a `with` block exactly as an exception does, and that case is tested. Settled by the plan's Partition (04 composes the renderer). The chunk review raised it.
+- Chunk 01: failures split into screen failures (mpv stopped, restart backoff) and file failures (that item only), so one bad file never restarts mpv or delays the next item. Not settled by the goals; inferred from "a screen held by another program must not spin".
 
 **Level:** Medium-High. Every boundary was probed live: Reddit with the owner's cookie, mpv on the Pi with the owner watching. What remains unmeasured is named: stills and transitions under the plane-swapped settings (chunk 01's first Pi check), whether the 403s are a fixed rule by path, and whether the cookie is renewed. To raise it: chunk 01's Pi check.
 
