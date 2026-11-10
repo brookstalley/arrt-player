@@ -1,0 +1,367 @@
+/* The settings page's look: Arrt's, so the Player's one page reads as part of
+ * the same product (owner, 2026-11-10).
+ *
+ * COPIED, NOT SHARED. The token values and the component rules below are taken
+ * from Arrt's curation stylesheet (`arrt/src/arrt/http/static/app.css`, Arrt at
+ * `3d2b599e`) and Arrt's `design-direction.md` governs what they mean: a
+ * gallery wall in light, a wood-panelled study in dark; one filled act per
+ * region; sections set off by a rule, never boxed; colour never the sole
+ * carrier of state. The two repositories share no files, so this copy does not
+ * move when Arrt's does. To follow a change there, copy the values again and
+ * change the commit above.
+ *
+ * Held here by `tests/test_settings_ui_style.py`: every text pair the page uses
+ * clears WCAG 2.1 AA (4.5:1) in both schemes, every control boundary clears
+ * 3:1, and no colour is written outside the two token blocks.
+ */
+
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("fonts/newsreader/latin-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Newsreader";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("fonts/newsreader/latin-ext-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
+  font-display: swap;
+  src: url("fonts/instrument-sans/latin-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
+  font-display: swap;
+  src: url("fonts/instrument-sans/latin-ext-normal.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+:root {
+  color-scheme: light dark;
+
+  /* A gallery wall, not a page: no pure white anywhere. */
+  --surface-0: #eae6de;
+  --surface-1: #f6f3ed;
+  --surface-2: #dfdad0;
+  --border: #ccc5b8;
+  --border-strong: #67604f;
+
+  --text-strong: #1e1b16;
+  --text: #3b362d;
+  --text-muted: #635c4f;
+
+  /* A warm bistre ink, the colour of a printed label, not a hyperlink. */
+  --accent: #3d3128;
+  --accent-text: #f6f3ed;
+  --focus: #1e1b16;
+
+  /* Status, deliberately not the accent, and never without a glyph and a word. */
+  --good: #2f5940;
+  --warn: #6f4e14;
+  --crit: #7d322b;
+  --crit-quiet: #f0dfdb;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-xl: 1.375rem;
+  --text-3xl: 2.5rem;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --control-h: 2.5rem;
+
+  /* Crisp: a museum label is not a pill. */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+
+  --font-ui: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-label: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* A finger is not a pointer: keyed on the pointer, not the viewport. */
+@media (pointer: coarse) {
+  :root {
+    --control-h: 2.75rem;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* A wood-panelled study under warm lamplight: walnut, and a gilt accent. */
+    --surface-0: #191310;
+    --surface-1: #221a15;
+    --surface-2: #2e241d;
+    --border: #453830;
+    --border-strong: #8b7b6c;
+    --text-strong: #f4ece0;
+    --text: #ded3c4;
+    --text-muted: #a99a88;
+    --accent: #ccad66;
+    --accent-text: #1a1410;
+    --focus: #dcc088;
+    --good: #8fbf9c;
+    --warn: #e0964a;
+    --crit: #e39a8f;
+    --crit-quiet: #33211f;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text);
+  font: var(--text-md) / 1.55 var(--font-ui);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 3px;
+}
+
+/* -- chrome: the product's name, which is not a heading ------------------- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font: 500 var(--text-md) / 1.2 var(--font-label);
+  color: var(--text-strong);
+  letter-spacing: 0.01em;
+}
+
+.brand-part {
+  font: 400 var(--text-xs) / 1.2 var(--font-ui);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-left: var(--space-2);
+}
+
+/* -- the page --------------------------------------------------------------- */
+
+main {
+  padding: var(--space-5);
+  max-width: 44rem;
+}
+
+main p {
+  max-width: 70ch;
+}
+
+/* A page's name, and the one size on every page. */
+h1 {
+  font: 500 var(--text-3xl) / 1.1 var(--font-label);
+  letter-spacing: -0.015em;
+  color: var(--text-strong);
+  margin: 0 0 var(--space-3);
+  overflow-wrap: anywhere;
+}
+
+/* One line of facts under the name, then the toolbar. */
+.page-facts {
+  margin: 0 0 var(--space-4);
+  color: var(--text);
+}
+
+.page-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-5);
+}
+
+/* A state: glyph, word and colour, never fewer. */
+.state {
+  font-weight: 600;
+}
+
+.state-good {
+  color: var(--good);
+}
+
+.state-warn {
+  color: var(--warn);
+}
+
+.glyph {
+  margin-right: var(--space-1);
+}
+
+/* A part of the page: a rule above it and space below, never a box. */
+.panel {
+  border-top: 1px solid var(--border-strong);
+  padding: var(--space-4) 0 0;
+  margin-bottom: var(--space-6);
+}
+
+.panel h2 {
+  margin: 0 0 var(--space-3);
+  font: 500 var(--text-xl) / 1.25 var(--font-label);
+  color: var(--text-strong);
+}
+
+/* -- fields ------------------------------------------------------------------ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+  max-width: 28rem;
+}
+
+label {
+  font-size: var(--text-sm);
+  color: var(--text-strong);
+}
+
+input {
+  min-height: var(--control-h);
+  width: 100%;
+  font: var(--text-md) / 1.4 var(--font-ui);
+  color: var(--text);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+}
+
+/* The token, typed once and never shown back. */
+input.secret {
+  font-family: var(--font-mono);
+}
+
+/* A value the environment sets: shown, and plainly not editable here. */
+input:disabled {
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+.hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+/* -- acts -------------------------------------------------------------------- */
+
+/* The one committing act in a region. */
+button.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--control-h);
+  font: var(--text-sm) / 1.2 var(--font-ui);
+  color: var(--accent-text);
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  padding: var(--space-1) var(--space-4);
+  cursor: pointer;
+}
+
+/* Every other act, in the text's ink in both schemes. */
+button.action.quiet {
+  color: var(--text);
+  background: var(--surface-1);
+  border-color: var(--border-strong);
+}
+
+button.action:hover {
+  box-shadow: inset 0 0 0 100vmax color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* An act with one line under it saying what pressing it starts. */
+.captioned {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.act-caption {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+form > .captioned,
+form > button.action {
+  margin-top: var(--space-2);
+}
+
+/* -- notices ----------------------------------------------------------------- */
+
+.note {
+  font-size: var(--text-sm);
+  color: var(--text);
+  background: var(--surface-2);
+  border-left: 3px solid var(--border-strong);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin: 0 0 var(--space-5);
+}
+
+/* Said in words and weight as well as colour: a problem missed for its colour
+   is a problem missed. */
+.note.error {
+  background: var(--crit-quiet);
+  border-left-color: var(--crit);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+  }
+}

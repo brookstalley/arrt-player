@@ -27,6 +27,7 @@ import logging
 import socket
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Final
 
 from aiohttp.web import (
@@ -56,7 +57,11 @@ Handler = Callable[[Request], Awaitable[StreamResponse]]
 #: Sent with every response. No framing, no sniffing, no caching of a page that
 #: may carry settings, and nothing loaded from anywhere but here.
 SECURITY_HEADERS: Final[dict[str, str]] = {
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    # Styles and typefaces from this page's own `/static`, and nothing else from
+    # anywhere: no inline style, no script.
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'self'; font-src 'self'; form-action 'self'; " "frame-ancestors 'none'; base-uri 'none'"
+    ),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
     # `same-origin`, never `no-referrer`: under that policy a browser sends
@@ -65,6 +70,20 @@ SECURITY_HEADERS: Final[dict[str, str]] = {
     "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
+
+#: The page's stylesheet and typefaces, shipped inside the package.
+STATIC_DIRECTORY: Final[Path] = Path(__file__).parent / "static"
+
+#: Each static file's type, said rather than guessed. aiohttp guesses from its
+#: own `MimeTypes()` table, which has no `.woff2` on every platform; a typeface
+#: served as `application/octet-stream` beside `nosniff` may be refused, and the
+#: page then draws in its fallback face looking as if it worked. aiohttp guesses
+#: only when the response carries no `Content-Type`, so naming it here wins.
+STATIC_TYPES: Final[dict[str, str]] = {".css": "text/css", ".woff2": "font/woff2"}
+
+#: A static file is the same for a whole release, so a browser may keep it for a
+#: day rather than fetch the typefaces again on every page.
+STATIC_CACHE_CONTROL: Final[str] = "public, max-age=86400"
 
 #: An address no packet is sent to (TEST-NET-1, RFC 5737). Connecting a UDP
 #: socket to it only asks the kernel which local address would route there.
@@ -106,6 +125,9 @@ def build(state: PageState) -> Application:
     app.router.add_post("/logout", _logout)
     app.router.add_post("/settings", _save)
     app.router.add_post("/password", _change_password)
+    # The stylesheet and the two typefaces. Served without a session: the login
+    # page wears them too, and they hold nothing.
+    app.router.add_static("/static/", STATIC_DIRECTORY, follow_symlinks=False, show_index=False)
     return app
 
 
@@ -153,6 +175,11 @@ def home_url(ui: UiSettings) -> str:
 async def _headers(request: Request, handler: Handler) -> StreamResponse:
     response = await handler(request)
     response.headers.update(SECURITY_HEADERS)
+    if request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = STATIC_CACHE_CONTROL
+        kind = STATIC_TYPES.get(Path(request.path).suffix)
+        if kind is not None:
+            response.headers["Content-Type"] = kind
     return response
 
 
@@ -409,30 +436,31 @@ def _settings_page(
     notice: str | None = None,
     status: int = 200,
 ) -> Response:
+    """The page's own: the Player's name, a line of facts, its toolbar, then Server, This Player and Password."""
     locked = _locked(state)
     local = _shown(state, stored, "PLAYER_NAME")
     name = player_name(state.ui.cache_dir, local)
     token_set = "CLIENT_TOKEN" in state.ui.pinned or bool(stored.values.get("CLIENT_TOKEN"))
 
     if state.missing:
-        status_line = (
-            f"<p>Setup mode: {html.escape(', '.join(state.missing))} not set when the Player started, "
-            "so no walls are shown. Set the server and its token below.</p>"
+        facts = (
+            _state_word("warn", "Setup mode")
+            + f" · {html.escape(', '.join(state.missing))} not set when the Player started, so no walls are shown."
         )
     else:
-        status_line = "<p>Running, and pulling from its server.</p>"
+        facts = _state_word("good", "Running") + " · pulling from " + html.escape(_shown(state, stored, "SERVER_URL"))
     if name != local:
-        status_line += (
-            f"<p>The server calls this Player <strong>{html.escape(name)}</strong>; that name wins over the one below.</p>"
-        )
+        facts += f" · Its server calls it {html.escape(name)}, and that name wins over its own."
 
     body = (
-        status_line
-        + _problem(problem)
-        + (f'<p role="status">{html.escape(notice)}</p>' if notice else "")
-        + '<form method="post" action="/settings"><h2>Server</h2>'
+        f'<p class="page-facts">{facts}</p>'
+        '<div class="page-toolbar"><form method="post" action="/logout">'
+        '<button class="action quiet" type="submit">Log out</button></form></div>'
+        + _notes(problem=problem, notice=notice)
+        + '<form method="post" action="/settings">'
+        '<section class="panel"><h2>Server</h2>'
         + _field(
-            "Server address",
+            "Address",
             "server_url",
             _shown(state, stored, "SERVER_URL"),
             locked="SERVER_URL" in locked,
@@ -440,7 +468,7 @@ def _settings_page(
             hint="For example http://arrt.local:8770. Changing it clears the token unless you enter one with it.",
         )
         + _token_field(locked="CLIENT_TOKEN" in locked, pinned="CLIENT_TOKEN" in state.ui.pinned, token_set=token_set)
-        + "<h2>This Player</h2>"
+        + '</section><section class="panel"><h2>This Player</h2>'
         + _field(
             "Name",
             "player_name",
@@ -449,40 +477,82 @@ def _settings_page(
             pinned="PLAYER_NAME" in state.ui.pinned,
             hint="Used until a server names this Player, and whenever its name cannot be read.",
         )
-        + '<button type="submit">Save and restart</button></form>'
-        + '<form method="post" action="/password"><h2>Password</h2>'
-        '<label>Current password <input type="password" name="current" autocomplete="current-password" required></label>'
-        '<label>New password <input type="password" name="password" autocomplete="new-password" required></label>'
-        '<label>Again <input type="password" name="again" autocomplete="new-password" required></label>'
-        '<button type="submit">Change password</button></form>'
-        '<form method="post" action="/logout"><button type="submit">Log out</button></form>'
+        + _captioned_act("Save and restart", "Restarts the Player onto what is saved; it is back in a few seconds.")
+        + '</section></form><section class="panel"><h2>Password</h2><form method="post" action="/password">'
+        + _password_input("current", "Current password", "current-password")
+        + _password_input("password", "New password", "new-password", hint=_PASSWORD_HINT)
+        + _password_input("again", "New password again", "new-password")
+        + '<button class="action" type="submit">Change password</button></form></section>'
     )
     title = f"Settings · {name}" if name else "Settings"
-    return _page(title, body, status=status)
+    return _page(title, body, heading=name or "This Player", status=status)
 
 
 _PINNED_HINT: Final[str] = "Set in the environment or .env, which wins over this page. Remove it there to manage it here."
 _PAIR_HINT: Final[str] = "Locked because the server's address and token are managed together, and one is set in .env."
+_PASSWORD_HINT: Final[str] = f"At least {auth.MINIMUM_PASSWORD_LENGTH} characters."
+
+#: Glyphs as Arrt's client draws them (its `core/glyphs.js`): one meaning each.
+_GLYPHS: Final[dict[str, str]] = {"good": "\u25cf", "warn": "\u25b2"}
+
+
+def _state_word(kind: str, word: str) -> str:
+    """A state as glyph, word and colour together: never colour alone."""
+    return (
+        f'<span class="state state-{kind}"><span class="glyph" aria-hidden="true">{_GLYPHS[kind]}</span>'
+        f"{html.escape(word)}</span>"
+    )
 
 
 def _field(label: str, name: str, value: str, *, locked: bool, pinned: bool, hint: str) -> str:
     note = _PINNED_HINT if pinned else _PAIR_HINT if locked else hint
     disabled = " disabled" if locked else ""
     return (
-        f'<label>{html.escape(label)} <input name="{name}" value="{html.escape(value)}"{disabled}></label>'
-        f'<p class="hint">{html.escape(note)}</p>'
+        f'<div class="field"><label for="{name}">{html.escape(label)}</label>'
+        f'<input id="{name}" name="{name}" value="{html.escape(value)}"{disabled} aria-describedby="{name}-hint">'
+        f'<p class="hint" id="{name}-hint">{html.escape(note)}</p></div>'
     )
 
 
 def _token_field(*, locked: bool, pinned: bool, token_set: bool) -> str:
     """The token can be written here and never read back: the field is always empty."""
-    state = "A token is set." if token_set else "No token is set."
+    said = "A token is set." if token_set else "No token is set."
     note = _PINNED_HINT if pinned else _PAIR_HINT if locked else "Leave empty to keep the current one."
     disabled = " disabled" if locked else ""
     return (
-        f'<label>Client token <input type="password" name="client_token" value="" autocomplete="off"{disabled}></label>'
-        f'<p class="hint">{html.escape(state)} {html.escape(note)}</p>'
+        '<div class="field"><label for="client_token">Client token</label>'
+        '<input class="secret" id="client_token" type="password" name="client_token" value="" autocomplete="off"'
+        f'{disabled} aria-describedby="client_token-hint">'
+        f'<p class="hint" id="client_token-hint">{html.escape(said)} {html.escape(note)}</p></div>'
     )
+
+
+def _password_input(name: str, label: str, autocomplete: str, *, hint: str | None = None) -> str:
+    described = f' aria-describedby="{name}-hint"' if hint else ""
+    shown_hint = f'<p class="hint" id="{name}-hint">{html.escape(hint)}</p>' if hint else ""
+    return (
+        f'<div class="field"><label for="{name}">{html.escape(label)}</label>'
+        f'<input id="{name}" type="password" name="{name}" autocomplete="{autocomplete}" required{described}>'
+        f"{shown_hint}</div>"
+    )
+
+
+def _captioned_act(label: str, caption: str) -> str:
+    """The one filled act in its region, with a line under it saying what pressing it starts."""
+    return (
+        '<span class="captioned"><button class="action" type="submit" aria-describedby="act-caption">'
+        f'{html.escape(label)}</button><span class="act-caption" id="act-caption">{html.escape(caption)}</span></span>'
+    )
+
+
+def _notes(*, problem: str | None = None, notice: str | None = None) -> str:
+    """A problem in words and weight as well as colour, announced; a notice, announced politely."""
+    said = ""
+    if problem:
+        said += f'<p class="note error" role="alert">{html.escape(problem)}</p>'
+    if notice:
+        said += f'<p class="note" role="status">{html.escape(notice)}</p>'
+    return said
 
 
 def _password_problem(password: str, again: str) -> str | None:
@@ -495,8 +565,9 @@ def _password_problem(password: str, again: str) -> str | None:
 
 def _bad_code() -> Response:
     return _page(
-        "Setup code needed",
-        "<p>That setup link is not this start's. Open the link the Player printed when it last started.</p>",
+        "Setup link needed",
+        "<p>That setup link is not this start's. Open the link the Player printed when it last started; "
+        "it carries a code that is new each time.</p>",
         status=403,
     )
 
@@ -504,11 +575,13 @@ def _bad_code() -> Response:
 def _setup_page(code: str, *, problem: str | None = None, status: int = 200) -> Response:
     return _page(
         "Set a password",
-        _problem(problem) + '<form method="post" action="/setup">'
+        '<p class="page-facts">This password guards this Player&#x27;s settings, its server and its token.</p>'
+        + _notes(problem=problem)
+        + '<form method="post" action="/setup">'
         f'<input type="hidden" name="code" value="{html.escape(code)}">'
-        '<label>Password <input type="password" name="password" autocomplete="new-password" required></label>'
-        '<label>Again <input type="password" name="again" autocomplete="new-password" required></label>'
-        '<button type="submit">Set password</button></form>',
+        + _password_input("password", "Password", "new-password", hint=_PASSWORD_HINT)
+        + _password_input("again", "Password again", "new-password")
+        + '<button class="action" type="submit">Set password</button></form>',
         status=status,
     )
 
@@ -516,34 +589,22 @@ def _setup_page(code: str, *, problem: str | None = None, status: int = 200) -> 
 def _login_page(*, problem: str | None = None, status: int = 200) -> Response:
     return _page(
         "Log in",
-        _problem(problem) + '<form method="post" action="/login">'
-        '<label>Password <input type="password" name="password" autocomplete="current-password" required></label>'
-        '<button type="submit">Log in</button></form>',
+        _notes(problem=problem)
+        + '<form method="post" action="/login">'
+        + _password_input("password", "Password", "current-password")
+        + '<button class="action" type="submit">Log in</button></form>',
         status=status,
     )
 
 
-def _problem(problem: str | None) -> str:
-    return f'<p role="alert" class="problem">{html.escape(problem)}</p>' if problem else ""
-
-
-_STYLE: Final[str] = (
-    "body{font:16px/1.5 system-ui,sans-serif;max-width:36rem;margin:2rem auto;padding:0 1rem;"
-    "color:#1a1a1a;background:#fafafa}"
-    "@media (prefers-color-scheme:dark){body{color:#eee;background:#161616}}"
-    "label{display:block;margin:.75rem 0}input{display:block;width:100%;font:inherit;padding:.4rem}"
-    "button{font:inherit;padding:.4rem 1rem;margin-top:.5rem}.problem{color:#b00020}"
-    ".hint{font-size:.875rem;opacity:.75;margin:-.5rem 0 .75rem}h2{font-size:1.1rem;margin-top:2rem}"
-    "input:disabled{opacity:.6}"
-)
-
-
-def _page(title: str, body: str, *, status: int = 200) -> Response:
-    escaped = html.escape(title)
+def _page(title: str, body: str, *, heading: str | None = None, status: int = 200) -> Response:
+    """A whole page: the product's name in the masthead, then the page's own name and body."""
     document = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{escaped} · Arrt Player</title><style>{_STYLE}</style></head>"
-        f"<body><h1>{escaped}</h1>{body}</body></html>"
+        f"<title>{html.escape(title)} · Arrt Player</title>"
+        '<link rel="stylesheet" href="/static/settings.css"></head>'
+        '<body><header class="masthead"><span class="brand">Arrt<span class="brand-part">Player</span></span></header>'
+        f"<main><h1>{html.escape(heading or title)}</h1>{body}</main></body></html>"
     )
     return Response(text=document, content_type="text/html", status=status)

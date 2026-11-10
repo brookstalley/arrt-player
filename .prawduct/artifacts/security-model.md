@@ -123,9 +123,14 @@ sensitive as the token itself.
 - **Cross-site requests.** Every POST must carry an `Origin` equal to the page's
   own (`server._same_origin_posts`); one with none or another is refused before
   the handler runs (`TestWhatThePageRefuses`). Every response sets a CSP that
-  loads nothing from elsewhere, `X-Frame-Options: DENY`, `nosniff`,
+  loads its stylesheet and typefaces from the page's own `/static` and nothing
+  else, with no inline style and no script (`tests/test_settings_ui_style.py`).
+  `/static` is served without a session, since the login page uses it too; it
+  holds the stylesheet and two OFL typefaces and nothing secret, and paths
+  outside it are refused (`::test_nothing_outside_the_static_directory_is_served`).
+  Every response also sets `X-Frame-Options: DENY`, `nosniff`,
   `Referrer-Policy: same-origin` (not `no-referrer`, under which a browser sends
-  `Origin: null` and every form would be refused) and `no-store` (`server.SECURITY_HEADERS`).
+  `Origin: null` and every form would be refused) and `no-store`, except `/static`, which a browser may keep a day (`server.SECURITY_HEADERS`, `STATIC_CACHE_CONTROL`).
 - **What it can change, and how.** `SERVER_URL`, `CLIENT_TOKEN` and
   `PLAYER_NAME`, and only where the environment does not set them
   (`config.load_ui` › `pinned`); a pinned key is shown read-only and a POST
