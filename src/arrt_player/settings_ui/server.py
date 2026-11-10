@@ -604,7 +604,8 @@ def _page(title: str, body: str, *, heading: str | None = None, status: int = 20
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>{html.escape(title)} · Arrt Player</title>"
         '<link rel="stylesheet" href="/static/settings.css"></head>'
-        '<body><header class="masthead"><span class="brand">Arrt<span class="brand-part">Player</span></span></header>'
-        f"<main><h1>{html.escape(heading or title)}</h1>{body}</main></body></html>"
+        '<body><header class="masthead"><div class="column">'
+        '<span class="brand">Arrt<span class="brand-part">Player</span></span></div></header>'
+        f'<main class="column"><h1>{html.escape(heading or title)}</h1>{body}</main></body></html>'
     )
     return Response(text=document, content_type="text/html", status=status)

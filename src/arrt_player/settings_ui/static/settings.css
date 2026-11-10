@@ -161,12 +161,23 @@ a {
 /* -- chrome: the product's name, which is not a heading ------------------- */
 
 .masthead {
+  border-bottom: 1px solid var(--border);
+}
+
+/* One centred column for the masthead's contents and the page alike, so the
+   product's name starts where the page's name does. Arrt's pages sit beside a
+   sidebar; this one has none, and pinned to the left edge it read as cramped. */
+.column {
+  max-width: 44rem;
+  margin-inline: auto;
+  padding-inline: var(--space-5);
+}
+
+.masthead .column {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
-  border-bottom: 1px solid var(--border);
+  padding-block: var(--space-3);
 }
 
 .brand {
@@ -186,8 +197,7 @@ a {
 /* -- the page --------------------------------------------------------------- */
 
 main {
-  padding: var(--space-5);
-  max-width: 44rem;
+  padding-block: var(--space-6);
 }
 
 main p {
