@@ -83,6 +83,7 @@ class Internet:
 
     def __init__(self) -> None:
         self.seen: list[tuple[str, str | None, str]] = []
+        self.authorizations: list[str | None] = []
         self.port = 0
 
     def app(self) -> web.Application:
@@ -110,6 +111,7 @@ class Internet:
     @web.middleware
     async def _record(self, request: web.Request, handler):
         self.seen.append((request.host.split(":")[0], request.headers.get("Cookie"), request.path))
+        self.authorizations.append(request.headers.get("Authorization"))
         return await handler(request)
 
     async def _endless(self, request: web.Request) -> web.StreamResponse:
@@ -476,3 +478,20 @@ async def test_a_name_for_a_lan_address_is_a_refused_item_in_the_cache_not_a_net
         now[0] += RETRY_AFTER_S - 13
         again = await cache.fill([*lan, good])
         assert (again.failed, again.downloaded) == ({}, [])
+
+
+@pytest.mark.parametrize("name", ["Cookie", "cookie", "COOKIE"])
+async def test_a_caller_cannot_send_a_cookie_header_of_its_own(internet, name):
+    async with _fetcher(cookie=COOKIE) as fetcher:
+        with pytest.raises(FetchRefused, match="Cookie"):
+            await fetcher.get_api(_url(internet, "/api", host="api.redgifs.com"), headers={name: f"reddit_session={COOKIE}"})
+
+    assert internet.seen == []
+
+
+async def test_a_callers_headers_reach_the_api_host_beside_no_cookie(internet):
+    async with _fetcher(cookie=COOKIE) as fetcher:
+        await fetcher.get_api(_url(internet, "/api", host="api.redgifs.com"), headers={"Authorization": "Bearer abc"})
+
+    assert internet.seen == [("api.redgifs.com", None, "/api")]
+    assert internet.authorizations == ["Bearer abc"]

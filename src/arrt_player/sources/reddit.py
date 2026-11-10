@@ -34,7 +34,7 @@ domain, so a host worth a resolver shows up by name.
 import json
 import logging
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any, Final, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -107,21 +107,35 @@ def caption_of(post: dict[str, Any]) -> Caption:
     )
 
 
-def items_of(post: dict[str, Any]) -> list[Item]:
-    """The items one post shows, in order; none when nothing in it can be shown."""
+#: Whether a resolver reads a post's link, and what it would give: `Resolvers.claims`.
+Claims = Callable[[str, str], Kind | None]
+
+
+def items_of(post: dict[str, Any], claims: Claims | None = None) -> list[Item]:
+    """The items one post shows, in order; none when nothing in it can be shown.
+
+    `claims` says which links a host resolver reads. A post that Reddit carries
+    nothing playable for, but whose link a resolver claims, is still an item: the
+    resolver is its only way to the screen.
+    """
     caption = caption_of(post)
     source = _media_post(post)
     gallery = _gallery(post["name"], source, caption)
     if gallery is not None:
         return gallery
+    link = str(source.get("url_overridden_by_dest") or source.get("url") or "")
+    domain = str(source.get("domain") or "")
     found = _reddit_media(source) or _reddit_copy(source) or _direct(source)
     if found is None:
-        return []
+        claimed = claims(domain, link) if claims is not None else None
+        if claimed is None:
+            return []
+        found = ("", claimed, "host")
     url, kind, tier = found
-    return [Item(id=post["name"], media_url=url, kind=kind, caption=caption, tier=tier)]
+    return [Item(id=post["name"], media_url=url, kind=kind, caption=caption, tier=tier, link=link, domain=domain)]
 
 
-def parse_listing(document: object) -> tuple[list[Item], Counter[str]]:
+def parse_listing(document: object, claims: Claims | None = None) -> tuple[list[Item], Counter[str]]:
     """Every item in a listing, in its order, and the posts that gave none, by domain.
 
     Raises `ValueError` if it is not a listing.
@@ -135,7 +149,7 @@ def parse_listing(document: object) -> tuple[list[Item], Counter[str]]:
     unresolved: Counter[str] = Counter()
     for post in posts:
         try:
-            found = items_of(post)
+            found = items_of(post, claims)
         except (KeyError, TypeError, ValueError) as error:
             # One post Reddit sent in a shape this does not know costs that post only.
             log.warning("slideshow.reddit.post_unreadable post=%s error=%r", post.get("name"), error)
@@ -150,9 +164,10 @@ def parse_listing(document: object) -> tuple[list[Item], Counter[str]]:
 class RedditSource:
     """One listing, read through an `ApiClient` that holds the cookie (`fetch.Fetcher`)."""
 
-    def __init__(self, url: str, client: ApiClient) -> None:
+    def __init__(self, url: str, client: ApiClient, claims: Claims | None = None) -> None:
         self.url = listing_url(url)
         self._client = client
+        self._claims = claims
 
     def __repr__(self) -> str:
         return f"RedditSource({self.url!r})"
@@ -163,7 +178,7 @@ class RedditSource:
         except (FetchRefused, *UNREACHABLE) as error:
             return _logged(Listing(Outcome.UNREACHABLE, detail=f"Reddit could not be reached: {type(error).__name__}"))
         if answer.status == HTTPStatus.OK:
-            return _logged(_listed(answer))
+            return _logged(_listed(answer, self._claims))
         if answer.status == HTTPStatus.FORBIDDEN:
             return _logged(await self._why_refused())
         if answer.status == HTTPStatus.TOO_MANY_REQUESTS:
@@ -189,9 +204,9 @@ class RedditSource:
         return Listing(Outcome.COOKIE_REJECTED, detail="Reddit no longer accepts the session cookie")
 
 
-def _listed(answer: ApiAnswer) -> Listing:
+def _listed(answer: ApiAnswer, claims: Claims | None) -> Listing:
     try:
-        items, unresolved = parse_listing(json.loads(answer.body))
+        items, unresolved = parse_listing(json.loads(answer.body), claims)
     except ValueError as error:
         return Listing(Outcome.UNREACHABLE, detail=f"Reddit's answer was not a listing ({str(error)[:80]})")
     return Listing(Outcome.LISTED, items=tuple(items), unresolved=unresolved)

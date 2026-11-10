@@ -38,7 +38,7 @@ import contextlib
 import ipaddress
 import logging
 import socket
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
@@ -267,12 +267,21 @@ class Fetcher:
             await self._session.close()
             self._session = None
 
-    async def get_api(self, url: str) -> ApiAnswer:
-        """GET one of `API_HOSTS`, without following a redirect. The cookie rides only to `REDDIT_HOST`."""
+    async def get_api(self, url: str, headers: Mapping[str, str] | None = None) -> ApiAnswer:
+        """GET one of `API_HOSTS`, without following a redirect. The cookie rides only to `REDDIT_HOST`.
+
+        `headers` are the caller's (a host's `Authorization`). A `Cookie` among
+        them is refused, so the one rule about where the cookie goes cannot be
+        stepped around through this argument.
+        """
         target = URL(url)
         if target.scheme not in self.api_schemes or target.host not in API_HOSTS:
             raise FetchRefused(f"API calls go only to {sorted(API_HOSTS)} over https, not {target.scheme}://{target.host}")
-        headers = {"Cookie": f"reddit_session={self.cookie}"} if self.cookie and target.host == REDDIT_HOST else {}
+        extra = dict(headers or {})
+        if any(name.lower() == "cookie" for name in extra):
+            raise FetchRefused("a caller may not send a Cookie header; the session cookie is this module's to send")
+        cookie = {"Cookie": f"reddit_session={self.cookie}"} if self.cookie and target.host == REDDIT_HOST else {}
+        headers = extra | cookie
         async with _refusal_raised_as_itself(), self._client().get(target, headers=headers, allow_redirects=False) as response:
             body = await _read_capped(response, MAX_API_BYTES)
             return ApiAnswer(

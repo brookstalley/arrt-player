@@ -17,14 +17,18 @@ accepts is fixed by pasting a new one, and neither is the same as Reddit being
 down.
 
 **`Resolver`** is the seam for a host whose own media beats Reddit's copy of it
-(redgifs' HD, imgur's mp4). One is keyed by the domains it serves.
+(redgifs' HD, imgur's mp4). One is keyed by the domains it serves, and is asked
+when an item is about to be downloaded, not when the listing is read: only a
+download shows whether its answer is any good, and asking for every post at every
+refresh would spend a host's API calls on items that are already cached
+(`resolvers.Resolvers` and `cache.MediaCache` carry it out).
 """
 
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Final, Protocol
+from typing import Final, Protocol
 
 #: What an item id may be: it becomes a file name in the media cache, so no
 #: separator, no dot and nothing a shell or a path would read specially.
@@ -50,13 +54,19 @@ class Caption:
 
 @dataclass(frozen=True)
 class Item:
-    """One thing to show. `tier` names how its media was found, so a host worth a resolver shows up."""
+    """One thing to show. `tier` names how its media was found, so a host worth a resolver shows up.
+
+    `link` and `domain` are the post's own, for a resolver to read. `media_url`
+    is empty when only a resolver can give the item anything.
+    """
 
     id: str
     media_url: str
     kind: Kind
     caption: Caption
     tier: str
+    link: str = ""
+    domain: str = ""
 
     def __post_init__(self) -> None:
         if not ITEM_ID.fullmatch(self.id):
@@ -98,9 +108,32 @@ class Source(Protocol):
     async def listing(self) -> Listing: ...
 
 
-class Resolver(Protocol):
-    """Finds a better media URL for a post on one of `domains` than Reddit's own copy, or None."""
+@dataclass(frozen=True)
+class Candidate:
+    """One place an item's media may be, and the tier that names it."""
 
+    url: str
+    tier: str
+
+
+@dataclass(frozen=True)
+class Resolved:
+    """A resolver's answer: where the media is, and what it should be."""
+
+    url: str
+    kind: Kind
+
+
+class Resolver(Protocol):
+    """Gives better media than Reddit's copy for links on `domains`, which it names."""
+
+    name: str
     domains: frozenset[str]
 
-    async def resolve(self, post: dict[str, Any]) -> tuple[str, Kind] | None: ...
+    def claims(self, link: str) -> Kind | None:
+        """What this link would give, if it is one this resolver reads; None otherwise. No network."""
+        ...
+
+    async def resolve(self, link: str) -> Resolved | None:
+        """The media for a claimed link, or None when the host has none for it. May raise a fetch error."""
+        ...

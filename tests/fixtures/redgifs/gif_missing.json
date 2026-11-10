@@ -1,0 +1,9 @@
+{
+ "body": {
+  "error": {
+   "code": "GifNotFound",
+   "description": "Gif not found."
+  }
+ },
+ "status": 404
+}

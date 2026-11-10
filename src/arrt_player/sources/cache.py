@@ -24,13 +24,14 @@ fill stops until the next one.
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections import Counter
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Final, Protocol
 
-from arrt_player.sources import ITEM_ID, Item, Kind
+from arrt_player.sources import ITEM_ID, Candidate, Item, Kind
 from arrt_player.sources.fetch import MAX_FILE_BYTES, PARTIAL_SUFFIX, UNREACHABLE, Download, FetchRefused, TooLarge
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,11 @@ class _Step(Enum):
     CAP = "cap"
 
 
+async def _reddit_only(item: Item) -> list[Candidate]:
+    """With no resolvers, an item's media is where the listing said."""
+    return [Candidate(item.media_url, item.tier)] if item.media_url else []
+
+
 class Downloader(Protocol):
     async def download(self, url: str, destination: Path, max_bytes: int = MAX_FILE_BYTES) -> Download: ...
 
@@ -82,6 +88,8 @@ class FillReport:
 
     downloaded: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
+    #: Downloads by the tier that gave them, so a resolver that always falls back shows.
+    tiers: Counter[str] = field(default_factory=Counter)
     cap_reached: bool = False
     network_down: bool = False
 
@@ -110,9 +118,11 @@ class MediaCache:
         cap_bytes: int = CAP_BYTES,
         max_file_bytes: int = MAX_FILE_BYTES,
         clock: Callable[[], float] = time.monotonic,
+        candidates: Callable[[Item], Awaitable[list[Candidate]]] | None = None,
     ) -> None:
         self.root = root
         self._downloader = downloader
+        self._candidates = candidates or _reddit_only
         self.cap_bytes = cap_bytes
         self._max_file_bytes = max_file_bytes
         self._clock = clock
@@ -175,24 +185,38 @@ class MediaCache:
         return report
 
     async def _fetch_one(self, item: Item, limit: int, report: FillReport) -> "_Step":
-        try:
-            got = await self._downloader.download(item.media_url, self.root / item.id, max_bytes=limit)
-        except TooLarge as error:
-            if limit < self._max_file_bytes:
-                # Too large for the room left, not for a file: the cap stops the fill.
-                return _Step.CAP
-            self._fail(item, report, str(error))
-            return _Step.FAILED
-        except FetchRefused as error:
-            self._fail(item, report, str(error))
-            return _Step.FAILED
-        except UNREACHABLE as error:
-            self._fail(item, report, f"unreachable: {type(error).__name__}")
-            return _Step.UNREACHABLE
-        self._files[item.id] = got.path
-        report.downloaded.append(item.id)
-        log.info("slideshow.cache.downloaded item=%s tier=%s bytes=%d", item.id, item.tier, got.size)
-        return _Step.DOWNLOADED
+        """Try each place the item's media may be, best first, and keep the first that downloads.
+
+        The item counts as unreachable only when every place was: one host that
+        answers, even with a refusal, shows the network is up.
+        """
+        candidates = await self._candidates(item)
+        reasons: list[str] = []
+        all_unreachable = bool(candidates)
+        for candidate in candidates:
+            try:
+                got = await self._downloader.download(candidate.url, self.root / item.id, max_bytes=limit)
+            except TooLarge as error:
+                if limit < self._max_file_bytes:
+                    # Too large for the room left, not for a file: the cap stops the fill.
+                    return _Step.CAP
+                reasons.append(f"{candidate.tier}: {error}")
+                all_unreachable = False
+            except FetchRefused as error:
+                reasons.append(f"{candidate.tier}: {error}")
+                all_unreachable = False
+            except UNREACHABLE as error:
+                reasons.append(f"{candidate.tier}: unreachable: {type(error).__name__}")
+            else:
+                self._files[item.id] = got.path
+                report.downloaded.append(item.id)
+                report.tiers[candidate.tier] += 1
+                if reasons:
+                    log.warning("slideshow.cache.fell_back item=%s to=%s after=%s", item.id, candidate.tier, "; ".join(reasons))
+                log.info("slideshow.cache.downloaded item=%s tier=%s bytes=%d", item.id, candidate.tier, got.size)
+                return _Step.DOWNLOADED
+        self._fail(item, report, "; ".join(reasons) or "nothing to fetch")
+        return _Step.UNREACHABLE if all_unreachable else _Step.FAILED
 
     def _fail(self, item: Item, report: FillReport, reason: str) -> None:
         self._failed_at[item.id] = self._clock()
