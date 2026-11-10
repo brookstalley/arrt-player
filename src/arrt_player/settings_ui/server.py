@@ -19,6 +19,12 @@ passwords are throttled; and nothing secret is ever written into a page, a log
 line or a header. It is plain HTTP, as the Arrt server is: the password crosses
 the LAN in the clear, which is the trust boundary Arrt's `security-model.md`
 already accepts.
+
+**It also sets the mode, and in slideshow mode the slideshow.** The Reddit cookie
+is held as the client token is: taken, never shown back, its expiry read from it
+and warned of two weeks ahead. What Reddit last answered is said in words, each
+outcome in its own, because each is fixed differently: another listing, a new
+cookie, or waiting.
 """
 
 import asyncio
@@ -26,6 +32,7 @@ import hashlib
 import html
 import logging
 import socket
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,14 +50,25 @@ from aiohttp.web import (
     middleware,
 )
 
-from arrt_player.client import player_name
+from arrt_player.client import OutputReport, hdmi_outputs, player_name
 from arrt_player.config import (
+    ARRT_MODE,
+    DEFAULT_SLIDESHOW_MAX_SECONDS,
+    DEFAULT_SLIDESHOW_MIN_SECONDS,
+    DEFAULT_SLIDESHOW_OUTPUT,
+    SLIDESHOW_MODE,
     UiSettings,
     client_token_problem,
+    dwell_problem,
+    player_mode_problem,
     player_name_problem,
     server_url_problem,
+    slideshow_output_problem,
 )
+from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.settings_ui import auth, store
+from arrt_player.sources import Outcome
+from arrt_player.sources.reddit_settings import clean_session, listing_url_problem, session_expiry, session_problem
 
 log = logging.getLogger(__name__)
 
@@ -114,8 +132,14 @@ class PageState:
     #: Ends the process so it starts again on what was saved. The entry point
     #: passes a SIGTERM to itself; `Restart=always` brings it back.
     restart: Callable[[], None] = field(default=lambda: None)
-    #: The server keys missing at start: non-empty means the Player is in setup mode.
+    #: The keys missing at start: non-empty means the Player is in setup mode.
     missing: tuple[str, ...] = field(default=())
+    #: The mode the Player started in (or, in setup mode, was missing keys for).
+    mode: str = ARRT_MODE
+    #: A running slideshow's state, for the page to say; None in any other mode.
+    slideshow: SlideshowStatus | None = None
+    #: The HDMI connectors a slideshow may be put on, read when the page is drawn.
+    outputs: Callable[[], list[OutputReport]] = field(default=hdmi_outputs)
 
     def stored(self) -> store.Stored:
         return store.read(self.ui.cache_dir)
@@ -262,10 +286,18 @@ async def _save(request: Request) -> Response:
     token = str(form.get("client_token", "")).strip()
     name = str(form.get("player_name", "")).strip()
 
+    entries = _slideshow_entries(form, locked)
+    session = "" if "REDDIT_SESSION" in locked else clean_session(str(form.get("reddit_session", "")))
+
     problems = _problems(locked, url=url, token=token, name=name)
+    problems += _slideshow_problems(entries, session, lambda key: _shown(state, stored, key))
     if problems:
         return _settings_page(state, stored, problem=" ".join(problems), status=400)
     values = _next_values(stored.values, locked, url=url, token=token, name=name)
+    for key, value in entries.items():
+        _put(values, key, value)
+    if session:
+        values["REDDIT_SESSION"] = session
     if values == dict(stored.values):
         return _settings_page(state, stored, notice="Nothing changed.")
 
@@ -311,6 +343,41 @@ def _next_values(before: Mapping[str, str], locked: frozenset[str], *, url: str,
     if "PLAYER_NAME" not in locked:
         _put(values, "PLAYER_NAME", name)
     return values
+
+
+#: The slideshow's form fields, by the key each sets. The cookie is apart: it is never shown back.
+_SLIDESHOW_FIELDS: Final[dict[str, str]] = {
+    "PLAYER_MODE": "player_mode",
+    "SLIDESHOW_URL": "slideshow_url",
+    "SLIDESHOW_MIN_SECONDS": "slideshow_min_seconds",
+    "SLIDESHOW_MAX_SECONDS": "slideshow_max_seconds",
+    "SLIDESHOW_OUTPUT": "slideshow_output",
+}
+
+
+def _slideshow_entries(form: Mapping[str, object], locked: frozenset[str]) -> dict[str, str]:
+    """The slideshow fields the form carries and the page may change. A field not on the form is left as it is."""
+    return {key: str(form[name]).strip() for key, name in _SLIDESHOW_FIELDS.items() if name in form and key not in locked}
+
+
+def _slideshow_problems(entries: Mapping[str, str], session: str, current: Callable[[str], str]) -> list[str]:
+    """What is wrong with the slideshow's fields, judged as `config.load` judges them. Empty is a default, not a problem."""
+    found = []
+    if said := player_mode_problem(entries.get("PLAYER_MODE", "")):
+        found.append(said)
+    if (url := entries.get("SLIDESHOW_URL")) and (said := listing_url_problem(url)):
+        found.append(said)
+    if session and (said := session_problem(session)):
+        found.append(said)
+    if {"SLIDESHOW_MIN_SECONDS", "SLIDESHOW_MAX_SECONDS"} & set(entries):
+        # Judged together, and against what the other one will be: a new minimum
+        # above the maximum already saved is as wrong as both typed at once.
+        low, high = (entries.get(key, current(key)) for key in ("SLIDESHOW_MIN_SECONDS", "SLIDESHOW_MAX_SECONDS"))
+        if said := dwell_problem(low, high):
+            found.append(said)
+    if said := slideshow_output_problem(entries.get("SLIDESHOW_OUTPUT", "")):
+        found.append(said)
+    return found
 
 
 #: How long a save waits before restarting, so its answer reaches the browser.
@@ -485,10 +552,13 @@ def _settings_page(
     token_set = "CLIENT_TOKEN" in state.ui.pinned or bool(stored.values.get("CLIENT_TOKEN"))
 
     if state.missing:
+        shown = "nothing is shown" if state.mode == SLIDESHOW_MODE else "no walls are shown"
         facts = (
             _state_word("warn", "Setup mode")
-            + f" · {html.escape(', '.join(state.missing))} not set when the Player started, so no walls are shown."
+            + f" · {html.escape(', '.join(state.missing))} not set when the Player started, so {shown}."
         )
+    elif state.slideshow is not None:
+        facts = _state_word("good", "Running") + " · a Reddit slideshow"
     else:
         facts = _state_word("good", "Running") + " · pulling from " + html.escape(_shown(state, stored, "SERVER_URL"))
     if name != local:
@@ -500,7 +570,8 @@ def _settings_page(
         '<button class="action quiet" type="submit">Log out</button></form></div>'
         + _notes(problem=problem, notice=notice)
         + '<form method="post" action="/settings">'
-        '<section class="panel"><h2>Server</h2>'
+        + _mode_section(state, stored)
+        + '<section class="panel"><h2>Server</h2>'
         + _field(
             "Address",
             "server_url",
@@ -510,7 +581,9 @@ def _settings_page(
             hint="For example http://arrt.local:8770. Changing it clears the token unless you enter one with it.",
         )
         + _token_field(locked="CLIENT_TOKEN" in locked, pinned="CLIENT_TOKEN" in state.ui.pinned, token_set=token_set)
-        + '</section><section class="panel"><h2>This Player</h2>'
+        + "</section>"
+        + _slideshow_section(state, stored)
+        + '<section class="panel"><h2>This Player</h2>'
         + _field(
             "Name",
             "player_name",
@@ -528,6 +601,209 @@ def _settings_page(
     )
     title = f"Settings · {name}" if name else "Settings"
     return _page(title, body, heading=name or "This Player", status=status)
+
+
+#: How far ahead of the cookie's expiry the page warns (*Inferred*: whether
+#: Reddit renews the cookie is not measured, so two weeks to fetch a new one).
+EXPIRY_WARNING_S: Final[float] = 14 * 24 * 3600
+
+#: What each of Reddit's answers means to the person at the page, and what fixes it.
+_OUTCOME_WORDS: Final[dict[Outcome, tuple[str, str, str]]] = {
+    Outcome.LISTED: ("good", "Listed", "Reddit gave the listing."),
+    Outcome.REFUSED: (
+        "warn",
+        "Listing refused",
+        (
+            "Reddit refuses this listing even with a good cookie. Try its top listing instead, such as …/top/?t=month; "
+            "new, hot and rising are refused."
+        ),
+    ),
+    Outcome.COOKIE_REJECTED: (
+        "warn",
+        "Cookie not accepted",
+        "Reddit no longer accepts the cookie. Paste a new one from a browser where you are logged in.",
+    ),
+    Outcome.RATE_LIMITED: ("warn", "Slowed down", "Reddit asked the Player to wait; it asks again later."),
+    Outcome.UNREACHABLE: ("warn", "Unreachable", "Reddit could not be reached."),
+}
+
+
+def _mode_section(state: PageState, stored: store.Stored) -> str:
+    """The mode: an Arrt server's walls, or a Reddit slideshow. One or the other, never both."""
+    current = _shown(state, stored, "PLAYER_MODE") or ARRT_MODE
+    pinned = "PLAYER_MODE" in state.ui.pinned
+    disabled = " disabled" if pinned else ""
+    choices = "".join(
+        f'<label class="choice"><input type="radio" name="player_mode" value="{value}"'
+        f'{" checked" if value == current else ""}{disabled}>{html.escape(words)}</label>'
+        for value, words in ((ARRT_MODE, "Walls from an Arrt server"), (SLIDESHOW_MODE, "A Reddit slideshow"))
+    )
+    note = _PINNED_HINT if pinned else "The Player runs one or the other. Saving restarts it in the mode chosen."
+    return (
+        '<section class="panel"><h2>Mode</h2><fieldset class="choices" aria-describedby="player_mode-hint">'
+        f"<legend>What this Player shows</legend>{choices}</fieldset>"
+        f'<p class="hint" id="player_mode-hint">{html.escape(note)}</p></section>'
+    )
+
+
+def _slideshow_section(state: PageState, stored: store.Stored) -> str:
+    """The slideshow's listing, cookie, dwell and screen, and what Reddit last said."""
+    pinned = state.ui.pinned
+    return (
+        '<section class="panel"><h2>Slideshow</h2>'
+        + _slideshow_status(state.slideshow, now=state.now())
+        + _field(
+            "Listing address",
+            "slideshow_url",
+            _shown(state, stored, "SLIDESHOW_URL"),
+            locked="SLIDESHOW_URL" in pinned,
+            pinned="SLIDESHOW_URL" in pinned,
+            hint="A subreddit or multireddit as your browser shows it, such as "
+            "https://www.reddit.com/r/EarthPorn/top/?t=month. Shown in its order, looped.",
+        )
+        + _cookie_field(state, stored)
+        + _COOKIE_STEPS
+        + _field(
+            "Shortest time on screen, in seconds",
+            "slideshow_min_seconds",
+            _shown(state, stored, "SLIDESHOW_MIN_SECONDS"),
+            locked="SLIDESHOW_MIN_SECONDS" in pinned,
+            pinned="SLIDESHOW_MIN_SECONDS" in pinned,
+            hint=f"A still shows this long; a short clip plays again until it has. Empty is {DEFAULT_SLIDESHOW_MIN_SECONDS:g}.",
+        )
+        + _field(
+            "Longest time on screen, in seconds",
+            "slideshow_max_seconds",
+            _shown(state, stored, "SLIDESHOW_MAX_SECONDS"),
+            locked="SLIDESHOW_MAX_SECONDS" in pinned,
+            pinned="SLIDESHOW_MAX_SECONDS" in pinned,
+            hint=f"A long clip is cut here. Empty is {DEFAULT_SLIDESHOW_MAX_SECONDS:g}.",
+        )
+        + _output_field(state, stored)
+        + "</section>"
+    )
+
+
+def _slideshow_status(status: SlideshowStatus | None, *, now: float) -> str:
+    """What Reddit last answered and what the cache holds, in words; nothing outside a running slideshow."""
+    if status is None:
+        return ""
+    if status.outcome is None:
+        said = "Reddit has not answered yet."
+        if status.from_saved:
+            said += f" Playing the {status.items} items saved from the last listing."
+        return f'<p class="page-facts" role="status">{_state_word("warn", "Waiting")} · {html.escape(said)}</p>'
+    kind, word, meaning = _OUTCOME_WORDS[status.outcome]
+    said = meaning
+    if status.answered_at is not None:
+        said += f" Asked {_ago(now - status.answered_at)}."
+    said += _listing_words(status)
+    if status.cap_reached:
+        said += " The cache is full, so later items wait."
+    if status.network_down:
+        said += " Downloads stopped: the network seems down."
+    if status.showing:
+        said += f" On screen: {status.showing}"
+    return f'<p class="page-facts" role="status">{_state_word(kind, word)} · {html.escape(said)}</p>'
+
+
+def _listing_words(status: SlideshowStatus) -> str:
+    """How many items there are to show, and the sites whose posts gave none."""
+    if status.outcome is not Outcome.LISTED:
+        return f" Playing on from the {status.items} items already listed." if status.items else ""
+    said = f" {status.items} items to show."
+    if status.unresolved:
+        hosts = ", ".join(f"{domain} {count}" for domain, count in status.unresolved.most_common(5))
+        said += f" Posts with nothing playable, by site: {hosts}."
+    return said
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 90:  # noqa: PLR2004 -- under a minute and a half reads as seconds
+        return f"{max(seconds, 0):.0f} s ago"
+    return f"{seconds / 60:.0f} min ago"
+
+
+def _cookie_field(state: PageState, stored: store.Stored) -> str:
+    """The cookie can be written here and never read back. Its expiry is said, and warned of two weeks ahead."""
+    pinned = "REDDIT_SESSION" in state.ui.pinned
+    if pinned:
+        expiry, have = state.ui.pinned_session_expiry, True
+    else:
+        value = stored.values.get("REDDIT_SESSION")
+        expiry, have = (session_expiry(value) if value else None), bool(value)
+    said, warn = _expiry_words(have=have, expiry=expiry, now=state.now())
+    note = _PINNED_HINT if pinned else "Leave empty to keep the current one."
+    disabled = " disabled" if pinned else ""
+    shown = (_state_word("warn", "Expiring") + " " if warn else "") + html.escape(f"{said} {note}")
+    return (
+        '<div class="field"><label for="reddit_session">Reddit cookie (reddit_session)</label>'
+        '<input class="secret" id="reddit_session" type="password" name="reddit_session" value="" autocomplete="off"'
+        f'{disabled} aria-describedby="reddit_session-hint">'
+        f'<p class="hint" id="reddit_session-hint">{shown}</p></div>'
+    )
+
+
+def _expiry_words(*, have: bool, expiry: float | None, now: float) -> tuple[str, bool]:
+    """What to say about the cookie's expiry, and whether it is a warning."""
+    if not have:
+        return "No cookie is set.", False
+    if expiry is None:
+        return "A cookie is set. It does not say when it expires.", False
+    day = time.strftime("%Y-%m-%d", time.gmtime(expiry))
+    if expiry <= now:
+        return f"A cookie is set, and it expired on {day}. Paste a new one.", True
+    if expiry - now <= EXPIRY_WARNING_S:
+        days = max(1, round((expiry - now) / 86400))
+        return f"A cookie is set, and it expires on {day}, in {days} day{'s' if days != 1 else ''}. Paste a new one soon.", True
+    return f"A cookie is set. It expires on {day}.", False
+
+
+#: How to copy the cookie, for a person who is technical but has not done it before.
+_COOKIE_STEPS: Final[str] = (
+    '<details class="steps"><summary>How to copy the cookie</summary><ol>'
+    "<li>In a desktop browser, log in at www.reddit.com.</li>"
+    "<li>Open the developer tools (F12, or ⌥⌘I on a Mac).</li>"
+    "<li>Chrome or Edge: Application › Cookies › https://www.reddit.com. "
+    "Firefox: Storage › Cookies. Safari: Storage › Cookies (turn on the Develop menu first).</li>"
+    "<li>Find <code>reddit_session</code> and copy its Value, the long text beginning eyJ.</li>"
+    "<li>Paste it above and save. Close the tab rather than logging out: logging out may end the cookie "
+    "for the Player too.</li></ol></details>"
+)
+
+
+def _output_field(state: PageState, stored: store.Stored) -> str:
+    """The HDMI connector the slideshow draws on, from those this machine has, with whether a screen is on each."""
+    current = _shown(state, stored, "SLIDESHOW_OUTPUT") or DEFAULT_SLIDESHOW_OUTPUT
+    reports = {report.name: report for report in state.outputs()}
+    names = sorted(set(reports) | {current})
+    options = "".join(
+        f'<option value="{html.escape(name)}"{" selected" if name == current else ""}>'
+        f"{html.escape(_output_words(name, reports.get(name)))}</option>"
+        for name in names
+    )
+    pinned = "SLIDESHOW_OUTPUT" in state.ui.pinned
+    note = _PINNED_HINT if pinned else _ONE_SCREEN
+    disabled = " disabled" if pinned else ""
+    return (
+        '<div class="field"><label for="slideshow_output">Screen</label>'
+        f'<select id="slideshow_output" name="slideshow_output"{disabled} aria-describedby="slideshow_output-hint">'
+        f'{options}</select><p class="hint" id="slideshow_output-hint">{html.escape(note)}</p></div>'
+    )
+
+
+#: Why the slideshow takes one screen.
+_ONE_SCREEN: Final[str] = "One screen: both of a Pi's HDMI ports are on one display device, which one program drives."
+
+
+def _output_words(name: str, report: OutputReport | None) -> str:
+    if report is None:
+        return f"{name} (not found on this machine)"
+    if not report.connected:
+        return f"{name} (no screen connected)"
+    if report.screen is not None:
+        return f"{name} (a screen at {report.screen[0]}×{report.screen[1]})"
+    return f"{name} (a screen)"
 
 
 _PINNED_HINT: Final[str] = "Set in the environment or .env, which wins over this page. Remove it there to manage it here."

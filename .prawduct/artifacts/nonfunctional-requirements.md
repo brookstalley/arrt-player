@@ -152,6 +152,21 @@ settings page, `config.load` raises `SetupRequired`, deliberately not a
 (`tests/test_config.py::TestWhatMustBeSet`,
 `tests/test_settings_ui.py::test_without_a_server_the_player_serves_only_its_page_and_says_where`).
 A setup-mode Player whose page cannot bind exits 1, for systemd to try again.
+
+**In slideshow mode the server keys are not read** (`PLAYER_MODE=slideshow`,
+owner 2026-11-10, extending the rule above). A slideshow needs `SLIDESHOW_URL`
+and `REDDIT_SESSION` instead; lacking either is setup mode in the same way,
+naming what is missing and saying that nothing is shown
+(`tests/test_config.py::TestSlideshowMode`,
+`tests/test_settings_ui.py::TestWhatTheSlideshowSays::test_setup_mode_for_a_slideshow_says_nothing_is_shown`).
+Set and unusable is still a refusal: a mode other than `arrt` or `slideshow`, a
+listing that is not a Reddit listing, a cookie that cannot ride in a header, an
+output that is not an HDMI connector, or dwell limits outside 5 s to 3600 s or
+with the minimum above the maximum (`config.player_mode_problem`,
+`reddit_settings.listing_url_problem`, `session_problem`,
+`config.slideshow_output_problem`, `dwell_problem`; the page's form is judged by
+the same functions). A settings file of layout version 1 is read; one newer than
+version 2 is refused by name.
 Beside running walls, a page that cannot bind costs the page and nothing else
 (`::test_a_page_that_cannot_listen_says_so_and_returns`).
 

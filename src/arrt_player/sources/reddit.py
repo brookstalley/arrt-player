@@ -37,22 +37,16 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any, Final, Protocol
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from arrt_player.sources import Caption, Item, Kind, Listing, Outcome
 from arrt_player.sources.fetch import REDDIT_HOST, UNREACHABLE, ApiAnswer, FetchRefused
+from arrt_player.sources.reddit_settings import listing_url
 
 log = logging.getLogger(__name__)
 
-#: The hosts a listing URL may be written with. Each is read from www, the one
-#: host the cookie is sent to.
-REDDIT_HOSTS: Final[frozenset[str]] = frozenset({"reddit.com", REDDIT_HOST, "old.reddit.com", "new.reddit.com"})
-
 #: Answers `200` with the account for a session Reddit accepts, `403` otherwise.
 ME_URL: Final[str] = f"https://{REDDIT_HOST}/api/me.json"
-
-#: The most a listing page holds.
-LISTING_LIMIT: Final[int] = 100
 
 #: A post's URL that is itself a media file, by its extension, and what it is.
 _MEDIA_EXTENSIONS: Final[dict[str, Kind]] = {
@@ -65,35 +59,8 @@ _MEDIA_EXTENSIONS: Final[dict[str, Kind]] = {
 }
 
 
-#: A listing's path has at least `/r/<name>`: the bare site, or `/r`, lists
-#: nothing of anyone's choosing.
-_LISTING_DEPTH: Final[int] = 2
-
-
 class ApiClient(Protocol):
     async def get_api(self, url: str) -> ApiAnswer: ...
-
-
-def listing_url(written: str) -> str:
-    """The JSON listing for a listing URL as a person copies it from a browser.
-
-    `https://www.reddit.com/r/pics/top/?t=week` becomes
-    `https://www.reddit.com/r/pics/top.json?t=week&limit=100&raw_json=1`.
-    `raw_json=1` keeps Reddit from escaping `&` in the media URLs. Raises
-    `ValueError` for anything that is not a Reddit listing.
-    """
-    parts = urlsplit(written.strip())
-    host = (parts.hostname or "").lower()
-    if parts.scheme not in ("http", "https") or host not in REDDIT_HOSTS:
-        raise ValueError(f"a slideshow listing is a reddit.com address, not {written!r}")
-    path = parts.path.rstrip("/")
-    if path.count("/") < _LISTING_DEPTH:
-        raise ValueError(f"{written!r} names no listing; copy the address of a subreddit or a multireddit")
-    if not path.endswith(".json"):
-        path += ".json"
-    query = [(key, value) for key, value in parse_qsl(parts.query) if key not in ("limit", "raw_json")]
-    query += [("limit", str(LISTING_LIMIT)), ("raw_json", "1")]
-    return urlunsplit(("https", REDDIT_HOST, path, urlencode(query), ""))
 
 
 def caption_of(post: dict[str, Any]) -> Caption:

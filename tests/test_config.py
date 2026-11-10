@@ -21,6 +21,7 @@ from arrt_player.config import (
     RETIRED_SETTINGS,
     ConfigError,
     SetupRequired,
+    SlideshowSettings,
     WallIdUnusable,
     load,
     load_ui,
@@ -518,3 +519,127 @@ class TestThePlayersName:
 
         assert ui.pinned_values == {"SERVER_URL": "http://127.0.0.1:8770", "PLAYER_NAME": "Hall"}
         assert "the-clients-token" not in repr(ui)
+
+
+# -- slideshow mode ----------------------------------------------------------------------
+
+#: A cookie of the shape Reddit's is (a JWT), whose last part stands in for the secret.
+COOKIE = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE4MTAwMDAwMDB9.the-secret-part"
+LISTING = "https://www.reddit.com/r/EarthPorn/top/?t=month"
+
+
+def a_slideshow(cache_dir: Path, **overrides: str) -> dict[str, str]:
+    """Slideshow mode, with no server keys at all."""
+    return {
+        "CACHE_DIR": str(cache_dir),
+        "PLAYER_MODE": "slideshow",
+        "SLIDESHOW_URL": LISTING,
+        "REDDIT_SESSION": COOKIE,
+        **overrides,
+    }
+
+
+class TestSlideshowMode:
+    def test_a_slideshow_starts_without_any_server_key(self, cache_dir: Path):
+        settings = load(a_slideshow(cache_dir))
+
+        assert isinstance(settings, SlideshowSettings)
+        assert (settings.listing_url, settings.reddit_session) == (LISTING, COOKIE)
+
+    @pytest.mark.parametrize("missing", ["SLIDESHOW_URL", "REDDIT_SESSION"])
+    def test_a_slideshow_without_its_listing_or_cookie_is_setup_mode_naming_it(self, cache_dir: Path, missing: str):
+        environment = a_slideshow(cache_dir, **{missing: ""})
+
+        with pytest.raises(SetupRequired) as raised:
+            load(environment)
+
+        assert raised.value.missing == (missing,)
+        assert raised.value.mode == "slideshow"
+
+    def test_arrt_mode_still_needs_its_server_keys_and_ignores_the_slideshows(self, cache_dir: Path):
+        environment = a_slideshow(cache_dir, PLAYER_MODE="arrt")
+
+        with pytest.raises(SetupRequired) as raised:
+            load(environment)
+
+        assert raised.value.missing == ("SERVER_URL", "CLIENT_TOKEN")
+        assert raised.value.mode == "arrt"
+
+    def test_no_mode_is_arrt_mode(self, cache_dir: Path):
+        environment = a_slideshow(cache_dir, PLAYER_MODE="")
+
+        with pytest.raises(SetupRequired, match="SERVER_URL"):
+            load(environment)
+
+    def test_the_mode_can_come_from_the_page(self, cache_dir: Path):
+        store.write(
+            cache_dir, store.Stored(values={"PLAYER_MODE": "slideshow", "SLIDESHOW_URL": LISTING, "REDDIT_SESSION": COOKIE})
+        )
+
+        assert isinstance(load({"CACHE_DIR": str(cache_dir)}), SlideshowSettings)
+
+    @pytest.mark.parametrize(
+        ("overrides", "said"),
+        [
+            ({"PLAYER_MODE": "both"}, "PLAYER_MODE must be arrt or slideshow"),
+            ({"SLIDESHOW_URL": "https://imgur.com/r/pics"}, "reddit.com address"),
+            ({"SLIDESHOW_URL": "https://www.reddit.com/"}, "names no listing"),
+            ({"REDDIT_SESSION": "two words"}, "REDDIT_SESSION"),
+            ({"REDDIT_SESSION": "a;b"}, "REDDIT_SESSION"),
+            ({"SLIDESHOW_OUTPUT": "frame"}, "HDMI connector"),
+            ({"SLIDESHOW_MIN_SECONDS": "4"}, "at least 5"),
+            ({"SLIDESHOW_MAX_SECONDS": "3601"}, "at most 3600"),
+            ({"SLIDESHOW_MIN_SECONDS": "90"}, "not be more than the maximum"),
+            ({"SLIDESHOW_MIN_SECONDS": "soon"}, "numbers of seconds"),
+            ({"SLIDESHOW_MAX_SECONDS": "nan"}, "numbers of seconds"),
+        ],
+    )
+    def test_a_slideshow_value_that_is_set_and_wrong_refuses_with_the_reason(self, cache_dir: Path, overrides, said: str):
+        with pytest.raises(ConfigError, match=said):
+            load(a_slideshow(cache_dir, **overrides))
+
+    def test_unset_dwell_and_output_take_their_defaults(self, cache_dir: Path):
+        settings = load(a_slideshow(cache_dir))
+
+        assert (settings.limits.minimum, settings.limits.maximum, settings.output) == (30.0, 60.0, "hdmi-a-1")
+
+    def test_set_dwell_and_output_are_taken(self, cache_dir: Path):
+        settings = load(
+            a_slideshow(cache_dir, SLIDESHOW_MIN_SECONDS="12.5", SLIDESHOW_MAX_SECONDS="45", SLIDESHOW_OUTPUT="hdmi-a-2")
+        )
+
+        assert (settings.limits.minimum, settings.limits.maximum, settings.output) == (12.5, 45.0, "hdmi-a-2")
+
+    def test_a_cookie_pasted_with_its_name_is_taken_without_it(self, cache_dir: Path):
+        settings = load(a_slideshow(cache_dir, REDDIT_SESSION=f" reddit_session={COOKIE} "))
+
+        assert settings.reddit_session == COOKIE
+
+    def test_the_slideshows_files_are_beside_the_walls_under_names_no_wall_can_take(self, cache_dir: Path):
+        settings = load(a_slideshow(cache_dir))
+
+        for path in (settings.media_root, settings.listing_path, settings.runtime_dir):
+            assert path.parent == cache_dir
+            assert path.name.startswith(".")
+
+    def test_the_cookie_is_in_no_repr_and_no_startup_line(self, cache_dir: Path):
+        settings = load(a_slideshow(cache_dir))
+
+        assert "the-secret-part" not in repr(settings)
+        assert "the-secret-part" not in repr(settings.startup_lines())
+
+    def test_the_page_shows_a_pinned_slideshow_key_but_never_the_cookie(self, cache_dir: Path):
+        ui = load_ui(a_slideshow(cache_dir))
+
+        assert {"PLAYER_MODE", "SLIDESHOW_URL", "REDDIT_SESSION"} <= ui.pinned
+        assert ui.pinned_values["SLIDESHOW_URL"] == LISTING
+        assert "REDDIT_SESSION" not in ui.pinned_values
+        assert ui.pinned_session_expiry == 1_810_000_000.0
+
+    def test_a_layout_1_settings_file_still_reads(self, cache_dir: Path):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        store.path_in(cache_dir).write_text('{"version": 1, "values": {"PLAYER_NAME": "Hall"}}', encoding="utf-8")
+
+        assert store.read(cache_dir).values == {"PLAYER_NAME": "Hall"}
+        store.write(cache_dir, store.read(cache_dir))
+        assert '"version": 2' in store.path_in(cache_dir).read_text(encoding="utf-8")
