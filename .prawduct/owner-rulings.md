@@ -4,6 +4,19 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-11, later.** "yes to all of your recommednations", on the norm registry
+put to them in one batch. Confirmed: (A) the Enforcement table carried from Arrt on
+2026-10-26 is this repo's ratified registry, with Arrt's Direction sections as the
+home of its pointer rows; (B) the Player is stopped with SIGTERM, never SIGKILL;
+(C) a contract change is a pull request and tag on Arrt, and the installed package
+is never patched; (D) every log line carries its event as a field; (F) everything
+the Player writes is its own account's alone. As recommended: (E) "absence checks
+read the formatted journal line" is a learnings rule, not a norm; (G) "mpv is handed
+files, never addresses" folds into the only-channel norm; (H) "one mode, never both"
+stays a requirement in `build-plan-slideshow.md` § Goals, not a norm. Landed in
+`project-preferences.md` § Enforcement (each on the branch carrying its code) and
+`project-state.yaml` `norm_registry_ratified`.
+
 **2026-11-11.** Six answers, given to questions put in one batch:
 
 1. "yes": file the intermittent `test_availability` failure as a backlog item.
