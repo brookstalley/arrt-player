@@ -589,6 +589,37 @@ e-paper driver above, and the reason the protocol trace in this section is writt
 down: it is the expensive part of ever writing a replacement, and it was captured
 once, from a live set.
 
+## mpv, a system dependency of slideshow mode
+
+**Measured 2026-11-10** on the wall's Pi (Trixie, kernel `6.18.34+rpt`).
+Slideshow mode draws through mpv (`mpv.py`; why, and the options, in
+`hdmi-output-findings.md` § mpv). It is the Player's first dependency that
+`uv.lock` does not hold:
+
+- **From the distribution, not from PyPI.** `apt-get install
+  --no-install-recommends mpv` gives mpv 0.40.0 on Trixie, built against
+  Raspberry Pi's ffmpeg, which is what carries the `v4l2m2m` hardware decoder.
+  A pip-installed mpv binding would still need this binary; the Player talks to
+  it over its JSON IPC socket and imports nothing of it.
+- **148 packages** came with it (counted 2026-11-10). Whether that count was
+  taken with `--no-install-recommends` is not recorded; `deploy/README.md`
+  installs with it.
+- **Group `render`** for the service user, beside `spi gpio video`
+  (`deploy/display.service`). Measured: without it mpv cannot open the GPU's
+  render node.
+- **Installed by the install and upgrade flow, not once by hand** (owner,
+  2026-11-10): `deploy/README.md` § The slideshow, and the runbook
+  `moving-the-pi-player-to-a-new-revision.md` checks it is present before the
+  sync. A Player started without it says so once (`slideshow.renderer_unavailable`,
+  and on the settings page) and plays on, rather than failing every item with no
+  reason.
+- `tools/mpv_check.py` runs mpv by hand with the Player's options, as `tvpi`.
+- **The suite needs no mpv.** `tests/test_mpv.py` runs `MpvOutput` against
+  `tests/fake_mpv.py`, which speaks mpv's IPC over a real Unix socket and plays
+  back the failures mpv 0.40 showed on the Pi. A machine with no `render` group
+  (a Mac) has no such rule to break, and `mpv.renderer_problems` says nothing
+  about one there.
+
 ## The abandoned IT8951 checkout — do not resurrect
 
 `/home/tvpi/source/IT8951` on the card was a local checkout at upstream

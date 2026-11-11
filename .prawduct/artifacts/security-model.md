@@ -326,7 +326,8 @@ a hostile or broken peer on the LAN can do, and what bounds it:
 ### The deploy unit (`deploy/display.service`)
 
 Runs as the unprivileged `tvpi` user and group, with `spi gpio video` added for
-the e-paper panel and `/dev/dri`. It refuses to start if `.env` is missing
+the e-paper panel and `/dev/dri`, and `render` for the GPU's render node that
+mpv draws through in slideshow mode (`tests/test_deploy_unit.py` checks it). It refuses to start if `.env` is missing
 (un-prefixed `EnvironmentFile=`). It names no systemd sandboxing: no
 `NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`,
 `ReadWritePaths=`, `UMask=` or `CapabilityBoundingSet=` (read 2026-10-27).

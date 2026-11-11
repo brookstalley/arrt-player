@@ -37,7 +37,7 @@ classification:
     has_multiple_party_types: false  # the operator; the household sees the wall but has no interface
     # Handles sensitive information. categories: [PII, financial, health, etc.]; regulatory: [list]
     handles_sensitive_data:
-      categories: [credentials]  # the client token and the television's token
+      categories: [credentials]  # the client token, the television's token, and the Reddit session cookie in slideshow mode
       regulatory: []
     # Multiple processes or services communicating at runtime. topology: monolith-with-workers|client-server|microservices|pipeline
     multi_process_distributed:
