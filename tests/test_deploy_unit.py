@@ -127,3 +127,13 @@ def test_a_save_on_the_settings_page_comes_back():
 
     assert directives.get("Restart") == ["always"], "a save on the settings page would leave the Player stopped"
     assert directives.get("KillSignal") == ["SIGTERM"]
+
+
+def test_what_the_player_writes_is_its_own_to_read():
+    """The television library writes its pairing token with a plain
+    `open(path, "w")`, so the token file gets whatever the umask leaves, and the
+    Pi's default leaves it world-readable. `UMask=0077` makes every file the
+    Player creates its own from the moment it exists, the token included;
+    `SamsungTv.connect` tightens the token file as well, for runs outside the
+    unit."""
+    assert _directives().get("UMask") == ["0077"]

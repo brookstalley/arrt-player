@@ -176,6 +176,7 @@ and misses those 13.
 | `tv.selection_unreadable` | WARNING | `SamsungTv._on_image_selected` | An `image_selected` announcement could not be read |
 | `tv.selection_observer_failed` | ERROR (traceback) | `SamsungTv._tell_observers` | An observer of selections raised; the others still ran |
 | `tv.native_slideshow_disabled` | INFO | `FrameDisplay._connected` | The set's own slideshow was switched off (once per store) |
+| `tv.token_file_open` | WARNING | `SamsungTv._keep_the_token_private` | The token file could not be set to 0600 (`tv_token_file`, never its content); anyone who can read it can drive the art channel |
 | `tv.close_failed` | WARNING | `SamsungTv._quietly_close` | Closing the connection raised; the set may hold the abandoned channel and refuse the next connection for minutes |
 | `brightness.set` | INFO | `FrameDisplay._apply_brightness` | Brightness set from the sun's angle |
 | **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`) | | | |

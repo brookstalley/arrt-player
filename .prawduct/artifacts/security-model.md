@@ -71,8 +71,14 @@ The Player authenticates outward to two peers, the server and the television. On
 - **Written and read by the `samsungtvws` library, not the Player.**
   `tv/samsung.py:SamsungTv._construct` passes the path. The library writes it with
   `open(path, "w")` on first pairing and reads it on each connection
-  (`samsungtvws/connection.py:_set_token`, `_get_token`). The Player sets no mode
-  on it, and the unit sets no `UMask=`, so it takes the process umask.
+  (`samsungtvws/connection.py:_set_token`, `_get_token`), so the file takes the
+  process umask. **Kept private two ways** (2026-11-11, #3): the unit sets
+  `UMask=0077`, so on the Pi it is 0600 from creation, and `SamsungTv.connect`
+  sets 0600 after every attempt, which covers runs outside the unit and files an
+  older Player left (`tv.token_file_open` if it cannot). The Player never creates
+  the file, since the library reads a missing file and an empty one differently.
+  Held by `tests/test_samsung_client.py::TestTheTokenFileIsPrivate` and
+  `tests/test_deploy_unit.py::test_what_the_player_writes_is_its_own_to_read`.
 - **First pairing puts a prompt on the set's screen** and needs a person to
   accept it. It happens on construction when the token file is empty
   (`SamsungTv._construct` docstring), before any art-mode check. Changing
@@ -238,7 +244,7 @@ may be any host, gets no token, and must match its hash.
   journal). Nothing goes to any third party.
 - **Secrets at rest.** `CLIENT_TOKEN` in `.env`; the deploy runbook installs it
   `0640`, owner `tvpi` (`deploy/README.md`), and nothing in the code checks the
-  mode. The TV token in `TV_TOKEN_FILE`, at the process umask (above). Both are
+  mode. The TV token in `TV_TOKEN_FILE`, 0600 (above). Both are
   gitignored (`.gitignore`) and refused if tracked
   (`tests/test_repository.py::test_no_credential_file_is_tracked`).
 - **Secrets in logs.** The client token is in no `repr` and no startup line
@@ -277,12 +283,13 @@ a hostile or broken peer on the LAN can do, and what bounds it:
 
 Runs as the unprivileged `tvpi` user and group, with `spi gpio video` added for
 the e-paper panel and `/dev/dri`. It refuses to start if `.env` is missing
-(un-prefixed `EnvironmentFile=`). It names no systemd sandboxing: no
-`NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`, `PrivateTmp=`,
-`ReadWritePaths=`, `UMask=` or `CapabilityBoundingSet=` (read 2026-10-27).
+(un-prefixed `EnvironmentFile=`). It sets `UMask=0077` (2026-11-11), so every
+file the Player creates is `tvpi`'s alone. Otherwise it names no systemd
+sandboxing: no `NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`,
+`PrivateTmp=`, `ReadWritePaths=` or `CapabilityBoundingSet=` (read 2026-11-11).
 `tests/test_deploy_unit.py` checks the environment file, the restart policy, the
-absolute interpreter path, no home-directory path and the stop timeout, and
-nothing about hardening.
+absolute interpreter path, no home-directory path, the stop timeout and the
+umask, and no other hardening.
 
 ### Supply chain
 
