@@ -38,3 +38,5 @@ class SlideshowStatus:
     network_down: bool = False
     #: The title of what is on the screen, or None when nothing is.
     showing: str | None = None
+    #: What was found at start that would stop the screen being drawn (`mpv.renderer_problems`).
+    renderer_problems: tuple[str, ...] = ()

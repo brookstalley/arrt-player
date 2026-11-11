@@ -40,9 +40,11 @@ interleaving commands on the one socket.
 """
 
 import contextlib
+import grp
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -106,6 +108,39 @@ RESTART_BACKOFF_SECONDS: Final[tuple[float, ...]] = (1.0, 2.0, 4.0, 8.0, 16.0, 3
 #: The longest socket path every platform the suite runs on accepts: macOS
 #: allows 104 bytes in `sun_path` and Linux 108, with the terminating zero.
 MAX_SOCKET_PATH: Final[int] = 103
+
+
+#: The group whose members may use the GPU's render node. mpv needs it on the
+#: Pi (measured 2026-11-10: without it, mpv cannot open the device it draws through).
+RENDER_GROUP: Final[str] = "render"
+
+
+def renderer_problems(
+    command: Sequence[str] = ("mpv",),
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    groups: Callable[[], list[int]] = os.getgroups,
+    group_id: Callable[[str], int] = lambda name: grp.getgrnam(name).gr_gid,
+) -> list[str]:
+    """What would stop mpv drawing on this machine, in words for the journal and the page; empty when nothing is known to.
+
+    **Asked once at start, so the reason is said once.** Without it, a machine
+    missing mpv or the group says only that each item was not shown, once per
+    item, and nothing says why. A machine with no `render` group at all (a Mac)
+    has no such rule to break, so that check says nothing there.
+    """
+    found = []
+    if which(command[0]) is None:
+        found.append(f"mpv is not installed ({command[0]} is not on the PATH); install it with apt-get install mpv")
+    try:
+        render = group_id(RENDER_GROUP)
+    except KeyError:
+        return found
+    if render not in groups():
+        found.append(
+            f"this account is not in group {RENDER_GROUP}, which mpv needs to draw; add it to the unit's SupplementaryGroups"
+        )
+    return found
 
 
 class MpvError(Exception):

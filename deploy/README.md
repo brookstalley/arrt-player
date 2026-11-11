@@ -306,6 +306,54 @@ without the page.
 **The way back** is the previous revision. `.settings.json` is ignored by a
 Player from before this, so it can stay where it is.
 
+## The slideshow (2026-11-11, `build-plan-slideshow.md`)
+
+The Player can now run as a Reddit slideshow instead of a client of the server:
+one listing on one HDMI screen, drawn by mpv, each post captioned on the label
+panel. Arrt mode is unchanged, and stays the default. The two never run at once.
+
+**Install mpv before switching revisions**, since the unit cannot install it:
+
+    sudo apt-get update && sudo apt-get install --no-install-recommends mpv
+
+`--no-install-recommends` keeps the 148 packages it brings from growing. Check
+it: `mpv --version | head -1` prints `mpv 0.40.0…` on Trixie.
+
+**The unit gains group `render`** (`SupplementaryGroups=spi gpio video
+render`), the GPU's render node, without which mpv cannot draw (measured
+2026-11-10). So the runbook's step 9 shows the unit differing, and steps 10–11
+install it. To run mpv by hand as `tvpi` (`tools/mpv_check.py`), also add the
+account to the group: `sudo adduser tvpi render`.
+
+**Nothing changes for a wall in Arrt mode.** `.env` needs no new key, and a
+Player whose mode is unset is in Arrt mode.
+
+**Switching to a slideshow** is done on the settings page: choose *A Reddit
+slideshow*, paste a listing address and the `reddit_session` cookie (the page
+says how to copy it), and save. The Player restarts into it. In slideshow mode
+it reads no server keys and sends no heartbeat, so the server shows this client
+as silent until it is switched back. Switching back is the same, choosing
+*Walls from an Arrt server*. The slideshow keys can also be set in `.env`
+(`.env.example` § The slideshow); set there, the page shows them read-only.
+
+**What it keeps, under `CACHE_DIR`:** the media in `.slideshow/` (at most 2 GB,
+only the current listing's), the last listing in `.slideshow-listing.json`,
+and mpv's socket and pid in `.mpv/`. The cookie is in `.settings.json` (0600) or
+`.env`.
+
+**Check it worked:** the journal's `slideshow.starting`, then `slideshow.listed`
+and `slideshow.shown` events, and the page's Slideshow section says what Reddit
+last answered. A `slideshow.renderer_unavailable` error at start names what
+would stop mpv drawing (mpv missing, or the account not in `render`), and the
+page shows the same.
+
+**The way back** to an older revision: the settings file is now layout version
+2, which an older Player refuses by name (`.settings.json is layout version 2`).
+Before starting the older revision, as root, edit `$CACHE_DIR/.settings.json`:
+delete the keys `PLAYER_MODE`, `SLIDESHOW_URL`, `REDDIT_SESSION`,
+`SLIDESHOW_MIN_SECONDS`, `SLIDESHOW_MAX_SECONDS` and `SLIDESHOW_OUTPUT` from
+`values`, and set `version` to `1`. The `.slideshow*` and `.mpv` entries can stay.
+
 ## The two new units, and where everything they name now lives
 
 `display.service` and `curation.service` are the planes this product is being

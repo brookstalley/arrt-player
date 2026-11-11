@@ -1123,6 +1123,16 @@ class TestWhatTheSlideshowSays:
         assert response.status == 200
         assert "It does not say when it expires." in await response.text()
 
+    async def test_what_would_stop_mpv_is_said_as_a_problem_and_absent_when_there_is_none(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(outcome=Outcome.LISTED, renderer_problems=("this account is not in group render",))
+        warned = await (await signed_in.get("/")).text()
+        state.slideshow = SlideshowStatus(outcome=Outcome.LISTED)
+        quiet = await (await signed_in.get("/")).text()
+
+        assert '<p class="note error" role="alert">The slideshow cannot draw: this account is not in group render.</p>' in warned
+        assert "cannot draw" not in quiet
+
     async def test_an_outage_says_it_plays_on_from_what_was_listed(self, signed_in, state):
         state.missing = ()
         state.slideshow = SlideshowStatus(outcome=Outcome.UNREACHABLE, items=12)

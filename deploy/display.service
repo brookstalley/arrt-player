@@ -33,8 +33,10 @@ User=tvpi
 Group=tvpi
 
 # The e-paper HAT is reached through SPI and GPIO; an HDMI screen through the
-# display card (`/dev/dri/card*`, group `video`).
-SupplementaryGroups=spi gpio video
+# display card (`/dev/dri/card*`, group `video`). A slideshow's mpv also needs the
+# GPU's render node (`/dev/dri/renderD*`, group `render`): measured on the Pi
+# 2026-11-10, it cannot draw without it.
+SupplementaryGroups=spi gpio video render
 
 WorkingDirectory=/opt/arrt-player
 

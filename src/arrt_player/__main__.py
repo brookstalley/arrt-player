@@ -78,7 +78,7 @@ from arrt_player.displays.screen import ScreenOutput, screen_wall
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.manifest import Watcher
-from arrt_player.mpv import MpvOutput
+from arrt_player.mpv import MpvOutput, renderer_problems
 from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
 from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
 from arrt_player.programmes.slideshow import Screen, Slideshow
@@ -422,10 +422,19 @@ async def run_slideshow(
     *,
     fetcher: Fetcher | None = None,
     screen: Callable[[SlideshowSettings], Screen] = slideshow_screen,
+    problems: Callable[[], list[str]] = renderer_problems,
 ) -> int:
     """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped."""
     log.info("starting a slideshow", extra={"event": "slideshow.starting", **settings.startup_lines()})
-    status = SlideshowStatus()
+    status = SlideshowStatus(renderer_problems=tuple(problems()))
+    for problem in status.renderer_problems:
+        # Said and played on: the page and the label still work, and a fix
+        # (installing mpv, adding the group) is picked up at the next start.
+        log.error(
+            "the slideshow cannot draw: %s",
+            problem,
+            extra={"event": "slideshow.renderer_unavailable", "reason": problem},
+        )
     panel = label_panel(settings.panel)
     page = asyncio.create_task(run_settings_page(settings_page(ui, slideshow=status), stop), name="settings-page")
     try:

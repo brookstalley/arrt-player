@@ -21,7 +21,16 @@ from pathlib import Path
 import pytest
 from fakes import drm_tree
 
-from arrt_player.mpv import MPV_OPTIONS, RESTART_BACKOFF_SECONDS, Loaded, MpvOutput, NotShown, failure_in, stop_stale
+from arrt_player.mpv import (
+    MPV_OPTIONS,
+    RESTART_BACKOFF_SECONDS,
+    Loaded,
+    MpvOutput,
+    NotShown,
+    failure_in,
+    renderer_problems,
+    stop_stale,
+)
 
 FAKE = Path(__file__).with_name("fake_mpv.py")
 
@@ -585,3 +594,25 @@ def test_a_line_from_mpv_that_is_not_json_is_an_mpv_error(root: Path) -> None:
     with pytest.raises(MpvError, match="not JSON"):
         ipc.command("get_property", "duration", timeout=0.5)
     ipc.close()
+
+
+# -- what would stop mpv drawing, said once at start -----------------------------------
+
+
+def test_a_machine_with_mpv_and_the_render_group_has_no_renderer_problem() -> None:
+    assert renderer_problems(which=lambda _: "/usr/bin/mpv", groups=lambda: [44, 993], group_id=lambda _: 993) == []
+
+
+def test_missing_mpv_and_a_missing_group_are_each_named() -> None:
+    said = renderer_problems(which=lambda _: None, groups=lambda: [44], group_id=lambda _: 993)
+
+    assert len(said) == 2
+    assert "mpv is not installed" in said[0]
+    assert "not in group render" in said[1]
+
+
+def test_a_machine_with_no_render_group_breaks_no_rule_about_it() -> None:
+    def no_such_group(name: str) -> int:
+        raise KeyError(name)
+
+    assert renderer_problems(which=lambda _: "/opt/homebrew/bin/mpv", groups=lambda: [20], group_id=no_such_group) == []

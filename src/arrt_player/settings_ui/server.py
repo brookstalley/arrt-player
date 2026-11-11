@@ -688,6 +688,15 @@ def _slideshow_status(status: SlideshowStatus | None, *, now: float) -> str:
     """What Reddit last answered and what the cache holds, in words; nothing outside a running slideshow."""
     if status is None:
         return ""
+    cannot_draw = "".join(
+        f'<p class="note error" role="alert">The slideshow cannot draw: {html.escape(problem)}.</p>'
+        for problem in status.renderer_problems
+    )
+    return cannot_draw + _answer_words(status, now=now)
+
+
+def _answer_words(status: SlideshowStatus, *, now: float) -> str:
+    """What Reddit last answered and what the cache holds, in words."""
     if status.outcome is None:
         said = "Reddit has not answered yet."
         if status.from_saved:

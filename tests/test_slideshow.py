@@ -603,7 +603,12 @@ async def test_a_whole_slideshow_run_logs_no_cookie(tmp_path, caplog, monkeypatc
     with caplog.at_level(logging.DEBUG):
         await asyncio.wait_for(
             entry.run_slideshow(
-                slideshow_settings(tmp_path), ui, stop, fetcher=Fetcher(), screen=lambda _: StoppingScreen(Time())
+                slideshow_settings(tmp_path),
+                ui,
+                stop,
+                fetcher=Fetcher(),
+                screen=lambda _: StoppingScreen(Time()),
+                problems=list,
             ),
             timeout=20,
         )
@@ -615,6 +620,49 @@ async def test_a_whole_slideshow_run_logs_no_cookie(tmp_path, caplog, monkeypatc
     for record in caplog.records:
         assert secret not in record.getMessage()
         assert all(secret not in repr(value) for value in record.__dict__.values())
+
+
+async def test_what_would_stop_mpv_is_said_once_at_start_and_the_slideshow_plays_on(tmp_path, caplog, monkeypatch):
+    stop = asyncio.Event()
+    statuses: list[SlideshowStatus] = []
+
+    class Fetcher(Reddit):
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class StoppingScreen(Screen):
+        def load(self, path: Path) -> Loaded | NotShown:
+            loop.call_soon_threadsafe(stop.set)
+            return super().load(path)
+
+    async def the_page(state, _stop) -> bool:
+        statuses.append(state.slideshow)
+        await stop.wait()
+        return True
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(entry, "run_settings_page", the_page)
+    ui = UiSettings(cache_dir=tmp_path, bind="127.0.0.1", port=0, pinned=frozenset())
+    with caplog.at_level(logging.INFO):
+        await asyncio.wait_for(
+            entry.run_slideshow(
+                slideshow_settings(tmp_path),
+                ui,
+                stop,
+                fetcher=Fetcher(),
+                screen=lambda _: StoppingScreen(Time()),
+                problems=lambda: ["mpv is not installed"],
+            ),
+            timeout=20,
+        )
+
+    said = [r for r in caplog.records if getattr(r, "event", None) == "slideshow.renderer_unavailable"]
+    assert [r.reason for r in said] == ["mpv is not installed"]
+    assert statuses[0].renderer_problems == ("mpv is not installed",)
+    assert any(getattr(r, "event", None) == "slideshow.shown" for r in caplog.records), "it stopped rather than playing on"
 
 
 # -- the renderer's life ----------------------------------------------------------------

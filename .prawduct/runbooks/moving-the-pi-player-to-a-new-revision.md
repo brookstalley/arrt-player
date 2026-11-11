@@ -139,6 +139,19 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
    *Why `sudo`: `.env` is readable by `tvpi` and root only.*
 
+7a. Check the system packages the Player runs beside it:
+
+        mpv --version | head -1
+
+    **Expected:** `mpv 0.40…` or later.
+    **If `command not found`:** install it (`deploy/README.md` § The slideshow):
+
+        sudo apt-get update && sudo apt-get install --no-install-recommends mpv
+
+    *Why: slideshow mode draws through mpv, and nothing else on the Pi brings
+    it. Arrt mode does not need it yet, but a Pi switched to a slideshow from
+    the page should not have to wait for an install.*
+
 8. Sync the Player's environment:
 
        cd /opt/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
