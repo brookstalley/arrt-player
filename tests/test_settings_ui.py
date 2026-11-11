@@ -23,6 +23,7 @@ from typing import ClassVar
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from conftest import journal
 
 from arrt_player import __main__ as entry
 from arrt_player.client import OutputReport, player_name
@@ -941,7 +942,7 @@ class TestTheSlideshowsSettings:
         assert store.read(cache_dir).values["REDDIT_SESSION"] == cookie
         for response in (saved, shown):
             assert "the-cookies-secret-part" not in await response.text()
-        assert "the-cookies-secret-part" not in caplog.text
+        assert "the-cookies-secret-part" not in journal(caplog)
         assert "A cookie is set." in await shown.text()
 
     async def test_an_empty_cookie_field_keeps_the_cookie(self, signed_in, cache_dir, restarts):

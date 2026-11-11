@@ -20,6 +20,7 @@ from fakes import FakeTv
 from hypothesis import settings as hypothesis_settings
 from PIL import Image
 
+from arrt_player import logs
 from arrt_player.compose import DEFAULT_MAT_MODE, Geometry, composed_path
 from arrt_player.config import (
     CACHED_MANIFEST_FILENAME,
@@ -97,6 +98,22 @@ WALL_ID = "living-room"
 #: The client's token in every fixture. Distinctive, so a test can search a
 #: journal for it.
 CLIENT_TOKEN = "the-clients-token"
+
+
+def journal(caplog: pytest.LogCaptureFixture) -> str:
+    """What the journal would hold for the captured records: each one through the
+    Player's own formatter, `extra` fields included.
+
+    `caplog.text` is the message alone, so a check that a secret is *not* there
+    passes whatever the call site put in its fields, and those fields are what
+    the journal keeps."""
+    formatter = logs.JsonFormatter()
+    return "\n".join(formatter.format(record) for record in caplog.records)
+
+
+def events(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    """The captured records carrying `event`, matched on the field, not the message."""
+    return [record for record in caplog.records if getattr(record, "event", None) == event]
 
 
 @pytest.fixture(autouse=True)

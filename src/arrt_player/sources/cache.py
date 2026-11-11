@@ -130,7 +130,10 @@ class MediaCache:
         root.mkdir(parents=True, exist_ok=True)
         for partial in root.glob(f"*{PARTIAL_SUFFIX}"):
             partial.unlink()
-            log.info("slideshow.cache.partial_cleared file=%s", partial.name)
+            log.info(
+                "a download a previous run left unfinished was removed",
+                extra={"event": "slideshow.cache.partial_cleared", "file": partial.name},
+            )
         self._files = self._scan()
 
     def get(self, item_id: str) -> Cached | None:
@@ -151,7 +154,10 @@ class MediaCache:
             del self._files[path.stem]
         self._failed_at = {item_id: at for item_id, at in self._failed_at.items() if item_id in keep}
         if removed:
-            log.info("slideshow.cache.evicted count=%d", len(removed))
+            log.info(
+                "media no longer on the listing was removed",
+                extra={"event": "slideshow.cache.evicted", "count": len(removed)},
+            )
         return removed
 
     async def fill(self, items: Sequence[Item], start: int = 0) -> FillReport:
@@ -179,9 +185,15 @@ class MediaCache:
                 report.network_down = True
                 break
         if report.cap_reached:
-            log.warning("slideshow.cache.cap_reached used=%d cap=%d", self.used_bytes(), self.cap_bytes)
+            log.warning(
+                "the media cache is full; downloading stops until the listing moves on",
+                extra={"event": "slideshow.cache.cap_reached", "used_bytes": self.used_bytes(), "cap_bytes": self.cap_bytes},
+            )
         if report.network_down:
-            log.warning("slideshow.cache.network_down after=%d", UNREACHABLE_RUN)
+            log.warning(
+                "downloads stopped: the network looks down",
+                extra={"event": "slideshow.cache.network_down", "unreachable_in_a_row": UNREACHABLE_RUN},
+            )
         return report
 
     async def _fetch_one(self, item: Item, limit: int, report: FillReport) -> "_Step":
@@ -212,8 +224,19 @@ class MediaCache:
                 report.downloaded.append(item.id)
                 report.tiers[candidate.tier] += 1
                 if reasons:
-                    log.warning("slideshow.cache.fell_back item=%s to=%s after=%s", item.id, candidate.tier, "; ".join(reasons))
-                log.info("slideshow.cache.downloaded item=%s tier=%s bytes=%d", item.id, candidate.tier, got.size)
+                    log.warning(
+                        "a better copy failed, so a lesser one was kept",
+                        extra={
+                            "event": "slideshow.cache.fell_back",
+                            "item": item.id,
+                            "tier": candidate.tier,
+                            "reasons": "; ".join(reasons),
+                        },
+                    )
+                log.info(
+                    "media downloaded",
+                    extra={"event": "slideshow.cache.downloaded", "item": item.id, "tier": candidate.tier, "bytes": got.size},
+                )
                 return _Step.DOWNLOADED
         self._fail(item, report, "; ".join(reasons) or "nothing to fetch")
         return _Step.UNREACHABLE if all_unreachable else _Step.FAILED
@@ -221,7 +244,10 @@ class MediaCache:
     def _fail(self, item: Item, report: FillReport, reason: str) -> None:
         self._failed_at[item.id] = self._clock()
         report.failed[item.id] = reason
-        log.warning("slideshow.cache.download_failed item=%s tier=%s reason=%s", item.id, item.tier, reason)
+        log.warning(
+            "media could not be downloaded",
+            extra={"event": "slideshow.cache.download_failed", "item": item.id, "tier": item.tier, "reason": reason},
+        )
 
     def _waiting(self, item_id: str) -> bool:
         failed = self._failed_at.get(item_id)

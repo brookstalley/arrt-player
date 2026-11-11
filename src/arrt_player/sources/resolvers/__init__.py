@@ -65,4 +65,7 @@ class Resolvers:
 
 def _fell_back(name: str, item: Item, reason: str) -> None:
     then = "Reddit's copy" if item.media_url else "nothing"
-    log.warning("slideshow.resolver.fallback resolver=%s item=%s to=%s reason=%s", name, item.id, then, reason)
+    log.warning(
+        "a host could not give its own copy",
+        extra={"event": "slideshow.resolver.fallback", "resolver": name, "item": item.id, "to": then, "reason": reason},
+    )

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from conftest import events, journal
 
 from arrt_player.sources import Candidate, Caption, Item, Kind, Resolved
 from arrt_player.sources.cache import MediaCache
@@ -264,7 +265,8 @@ async def test_a_link_on_a_resolvers_domain_that_it_does_not_read_is_left_to_red
 
     assert found == [Candidate(item().media_url, "reddit-copy")]
     assert api.calls == []
-    assert "slideshow.resolver.fallback" not in caplog.text
+    assert events(caplog, "slideshow.resolver.fallback") == []
+    assert "fallback" not in journal(caplog)
 
 
 @pytest.mark.parametrize("error", [None, TimeoutError(), ValueError("a shape it does not read"), KeyError("gif"), NotMedia("x")])
@@ -274,7 +276,7 @@ async def test_whatever_a_resolver_does_wrong_the_item_keeps_reddits_copy_and_it
     found = await resolvers.candidates(item(link="https://broken.example/x", domain="broken.example"))
 
     assert found == [Candidate(item().media_url, "reddit-copy")]
-    assert "slideshow.resolver.fallback resolver=broken" in caplog.text
+    assert [record.resolver for record in events(caplog, "slideshow.resolver.fallback")] == ["broken"]
 
 
 def test_two_resolvers_cannot_claim_one_domain():
@@ -336,7 +338,7 @@ async def test_the_cache_falls_back_when_a_resolvers_url_is_not_media_and_counts
     assert downloads.asked == [hd, item().media_url]
     assert report.downloaded == ["t3_abc"]
     assert report.tiers == {"reddit-copy": 1}
-    assert "slideshow.cache.fell_back item=t3_abc to=reddit-copy" in caplog.text
+    assert [(record.item, record.tier) for record in events(caplog, "slideshow.cache.fell_back")] == [("t3_abc", "reddit-copy")]
 
 
 async def test_the_cache_counts_a_resolvers_download_under_its_tier(tmp_path):
@@ -403,7 +405,7 @@ async def test_no_token_means_reddits_copy_said_so_and_no_lookup(refusal, caplog
     found = await resolvers.candidates(item())
 
     assert found == [Candidate(item().media_url, "reddit-copy")]
-    assert "slideshow.resolver.fallback resolver=redgifs" in caplog.text
+    assert [record.resolver for record in events(caplog, "slideshow.resolver.fallback")] == ["redgifs"]
     assert [url for url, _ in api.calls] == [f"{API}/auth/temporary"]
 
 

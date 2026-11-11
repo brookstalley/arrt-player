@@ -119,7 +119,10 @@ def parse_listing(document: object, claims: Claims | None = None) -> tuple[list[
             found = items_of(post, claims)
         except (KeyError, TypeError, ValueError) as error:
             # One post Reddit sent in a shape this does not know costs that post only.
-            log.warning("slideshow.reddit.post_unreadable post=%s error=%r", post.get("name"), error)
+            log.warning(
+                "a post was in a shape this does not read",
+                extra={"event": "slideshow.reddit.post_unreadable", "post": post.get("name"), "error": repr(error)},
+            )
             found = []
         if found:
             items += found
@@ -190,12 +193,18 @@ def _is_account(body: bytes) -> bool:
 def _logged(listing: Listing) -> Listing:
     if listing.outcome is Outcome.LISTED:
         log.info(
-            "slideshow.reddit.listed items=%d unresolved=%s",
-            len(listing.items),
-            ",".join(f"{domain}:{count}" for domain, count in listing.unresolved.most_common()) or "none",
+            "Reddit listed the posts",
+            extra={
+                "event": "slideshow.reddit.listed",
+                "items": len(listing.items),
+                "unresolved": dict(listing.unresolved.most_common()),
+            },
         )
     else:
-        log.warning("slideshow.reddit.%s detail=%s", listing.outcome.value, listing.detail)
+        log.warning(
+            "Reddit did not list the posts",
+            extra={"event": "slideshow.reddit.not_listed", "outcome": listing.outcome.value, "detail": listing.detail},
+        )
     return listing
 
 

@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from conftest import events, journal
 
 from arrt_player.sources import Kind, Outcome
 from arrt_player.sources.fetch import ApiAnswer, FetchRefused
@@ -200,7 +201,9 @@ def test_a_post_in_a_shape_not_known_costs_only_that_post(caplog, breakage):
 
     assert len(items) == len(parse_listing(SHAPES)[0]) - 3
     assert unresolved["reddit.com"] == 1
-    assert "slideshow.reddit.post_unreadable" in caplog.text
+    assert [record.post for record in events(caplog, "slideshow.reddit.post_unreadable")] == [
+        broken["data"]["children"][1]["data"]["name"]
+    ]
 
 
 @pytest.mark.parametrize("document", [[], {"data": {}}, {"kind": "t2", "data": {"name": "someone"}}, "Blocked"])
@@ -320,10 +323,38 @@ async def test_anything_else_is_unreachable(answers):
     assert listing.items == ()
 
 
+@pytest.mark.parametrize(
+    ("answers", "outcome"),
+    [
+        ({"listing": ApiAnswer(403, BLOCKED), "me": ApiAnswer(200, ACCOUNT)}, "refused"),
+        ({"listing": ApiAnswer(403, BLOCKED), "me": ApiAnswer(403, BLOCKED)}, "cookie_rejected"),
+        ({"listing": ApiAnswer(429, b"", ratelimit_reset_s=5.0)}, "rate_limited"),
+        ({"listing": TimeoutError()}, "unreachable"),
+    ],
+)
+async def test_a_listing_not_listed_is_one_event_that_names_its_outcome(answers, outcome, caplog):
+    """One name for every way a listing fails, so a journal query for it does not
+    have to know each outcome's spelling; the outcome rides as a field."""
+    await _outcome(answers)
+
+    assert [record.outcome for record in events(caplog, "slideshow.reddit.not_listed")] == [outcome]
+    assert events(caplog, "slideshow.reddit.listed") == []
+
+
+async def test_a_listing_listed_says_so_and_never_not_listed(caplog):
+    caplog.set_level(logging.INFO)
+    await _outcome({"listing": ApiAnswer(200, json.dumps(SHAPES).encode())})
+
+    (listed,) = events(caplog, "slideshow.reddit.listed")
+    assert listed.items == len(parse_listing(SHAPES)[0])
+    assert listed.unresolved["gfycat.com"] == 1
+    assert events(caplog, "slideshow.reddit.not_listed") == []
+
+
 async def test_the_accounts_own_data_reaches_no_log_and_no_listing(caplog):
     caplog.set_level(logging.DEBUG)
     listing, _ = await _outcome({"listing": ApiAnswer(403, BLOCKED), "me": ApiAnswer(200, ACCOUNT)})
 
     assert caplog.records, "nothing logged, so this checks nothing"
-    assert "the-owners-account-name" not in caplog.text
+    assert "the-owners-account-name" not in journal(caplog)
     assert "the-owners-account-name" not in repr(listing)

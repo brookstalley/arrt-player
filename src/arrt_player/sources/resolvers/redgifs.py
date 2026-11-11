@@ -70,14 +70,17 @@ class RedgifsResolver:
             return None
         answer = await self._lookup(gif_id)
         if answer.status == HTTPStatus.UNAUTHORIZED:
-            log.info("slideshow.resolver.redgifs.token_refused renewing=once")
+            log.info("redgifs refused its token; renewing it once", extra={"event": "slideshow.resolver.redgifs.token_refused"})
             self._token = None
             answer = await self._lookup(gif_id)
         if answer.status == HTTPStatus.NOT_FOUND:
-            log.info("slideshow.resolver.redgifs.gone gif=%s", gif_id)
+            log.info("redgifs no longer has this clip", extra={"event": "slideshow.resolver.redgifs.gone", "gif": gif_id})
             return None
         if answer.status != HTTPStatus.OK:
-            log.warning("slideshow.resolver.redgifs.lookup_failed gif=%s status=%d", gif_id, answer.status)
+            log.warning(
+                "redgifs did not answer the lookup",
+                extra={"event": "slideshow.resolver.redgifs.lookup_failed", "gif": gif_id, "status": answer.status},
+            )
             return None
         urls = json.loads(answer.body)["gif"]["urls"]
         if not isinstance(urls, dict):
@@ -105,7 +108,10 @@ class RedgifsResolver:
         expires = _expiry(token)
         self._token = token
         self._renew_at = (expires - RENEW_BEFORE_S) if expires is not None else now + UNREAD_TOKEN_LIFETIME_S
-        log.info("slideshow.resolver.redgifs.token valid_for_s=%.0f", self._renew_at - now)
+        log.info(
+            "redgifs gave a token",
+            extra={"event": "slideshow.resolver.redgifs.token", "valid_for_s": round(self._renew_at - now)},
+        )
         return token
 
     def _gif_id(self, link: str) -> str | None:
