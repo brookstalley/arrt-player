@@ -899,7 +899,7 @@ class TestTheTokenFileIsPrivate:
 
         assert (tmp_path / "token_file").stat().st_mode & 0o777 == 0o600
 
-    async def test_no_token_yet_creates_no_file(self, art: StubArt, tmp_path):
+    async def test_no_token_yet_creates_no_file_and_says_nothing(self, art: StubArt, tmp_path, caplog):
         """An empty file is not the same as none to the library: the pairing URL
         carries `token=` instead of `token=None`, which nobody has measured
         against the set. So the Player never creates the file."""
@@ -909,6 +909,9 @@ class TestTheTokenFileIsPrivate:
         await client.connect()
 
         assert not (tmp_path / "token_file").exists()
+        assert [r for r in caplog.records if getattr(r, "event", None) == "tv.token_file_open"] == [], (
+            "a set not yet paired is not a token file left open"
+        )
 
     async def test_a_mode_it_cannot_set_is_said_and_the_set_still_connects(self, art: StubArt, tmp_path, monkeypatch, caplog):
         client = self._client(tmp_path)
