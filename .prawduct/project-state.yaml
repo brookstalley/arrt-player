@@ -378,3 +378,9 @@ tests_dirs: tests
 # Gitflow, as Arrt runs it: features PR into develop, and develop releases to
 # main. The remote's default is main, so the resolver cannot infer this.
 base_branch: develop
+
+# The norm registry is the Enforcement table in project-preferences.md, ratified
+# row by row by the owner since the guard ruling there dated 2026-08-06. Norms
+# homed in Arrt are pointer rows to Arrt's § Direction, so no artifact here
+# carries a `## Direction` section of its own (CLAUDE.md § Where artifacts live).
+norm_registry_ratified: 2026-08-06 — the Enforcement table in project-preferences.md, with pointer rows to Arrt's § Direction
