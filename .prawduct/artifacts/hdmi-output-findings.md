@@ -45,7 +45,7 @@ physical sizes, and the pictures drawn were the right size and colour.
 | Colour order and range | Owner, on a test pattern of greys 0/8/16/28/48/96/255 and a yellow block: black is black, 0, 8 and 16 distinct, yellow is yellow. The connector sends full-range RGB, 8 bpc (`broadcast_rgb=Automatic`, `is_limited_range=n` in debugfs) |
 | When the program exits | The kernel restores the text console: the owner saw art, then the login prompt. The Player must hold the device for its life, and a Player that has stopped shows the console on the wall |
 | Cable pulled, then pushed back (~24 s) | One kernel uevent per edge on `/devices/platform/gpu/drm/card1`, `ACTION=change HOTPLUG=1 CONNECTOR=35`; the sysfs `status` follows. The CRTC stayed enabled on the program's buffer throughout, and **the picture came back by itself** (owner) |
-| Brightness | DDC/CI answers on `/dev/i2c-20` (needs `i2c-dev` loaded, root): brightness 0–100 and contrast read and set with `ddcutil`; display mode (`0xDC`) unsupported. Set to 10 at the owner's request. Nothing in the Player does this, and nothing asks it to. The full set, and power, in § Controlling the monitor over the cable |
+| Brightness | DDC/CI answers on `/dev/i2c-20` (needs `i2c-dev` loaded, root): brightness 0–100 and contrast read and set with `ddcutil`; display mode (`0xDC`) unsupported. Set to 10 at the owner's request. Nothing in the Player does this, and nothing asks it to |
 
 ## A screen the Pi cannot see
 
@@ -100,30 +100,6 @@ What `mpv.py` is built on; its options are `mpv.MPV_OPTIONS`.
 **Inference, not measured:** a clip taller than 1080 lines may exceed what
 `v4l2m2m` decodes on a Pi 4. Not yet tested (§ Not observed).
 
-## Controlling the monitor over the cable
-
-**Measured 2026-11-13** on the same Pi and the same LG, with the owner watching
-the screen and the Player stopped (`systemctl stop`) for the power tests. Nothing
-in the Player does any of this, and nothing asks it to; it is the evidence a
-requirement would be written from.
-
-| Question | Observed |
-|---|---|
-| What DDC/CI offers | `ddcutil --bus 20 capabilities` (root, `i2c-dev` loaded): MCCS 2.1. Brightness `0x10`, contrast `0x12`, colour preset `0x14` (6500 K, 9300 K, User 1), RGB gain `0x16`/`0x18`/`0x1A`, sharpness `0x87`, input source `0x60` (HDMI-1, HDMI-2, DP-1, DP-2), speaker volume `0x62` and mute `0x8D`, power mode `0xD6` (`0x01` on, `0x04` off), the factory resets `0x04`/`0x05`/`0x08`, and LG codes `0xF4`–`0xFF` and `0x15` that nothing documents |
-| Values found | Brightness 10, contrast 70, 6500 K, gains 50, sharpness 50, input HDMI-1, volume 28, unmuted |
-| Brightness set live | 10 → 60 → 10, each write read back; the owner saw it change |
-| Power off over DDC/CI (`0xD6` ← `0x04`) | The write succeeded and **the screen went dark**; the owner could not tell powered-off from blanked. **Read back while dark, `0xD6` still said `0x01` (on)**, so the monitor's report of its own power mode is not evidence of it. `0xD6` ← `0x01` 10 s later succeeded; the screen was lit afterwards, but whether it lit at that write was not timed |
-| Power by signal (the Pi stops scanning out) | With the Player stopped, `4` written to `/sys/class/graphics/fb0/blank` took the HDMI-A-1 pipe (`pixelvalve-2` in `/sys/kernel/debug/dri/1/state`) to `active=0`; **the owner saw the monitor go to standby**. `0` written back after 20 s returned it to `active=1`, and **the monitor woke by itself** within the 30 s that followed, with no DDC/CI and no button |
-| HDMI-CEC | Both adapters present (`/dev/cec0` on HDMI-A-1, physical address `1.0.0.0`; `/dev/cec1` on HDMI-A-2). A playback-device scan from `cec0` found **no other device**: this LG monitor takes no part in CEC. The scan's claimed logical address was released afterwards (`cec-ctl --clear`) |
-
-What it means: **switching this screen off and on is done by stopping and
-resuming the signal**, which it follows on its own, and which only the process
-holding the card (the Player) can do while it runs. DDC/CI can dark the screen
-but cannot say whether it is dark. Brightness and the rest work over DDC/CI and
-need root or a group with access to `/dev/i2c-20`. The pipe-to-connector mapping
-is read from debugfs, never assumed: HDMI-A-1 is on `pixelvalve-2`, not
-`pixelvalve-0`.
-
 ## Not observed
 
 - A second screen on HDMI-A-2, or two walls on one card at once.
@@ -132,8 +108,6 @@ is read from debugfs, never assumed: HDMI-A-1 is on `pixelvalve-2`, not
 - A screen changing to a different size while the Player runs (the test covers it
   with a double).
 - A 4K60 mode (`hdmi_enable_4kp60=1`); 4K30 is ample for a still picture.
-- How long the LG takes to reach standby once the signal stops, and whether
-  DDC/CI still answers (brightness, input) while it is there.
 - **A redgifs HD clip taller than 1080 lines through mpv on the Pi**, which
   decides whether `RedgifsResolver` should prefer `sd` over `hd`. Owed by the
   slideshow plan's acceptance on the Pi.
