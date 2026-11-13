@@ -147,6 +147,12 @@ DEFAULT_TV_MAX_BRIGHTNESS: Final[int] = 10
 #: so this interval costs a local calculation and no traffic.
 DEFAULT_BRIGHTNESS_INTERVAL_SECONDS: Final[float] = 300.0
 
+#: An HDMI monitor's brightness at night and in full daylight, on the monitor's
+#: own DDC/CI scale (0 to the maximum it reports, which is 100 on the reference
+#: LG). The owner's numbers for the office monitor (2026-11-13).
+DEFAULT_SCREEN_MIN_BRIGHTNESS: Final[int] = 5
+DEFAULT_SCREEN_MAX_BRIGHTNESS: Final[int] = 50
+
 #: The wait for the set's `image_added` acknowledgement. **A correctness value,
 #: not a tuning knob**: the library's own default of 10 seconds was measured
 #: failing on this deployment's 4K composites while the image landed anyway, so a
@@ -481,6 +487,16 @@ class PanelSettings:
 
 
 @dataclass(frozen=True)
+class Location:
+    """Where the sun is seen from: the Frame's brightness and a screen's both follow it."""
+
+    latitude: float
+    longitude: float
+    name: str
+    region: str
+
+
+@dataclass(frozen=True)
 class FrameSettings:
     """The Frame output: the television and the sun it follows.
 
@@ -513,6 +529,10 @@ class FrameSettings:
     tv_panel_width_px: int
     tv_panel_height_px: int
     tv_panel_diagonal_inches: float
+
+    @property
+    def location(self) -> Location:
+        return Location(latitude=self.latitude, longitude=self.longitude, name=self.location_name, region=self.location_region)
 
     def frame_lines(self) -> dict[str, object]:
         """The Frame's part of a startup line, so a misconfiguration is one line away.
@@ -559,6 +579,35 @@ class Settings(WallSettings, FrameSettings):
 
 
 @dataclass(frozen=True)
+class ScreenBrightnessSettings:
+    """How an HDMI screen's brightness follows the sun, on every screen that answers DDC/CI.
+
+    **Off when no location is set**, and said in the start line: the sun is the
+    only thing brightness follows, and a guessed location would set it wrong at
+    every hour rather than not at all.
+    """
+
+    location: Location | None
+    minimum: int = DEFAULT_SCREEN_MIN_BRIGHTNESS
+    maximum: int = DEFAULT_SCREEN_MAX_BRIGHTNESS
+    interval_seconds: float = DEFAULT_BRIGHTNESS_INTERVAL_SECONDS
+    #: `SCREEN_BRIGHTNESS=off`: the screens are left alone even with a location,
+    #: which a client with a Frame must set for the Frame's own sake.
+    enabled: bool = True
+
+    @property
+    def active(self) -> bool:
+        return self.enabled and self.location is not None
+
+    def screen_brightness_line(self) -> str:
+        if not self.enabled:
+            return "off: SCREEN_BRIGHTNESS is off"
+        if self.location is None:
+            return "off: LATITUDE, LONGITUDE and LOCATION_NAME are not set"
+        return f"{self.minimum} to {self.maximum} with the sun at {self.location.name}, every {self.interval_seconds:g} s"
+
+
+@dataclass(frozen=True)
 class ClientSettings:
     """Everything this Player needs from its environment, resolved once."""
 
@@ -580,6 +629,8 @@ class ClientSettings:
     label_poll_seconds: float = DEFAULT_LABEL_POLL_SECONDS
     mat_width_inches: float = DEFAULT_MAT_WIDTH_INCHES
     mat_bottom_weight: float = DEFAULT_MAT_BOTTOM_WEIGHT
+    #: Brightness on the HDMI screens; off with no location.
+    screen_brightness: ScreenBrightnessSettings = field(default_factory=lambda: ScreenBrightnessSettings(location=None))
 
     @property
     def client_document_path(self) -> Path:
@@ -618,6 +669,7 @@ class ClientSettings:
             "frame": self.frame.frame_lines() if self.frame is not None else "(none — TV_ADDRESS is not set)",
             "panel": self.panel.panel_lines(),
             "mat": f"{self.mat_width_inches} in, bottom x{self.mat_bottom_weight}",
+            "screen_brightness": self.screen_brightness.screen_brightness_line(),
         }
 
 
@@ -662,6 +714,7 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
         panel=_panel(env),
         mat_width_inches=_positive_float(env, "MAT_WIDTH_INCHES", DEFAULT_MAT_WIDTH_INCHES),
         mat_bottom_weight=_positive_float(env, "MAT_BOTTOM_WEIGHT", DEFAULT_MAT_BOTTOM_WEIGHT),
+        screen_brightness=_screen_brightness(env),
     )
 
 
@@ -716,16 +769,21 @@ def _beneath_the_environment(env: dict[str, str], cache_dir: Path) -> dict[str, 
 def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
     """The Frame output when `TV_ADDRESS` is set, and None when it is not.
 
-    **Its own required values are required only once it is asked for.** The sun
-    drives the television's brightness and nothing else, so a client with no
-    Frame has no use for a location; requiring one anyway is how an installer
-    learns to type plausible values into keys that do nothing.
+    **Its own required values are required only once it is asked for.** The
+    location is required here because the Frame's brightness follows the sun; a
+    client with no Frame needs one only for its HDMI screens' brightness, which
+    is off without it (`_screen_brightness`). Requiring one anyway is how an
+    installer learns to type plausible values into keys that do nothing. Both
+    read it through `_location`, so the two cannot parse it differently.
 
     A label panel needs no Frame: it is a label output the server may map to any
     wall, so `EPD_DEVICE` is read by `_panel` whether or not this is set.
     """
     if not env.get("TV_ADDRESS"):
         return None
+    location = _location(env)
+    if location is None:
+        raise ConfigError("LATITUDE, LONGITUDE and LOCATION_NAME are not set, and a Frame follows the sun they place.")
 
     token_file = env.get("TV_TOKEN_FILE") or ""
     return FrameSettings(
@@ -733,10 +791,10 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_port=_int(env, "TV_PORT", 8002),
         tv_token_file=_absolute(token_file, "TV_TOKEN_FILE") if token_file else cache_dir / "token_file",
         tv_client_name=env.get("TV_CLIENT_NAME") or DEFAULT_TV_CLIENT_NAME,
-        latitude=_float(env, "LATITUDE", None),
-        longitude=_float(env, "LONGITUDE", None),
-        location_name=_require(env, "LOCATION_NAME"),
-        location_region=env.get("LOCATION_REGION") or "",
+        latitude=location.latitude,
+        longitude=location.longitude,
+        location_name=location.name,
+        location_region=location.region,
         tv_min_brightness=_int(env, "TV_MIN_BRIGHTNESS", DEFAULT_TV_MIN_BRIGHTNESS),
         tv_max_brightness=_int(env, "TV_MAX_BRIGHTNESS", DEFAULT_TV_MAX_BRIGHTNESS),
         brightness_interval_seconds=_float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS),
@@ -750,6 +808,48 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_panel_height_px=_positive_int(env, "TV_PANEL_HEIGHT_PX", DEFAULT_TV_PANEL_HEIGHT_PX),
         tv_panel_diagonal_inches=_positive_float(env, "TV_PANEL_DIAGONAL_INCHES", DEFAULT_TV_PANEL_DIAGONAL_INCHES),
     )
+
+
+#: The keys that place this Player under the sun. Any one set asks for all of
+#: them (the region is optional), because half a location is a typo, not a choice.
+_LOCATION_KEYS: Final[tuple[str, ...]] = ("LATITUDE", "LONGITUDE", "LOCATION_NAME")
+
+
+def _location(env: dict[str, str]) -> Location | None:
+    """The location when any of its keys is set, None when none is. Raises `ConfigError` on half of one."""
+    if not any(env.get(name) for name in _LOCATION_KEYS):
+        return None
+    return Location(
+        latitude=_float(env, "LATITUDE", None),
+        longitude=_float(env, "LONGITUDE", None),
+        name=_require(env, "LOCATION_NAME"),
+        region=env.get("LOCATION_REGION") or "",
+    )
+
+
+def _screen_brightness(env: dict[str, str]) -> ScreenBrightnessSettings:
+    """The HDMI screens' brightness: the switch, the levels, the interval, and the location they follow.
+
+    **The levels are checked only when it is on.** A client with brightness off
+    reads nothing it would refuse, so turning the feature on cannot stop a
+    Player that started before it existed. The interval is read as the Frame
+    reads it, because it is the same key.
+    """
+    switch = (env.get("SCREEN_BRIGHTNESS") or "on").strip().lower()
+    if switch not in ("on", "off"):
+        raise ConfigError(f"SCREEN_BRIGHTNESS is {switch!r}, and it must be on or off.")
+    location = _location(env)
+    interval = _float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS)
+    if switch == "off" or location is None:
+        return ScreenBrightnessSettings(location=location, interval_seconds=interval, enabled=switch == "on")
+    minimum = _int(env, "SCREEN_MIN_BRIGHTNESS", DEFAULT_SCREEN_MIN_BRIGHTNESS)
+    maximum = _int(env, "SCREEN_MAX_BRIGHTNESS", DEFAULT_SCREEN_MAX_BRIGHTNESS)
+    if not 0 <= minimum <= maximum:
+        raise ConfigError(
+            f"SCREEN_MIN_BRIGHTNESS is {minimum} and SCREEN_MAX_BRIGHTNESS is {maximum}: "
+            "both must be zero or more, and the night level no higher than the day level."
+        )
+    return ScreenBrightnessSettings(location=location, minimum=minimum, maximum=maximum, interval_seconds=interval)
 
 
 def _panel(env: dict[str, str]) -> PanelSettings:

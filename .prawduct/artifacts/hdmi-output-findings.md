@@ -45,7 +45,7 @@ physical sizes, and the pictures drawn were the right size and colour.
 | Colour order and range | Owner, on a test pattern of greys 0/8/16/28/48/96/255 and a yellow block: black is black, 0, 8 and 16 distinct, yellow is yellow. The connector sends full-range RGB, 8 bpc (`broadcast_rgb=Automatic`, `is_limited_range=n` in debugfs) |
 | When the program exits | The kernel restores the text console: the owner saw art, then the login prompt. The Player must hold the device for its life, and a Player that has stopped shows the console on the wall |
 | Cable pulled, then pushed back (~24 s) | One kernel uevent per edge on `/devices/platform/gpu/drm/card1`, `ACTION=change HOTPLUG=1 CONNECTOR=35`; the sysfs `status` follows. The CRTC stayed enabled on the program's buffer throughout, and **the picture came back by itself** (owner) |
-| Brightness | DDC/CI answers on `/dev/i2c-20` (needs `i2c-dev` loaded, root): brightness 0–100 and contrast read and set with `ddcutil`; display mode (`0xDC`) unsupported. Set to 10 at the owner's request. Nothing in the Player does this, and nothing asks it to |
+| Brightness | DDC/CI answers on `/dev/i2c-20` (needs `i2c-dev` loaded, root): brightness 0–100 and contrast read and set with `ddcutil`; display mode (`0xDC`) unsupported. Set to 10 at the owner's request. Since #34 the Player sets brightness itself (`displays/screen_brightness.py`). The full set, and power, in § Controlling the monitor over the cable |
 
 ## A screen the Pi cannot see
 
@@ -80,6 +80,34 @@ not seen.
   (no `video` group, another program holding the card) raises, and the wall
   logs it, keeps rotating and tries again on every poll.
 
+## Controlling the monitor over the cable
+
+**Measured 2026-11-13** on the same Pi and the same LG, with the owner watching
+the screen and the Player stopped (`systemctl stop`) for the power tests. It was
+measured before the Player did any of it. Brightness was then built on it (#34,
+`displays/screen_brightness.py`, with its acceptance in the rows below), and
+power by signal is #35, not yet built.
+
+| Question | Observed |
+|---|---|
+| What DDC/CI offers | `ddcutil --bus 20 capabilities` (root, `i2c-dev` loaded): MCCS 2.1. Brightness `0x10`, contrast `0x12`, colour preset `0x14` (6500 K, 9300 K, User 1), RGB gain `0x16`/`0x18`/`0x1A`, sharpness `0x87`, input source `0x60` (HDMI-1, HDMI-2, DP-1, DP-2), speaker volume `0x62` and mute `0x8D`, power mode `0xD6` (`0x01` on, `0x04` off), the factory resets `0x04`/`0x05`/`0x08`, and LG codes `0xF4`–`0xFF` and `0x15` that nothing documents |
+| Values found | Brightness 10, contrast 70, 6500 K, gains 50, sharpness 50, input HDMI-1, volume 28, unmuted |
+| Brightness set live | 10 → 60 → 10, each write read back; the owner saw it change |
+| DDC/CI from plain Python, no `ddcutil` | A throwaway spike, run as a non-root user in group `i2c` (the bus is `root:i2c 0660`). The bus was found from the connector's sysfs `ddc` link (`card1-HDMI-A-1/ddc` → `i2c-20`; HDMI-A-2's is `i2c-21`). With `I2C_SLAVE` 0x37, Get VCP `0x10` read 10 of max 100, and Set `0x10`=20 read back 20 and was restored to 10, at about 50 ms per exchange (a 50 ms wait between write and read). Request checksum: XOR seeded with `0x6E`. Reply checksum: XOR seeded with `0x50`, and it held on every reply. An unsupported code (`0xDC`) is answered with result byte `0x01` and a valid checksum (`6e880201dc01ffff000068`), so 'unsupported' is told apart from a garbled reply. The Player was running throughout, holding the card. Then the built `ddc.py`, on the Pi: the same reading on HDMI-A-1. **HDMI-A-2, with nothing plugged in, raised `OSError` errno 121 (`EREMOTEIO`)**: nothing acknowledged the address, which `ddc.NoAnswer` names as the screen's answer, not a fault of this host. Not yet seen: a garbled reply, or a screen that has DDC/CI and refuses it |
+| The built Player following the sun (#34, `feature/hdmi-brightness` at `f73f547`) | Deployed at 10:47 local with the owner at the monitor, `LOCATION_NAME` Bozeman, levels 5–50, 300 s. `screen.brightness_set` 29 at 10:47:33 (sun 23.1°), read back 29, and the owner saw the LG brighten from 10. 30 at 10:52:34 (23.4°). Nothing written at the next three checks, the value unchanged. The owner then set the monitor to 95 with its own buttons (read 95 at 11:10:25), and it **stayed through the 11:12 check** (still 95 at 11:13:00), until the curve moved: 31 at 11:17:37 (24.64°), read back 31. No WARNING or ERROR in the journal. Group `i2c` from the unit, `i2c-dev` from `/etc/modules-load.d/arrt-player.conf` |
+| Power off over DDC/CI (`0xD6` ← `0x04`) | The write succeeded and **the screen went dark**; the owner could not tell powered-off from blanked. **Read back while dark, `0xD6` still said `0x01` (on)**, so the monitor's report of its own power mode is not evidence of it. `0xD6` ← `0x01` 10 s later succeeded; the screen was lit afterwards, but whether it lit at that write was not timed |
+| Power by signal (the Pi stops scanning out) | With the Player stopped, `4` written to `/sys/class/graphics/fb0/blank` took the HDMI-A-1 pipe (`pixelvalve-2` in `/sys/kernel/debug/dri/1/state`) to `active=0`; **the owner saw the monitor go to standby**. `0` written back after 20 s returned it to `active=1`, and **the monitor woke by itself** within the 30 s that followed, with no DDC/CI and no button |
+| An ambient light reading | **None found.** MCCS defines no light-sensor code, and of the LG's undocumented ones (`0x15`, `0x4D`–`0x4F`, `0xEF`, `0xF4`–`0xF9`, `0xFE`), with brightness and contrast, none changed across 27 samples in the room's ordinary light, 42 with it as dark as the owner could make it and 15 with it much brighter than ordinary: every value was identical. The Pi has none either: no IIO devices, no camera, and the header's I2C bus (`i2c_arm`) not enabled; `/dev/i2c-20` and `-21` are the two HDMI DDC buses |
+| HDMI-CEC | Both adapters present (`/dev/cec0` on HDMI-A-1, physical address `1.0.0.0`; `/dev/cec1` on HDMI-A-2). A playback-device scan from `cec0` found **no other device**: this LG monitor takes no part in CEC. The scan's claimed logical address was released afterwards (`cec-ctl --clear`) |
+
+What it means: **switching this screen off and on is done by stopping and
+resuming the signal**, which it follows on its own, and which only the process
+holding the card (the Player) can do while it runs. DDC/CI can dark the screen
+but cannot say whether it is dark. Brightness and the rest work over DDC/CI and
+need root or a group with access to `/dev/i2c-20`. The pipe-to-connector mapping
+is read from debugfs, never assumed: HDMI-A-1 is on `pixelvalve-2`, not
+`pixelvalve-0`.
+
 ## Not observed
 
 - A second screen on HDMI-A-2, or two walls on one card at once.
@@ -88,3 +116,5 @@ not seen.
 - A screen changing to a different size while the Player runs (the test covers it
   with a double).
 - A 4K60 mode (`hdmi_enable_4kp60=1`); 4K30 is ample for a still picture.
+- How long the LG takes to reach standby once the signal stops, and whether
+  DDC/CI still answers (brightness, input) while it is there.

@@ -127,3 +127,33 @@ def test_a_save_on_the_settings_page_comes_back():
 
     assert directives.get("Restart") == ["always"], "a save on the settings page would leave the Player stopped"
     assert directives.get("KillSignal") == ["SIGTERM"]
+
+
+def test_what_the_player_writes_is_its_own_to_read():
+    """The television library writes its pairing token with a plain
+    `open(path, "w")`, so the token file gets whatever the umask leaves, and the
+    Pi's default leaves it world-readable. `UMask=0077` makes every file the
+    Player creates its own from the moment it exists, the token included;
+    `SamsungTv.connect` tightens the token file as well, for runs outside the
+    unit."""
+    assert _directives().get("UMask") == ["0077"]
+
+
+def test_the_player_can_reach_a_screens_brightness():
+    """An HDMI screen's brightness is set over the connector's DDC/CI bus,
+    `/dev/i2c-*`, which is `root:i2c 0660` on Raspberry Pi OS. Without the group
+    every write fails with a permission error, which the Player reports once and
+    retries forever; the wall still runs, so nothing else would show it."""
+    groups = " ".join(_directives().get("SupplementaryGroups", [])).split()
+    assert "i2c" in groups
+    # The groups the screen and the label already needed are still there.
+    assert {"spi", "gpio", "video"} <= set(groups)
+
+
+def test_the_bus_the_brightness_needs_is_loaded_at_boot():
+    """`/dev/i2c-*` exists only while `i2c-dev` is loaded. The Pi loaded it only
+    through ddcutil's own file (measured 2026-11-13), which removing ddcutil
+    would take away; the Player ships its own."""
+    shipped = UNIT.parent / "modules-load.d" / "arrt-player.conf"
+    lines = [line.strip() for line in shipped.read_text().splitlines()]
+    assert "i2c-dev" in [line for line in lines if line and not line.startswith("#")]

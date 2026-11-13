@@ -148,11 +148,13 @@ is that walk's output, not a recollection.
 | `pull` | Every HTTP request: `Pull` (one wall), `ClientPull` (the client routes), `LabelPull` (one label) | `client`, `config`, `episodes`, `heartbeat`, `label_rule`, `manifest` |
 | `wall` | The one wall loop for every display kind; `Clock`; `DisplayRecord`; the `Display` and `Programme` protocols | `config`, `episodes`, `heartbeat`, `manifest` |
 | `displays/frame` | The Frame as a `Display`: uploads, bindings, reconciliation, brightness, the art-mode gate | `brightness`, `config`, `episodes`, `heartbeat`, `logs`, `manifest`, `programmes.schedule`, `state`, `tv`, `wall` |
-| `displays/screen` | An HDMI connector as a `Display`, behind `ScreenOutput` | `compose`, `config`, `episodes`, `heartbeat`, `manifest`, `programmes.schedule`, `wall` |
+| `displays/screen` | An HDMI connector as a `Display`, behind `ScreenOutput` | `compose`, `config`, `displays.screen_brightness`, `episodes`, `heartbeat`, `manifest`, `programmes.schedule`, `wall` |
+| `displays/screen_brightness` | An HDMI screen's brightness on the sun, over the `ddc.DdcBus` seam | `brightness`, `config`, `ddc`, `episodes`, `wall` |
 | `programmes/schedule` | What the wall should show from a major 2 feed; composes each work for the display | `compose`, `episodes`, `logs`, `manifest`, `wall` |
 | `manifest` | Parse and watch the cached feed (`Watcher`, `parse`, `REQUESTED_MAJORS = (2,)`) | — |
 | `compose` | Mat composition for a geometry (Pillow) | — |
 | `kms` | `KmsOutput`/`LibdrmDevice`: libdrm through `ctypes` | `client`, `episodes` |
+| `ddc` | A monitor's DDC/CI features over its HDMI connector's I2C bus (`Ddc`, `I2cTransport`, `bus_for`); no `ddcutil` | `client` |
 | `tv/client` | The `TvClient` seam and its exceptions | — |
 | `tv/samsung` | `SamsungTv`, the only `samsungtvws` user | `tv.client` |
 | `state/store` | `DisplayState`, the Frame's SQLite store | — |
@@ -166,7 +168,7 @@ is that walk's output, not a recollection.
 | `settings_ui/store` | The settings page's file, `$CACHE_DIR/.settings.json` | — |
 | `settings_ui/auth` | The page's password hash, session cookie, setup code and throttle | — |
 | `settings_ui/server` | The settings page (`aiohttp.web`); the Player's one listening socket | `config`, `settings_ui.auth`, `settings_ui.store` |
-| `brightness` | Sun-angle brightness (astral) | — |
+| `brightness` | Sun-angle brightness (astral), for the Frame and the HDMI screens | — |
 
 **Dependency direction, as the graph shows it.** `__main__` sits on top. Below it
 the Frame and screen drivers depend on `wall`, `programmes.schedule` and the

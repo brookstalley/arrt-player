@@ -15,6 +15,7 @@ the connection it can no longer reason about.
 import asyncio
 import json
 import logging
+import pathlib
 
 import pytest
 from samsungtvws.exceptions import HttpApiError, ResponseError
@@ -833,3 +834,97 @@ async def test_a_close_that_fails_reaches_the_journal(tv: SamsungTv, art: StubAr
     failures = [r for r in caplog.records if getattr(r, "event", None) == "tv.close_failed"]
     assert failures, "the failed close never reached the journal"
     assert all(r.levelno >= logging.WARNING for r in failures)
+
+
+class TestTheTokenFileIsPrivate:
+    """The library writes the pairing token with `open(path, "w")`, so the file
+    takes the umask's mode: world-readable on the Pi's default. The token lets
+    whoever holds it drive the set's art channel as this Player."""
+
+    @staticmethod
+    def _client(tmp_path) -> SamsungTv:
+        return SamsungTv(
+            host="10.0.0.1",
+            port=8002,
+            token_file=tmp_path / "token_file",
+            client_name="tvpi-test",
+            connect_timeout_seconds=1.0,
+            upload_timeout_seconds=5.0,
+            select_confirm_seconds=0.05,
+        )
+
+    @staticmethod
+    def _written_as_the_library_writes_it(path) -> None:
+        path.write_text("a-token")
+        path.chmod(0o644)
+
+    async def test_a_token_written_while_pairing_is_left_readable_by_its_owner_alone(self, art: StubArt, tmp_path):
+        client = self._client(tmp_path)
+
+        def pairing() -> StubArt:
+            self._written_as_the_library_writes_it(tmp_path / "token_file")
+            return art
+
+        client._construct = pairing  # type: ignore[method-assign]
+        await client.connect()
+
+        assert (tmp_path / "token_file").stat().st_mode & 0o777 == 0o600
+
+    async def test_a_token_written_when_the_art_channel_opens_is_private_too(self, art: StubArt, tmp_path):
+        """The library also takes a token from the art channel's first message."""
+        client = self._client(tmp_path)
+        listening = art.start_listening
+
+        async def opens_and_pairs() -> None:
+            self._written_as_the_library_writes_it(tmp_path / "token_file")
+            await listening()
+
+        art.start_listening = opens_and_pairs  # type: ignore[method-assign]
+        client._construct = lambda: art  # type: ignore[method-assign]
+        await client.connect()
+
+        assert (tmp_path / "token_file").stat().st_mode & 0o777 == 0o600
+
+    async def test_a_connection_that_fails_after_pairing_still_leaves_it_private(self, art: StubArt, tmp_path):
+        client = self._client(tmp_path)
+
+        async def pairs_then_refuses() -> None:
+            self._written_as_the_library_writes_it(tmp_path / "token_file")
+            raise ConnectionResetError("refused")
+
+        art.start_listening = pairs_then_refuses  # type: ignore[method-assign]
+        client._construct = lambda: art  # type: ignore[method-assign]
+        with pytest.raises(TvUnavailable):
+            await client.connect()
+
+        assert (tmp_path / "token_file").stat().st_mode & 0o777 == 0o600
+
+    async def test_no_token_yet_creates_no_file_and_says_nothing(self, art: StubArt, tmp_path, caplog):
+        """An empty file is not the same as none to the library: the pairing URL
+        carries `token=` instead of `token=None`, which nobody has measured
+        against the set. So the Player never creates the file."""
+        client = self._client(tmp_path)
+        client._construct = lambda: art  # type: ignore[method-assign]
+
+        await client.connect()
+
+        assert not (tmp_path / "token_file").exists()
+        assert [
+            r for r in caplog.records if getattr(r, "event", None) == "tv.token_file_open"
+        ] == [], "a set not yet paired is not a token file left open"
+
+    async def test_a_mode_it_cannot_set_is_said_and_the_set_still_connects(self, art: StubArt, tmp_path, monkeypatch, caplog):
+        client = self._client(tmp_path)
+        self._written_as_the_library_writes_it(tmp_path / "token_file")
+        client._construct = lambda: art  # type: ignore[method-assign]
+
+        def refused(*_args: object, **_kwargs: object) -> None:
+            raise PermissionError("not the owner")
+
+        monkeypatch.setattr(pathlib.Path, "chmod", refused)
+        await client.connect()
+
+        assert client._art is art
+        unprotected = [r for r in caplog.records if getattr(r, "event", None) == "tv.token_file_open"]
+        assert len(unprotected) == 1
+        assert "a-token" not in unprotected[0].getMessage()

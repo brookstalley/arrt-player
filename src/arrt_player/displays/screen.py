@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from arrt_player.compose import Geometry
 from arrt_player.config import WallSettings
+from arrt_player.displays.screen_brightness import ScreenBrightness
 from arrt_player.episodes import ReportOnce
 from arrt_player.heartbeat import ScreenState
 from arrt_player.manifest import Watcher
@@ -70,6 +71,7 @@ def screen_wall(
     output: ScreenOutput,
     watcher: Watcher,
     clock: Clock,
+    brightness: ScreenBrightness | None = None,
 ) -> Wall:
     """A wall on a screen this host draws: the shared loop, this driver, and a programme per major, remembering in memory."""
     memory = InMemory()
@@ -80,7 +82,7 @@ def screen_wall(
 
     return Wall(
         wall=wall,
-        display=ScreenDisplay(wall=wall, output=output, clock=clock),
+        display=ScreenDisplay(wall=wall, output=output, clock=clock, brightness=brightness),
         programmes={
             2: Schedule(
                 wall_id=wall.wall_id,
@@ -105,9 +107,18 @@ class ScreenDisplay:
     journal_name = "screen"
     description = "the screen"
 
-    def __init__(self, *, wall: WallSettings, output: ScreenOutput, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        wall: WallSettings,
+        output: ScreenOutput,
+        clock: Clock,
+        brightness: ScreenBrightness | None = None,
+    ) -> None:
         self._wall = wall
         self._output = output
+        #: The screen's brightness, following the sun; None when it does not (no location).
+        self._brightness = brightness
         #: What the screen is doing. None until the first pass has looked.
         self.record = DisplayRecord(clock, wall_id=wall.wall_id)
         #: The work on the screen, as this display last put it there.
@@ -164,10 +175,12 @@ class ScreenDisplay:
     async def after(self, pictures: Sequence[Picture]) -> None:  # noqa: ARG002 -- the wall.Display protocol's signature
         await self._refresh()
         self._observe_the_screen()
+        await self._follow_the_sun()
 
     async def idle(self) -> None:
         await self._refresh()
         self._observe_the_screen()
+        await self._follow_the_sun()
 
     def went_away(self, exc: Exception) -> float:
         # Unreachable: `unavailable` is empty, so the wall never calls this.
@@ -185,7 +198,15 @@ class ScreenDisplay:
         return Capabilities(screen=self._output.screen, backend="framebuffer", label_modes=("none",))
 
     async def close(self) -> None:
-        return
+        if self._brightness is not None:
+            self._brightness.close()
+
+    async def _follow_the_sun(self) -> None:
+        """Brightness on a screen showing this wall's art; a dark or absent one is left alone."""
+        if self._brightness is None:
+            return
+        present = self._output.listed and self._output.connected
+        await self._brightness.apply(present=present, showing=present and self._showing is not None)
 
     async def _refresh(self) -> None:
         """Let the output draw again for a screen that came back. Its failure is said once, and costs the pass nothing."""
