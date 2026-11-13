@@ -153,6 +153,7 @@ is that walk's output, not a recollection.
 | `manifest` | Parse and watch the cached feed (`Watcher`, `parse`, `REQUESTED_MAJORS = (2,)`) | — |
 | `compose` | Mat composition for a geometry (Pillow) | — |
 | `kms` | `KmsOutput`/`LibdrmDevice`: libdrm through `ctypes` | `client`, `episodes` |
+| `ddc` | A monitor's DDC/CI features over its HDMI connector's I2C bus (`Ddc`, `I2cTransport`, `bus_for`); no `ddcutil` | `client` |
 | `tv/client` | The `TvClient` seam and its exceptions | — |
 | `tv/samsung` | `SamsungTv`, the only `samsungtvws` user | `tv.client` |
 | `state/store` | `DisplayState`, the Frame's SQLite store | — |
