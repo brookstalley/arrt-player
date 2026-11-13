@@ -206,6 +206,28 @@ def test_a_post_in_a_shape_not_known_costs_only_that_post(caplog, breakage):
     ]
 
 
+def test_a_field_sent_as_the_wrong_type_costs_only_that_post(caplog):
+    """One post with a string where an object goes must not end the listing, or every restart reads it and stops again."""
+    broken = copy.deepcopy(SHAPES)
+    # A hosted video, read from its media.
+    post = broken["data"]["children"][3]["data"]
+    post["secure_media"] = "a string where an object goes"
+
+    items, _ = parse_listing(broken)
+
+    assert [i.id for i in items] == [i.id for i in parse_listing(SHAPES)[0] if i.id != post["name"]]
+    assert [record.post for record in events(caplog, "slideshow.reddit.post_unreadable")] == [post["name"]]
+
+
+def test_a_child_that_is_not_an_object_is_passed_over():
+    broken = copy.deepcopy(SHAPES)
+    broken["data"]["children"][1:1] = ["a string", None, {"kind": "t3", "data": "not an object"}]
+
+    items, _ = parse_listing(broken)
+
+    assert [i.id for i in items] == [i.id for i in parse_listing(SHAPES)[0]]
+
+
 @pytest.mark.parametrize("document", [[], {"data": {}}, {"kind": "t2", "data": {"name": "someone"}}, "Blocked"])
 def test_what_is_not_a_listing_is_refused(document):
     with pytest.raises(ValueError, match="not a listing"):
@@ -296,6 +318,21 @@ async def test_a_403_with_a_session_reddit_does_not_accept_is_the_cookie(me):
     listing, _ = await _outcome({"listing": ApiAnswer(403, BLOCKED), "me": me})
 
     assert listing.outcome is Outcome.COOKIE_REJECTED
+
+
+async def test_a_403_then_a_rate_limit_on_the_session_is_a_rate_limit_never_the_cookie():
+    listing, _ = await _outcome({"listing": ApiAnswer(403, BLOCKED), "me": ApiAnswer(429, b"", ratelimit_reset_s=93.0)})
+
+    assert (listing.outcome, listing.retry_after_s) == (Outcome.RATE_LIMITED, 93.0)
+    assert "cookie" not in listing.detail
+
+
+@pytest.mark.parametrize("status", [500, 503])
+async def test_a_403_then_an_outage_on_the_session_is_unreachable_never_the_cookie(status):
+    listing, _ = await _outcome({"listing": ApiAnswer(403, BLOCKED), "me": ApiAnswer(status, b"")})
+
+    assert listing.outcome is Outcome.UNREACHABLE
+    assert "cookie" not in listing.detail
 
 
 async def test_a_429_is_rate_limited_for_as_long_as_reddit_says():

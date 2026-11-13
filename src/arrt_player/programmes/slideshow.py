@@ -431,12 +431,15 @@ class Slideshow:
             },
         )
         self._caption(item)
-        await self._follow_the_sun()
         await self._dwell(stop, item, dwell)
 
     async def _dwell(self, stop: asyncio.Event, item: Item, seconds: float) -> None:
         """Hold the item for `seconds`, ending early on `stop` or when the screen says it is no longer up."""
         end = self._monotonic() + seconds
+        # After `end` is fixed, and only while a check's worth of the dwell is
+        # left: a DDC/CI exchange takes time from the dwell rather than adding to
+        # it, unless one exchange outlasts `CHECK_EVERY_S`.
+        await self._follow_the_sun()
         while (left := end - self._monotonic()) > 0:
             if await self._wait(stop, min(CHECK_EVERY_S, left)):
                 return
@@ -446,7 +449,8 @@ class Slideshow:
             if failed is not None:
                 self._not_shown(item, failed.reason)
                 return
-            await self._follow_the_sun()
+            if end - self._monotonic() > CHECK_EVERY_S:
+                await self._follow_the_sun()
 
     async def _follow_the_sun(self) -> None:
         """Brightness while an item is up. The brightness keeps its own interval, so this is called freely."""

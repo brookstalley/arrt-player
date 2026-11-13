@@ -109,7 +109,13 @@ def parse_listing(document: object, claims: Claims | None = None) -> tuple[list[
     """
     try:
         children: Sequence[Any] = document["data"]["children"]  # type: ignore[index]
-        posts = [child["data"] for child in children if child.get("kind") == "t3"]
+        # A child that is not an object is no post at all, and is passed over
+        # rather than ending the listing.
+        posts = [
+            child["data"]
+            for child in children
+            if isinstance(child, dict) and child.get("kind") == "t3" and isinstance(child.get("data"), dict)
+        ]
     except (KeyError, TypeError) as error:
         raise ValueError(f"not a listing: {error!r}") from None
     items: list[Item] = []
@@ -117,7 +123,8 @@ def parse_listing(document: object, claims: Claims | None = None) -> tuple[list[
     for post in posts:
         try:
             found = items_of(post, claims)
-        except (KeyError, TypeError, ValueError) as error:
+        # AttributeError: a field Reddit sent as a string or a list where this reads an object.
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
             # One post Reddit sent in a shape this does not know costs that post only.
             log.warning(
                 "a post was in a shape this does not read",
@@ -171,6 +178,17 @@ class RedditSource:
             )
         if me.status == HTTPStatus.OK and _is_account(me.body):
             return Listing(Outcome.REFUSED, detail="Reddit refuses this listing; try its top listing instead")
+        # Only an answer about the session can say the cookie is bad. A rate limit
+        # or an outage says nothing about it, and telling the person to paste a
+        # new cookie would send them to the wrong fix.
+        if me.status == HTTPStatus.TOO_MANY_REQUESTS:
+            return Listing(
+                Outcome.RATE_LIMITED,
+                retry_after_s=me.ratelimit_reset_s,
+                detail="Reddit refused the listing, then asked us to slow down",
+            )
+        if me.status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+            return Listing(Outcome.UNREACHABLE, detail=f"Reddit refused the listing, then answered {me.status}")
         return Listing(Outcome.COOKIE_REJECTED, detail="Reddit no longer accepts the session cookie")
 
 

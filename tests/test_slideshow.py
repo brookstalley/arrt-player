@@ -701,6 +701,21 @@ async def test_the_brightness_is_followed_while_an_item_is_up_and_closed_at_the_
     assert brightness.closed == 1
 
 
+async def test_a_slow_brightness_exchange_takes_from_the_dwell_never_adds_to_it(tmp_path):
+    """An 18 s clip plays twice in a 36 s dwell; a DDC/CI exchange that took time must not let it start a third play."""
+    rig = Rig(tmp_path, Source(listed(item("clip", url="https://v.redd.it/clip.mp4"), item("b"))), durations={"t3_clip": 18.0})
+
+    class Slow(Brightness):
+        async def apply(self, *, present: bool, showing: bool) -> None:
+            await super().apply(present=present, showing=showing)
+            self.time.now += 0.7
+
+    await rig.run_for(2, brightness=Slow(rig.time))
+
+    [(_, clip_at), (_, next_at)] = rig.screen.shown
+    assert next_at - clip_at == pytest.approx(36.0)
+
+
 async def test_nothing_shown_means_no_brightness_asked_for(tmp_path):
     """A brightness write must never be what wakes a screen with nothing on it."""
     rig = Rig(tmp_path, Source(listed(item("a"))), failing={"https://i.redd.it/a.jpg"})

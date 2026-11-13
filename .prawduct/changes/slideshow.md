@@ -66,11 +66,8 @@ the sync. A wall in Arrt mode never runs it, and needs no new `.env` key.
 The unit's `SupplementaryGroups` gains `render`. Install the unit as the runbook
 says.
 
-**Rolling back to an older revision** after saving any setting on this one needs
-the settings file put back to layout 1 by hand. Delete the slideshow keys from
+**Rolling back to an older revision** after this one has written the settings
+file (saving any setting, or setting or changing the page's password) needs the
+file put back to layout 1 by hand. Delete the slideshow keys from
 `$CACHE_DIR/.settings.json` and set `version` to 1, or the older Player refuses
 the file and names the version (`deploy/README.md` § The slideshow).
-
-The event `slideshow.reddit.<outcome>` is now `slideshow.reddit.not_listed`,
-with `outcome` as a field. The source, cache and resolver events carry their
-details as fields, not inside the message.
