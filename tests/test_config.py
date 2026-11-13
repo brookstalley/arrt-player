@@ -643,3 +643,95 @@ class TestSlideshowMode:
         assert store.read(cache_dir).values == {"PLAYER_NAME": "Hall"}
         store.write(cache_dir, store.read(cache_dir))
         assert '"version": 2' in store.path_in(cache_dir).read_text(encoding="utf-8")
+
+
+class TestAScreensBrightness:
+    """An HDMI screen follows the sun (#34): on with a location, off and said without one."""
+
+    def test_with_no_location_it_is_off_and_the_start_line_says_why(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, frame=False))
+
+        assert settings.screen_brightness.location is None
+        assert "LATITUDE, LONGITUDE and LOCATION_NAME are not set" in settings.startup_lines()["screen_brightness"]
+
+    def test_a_location_with_no_frame_turns_it_on_at_the_owners_levels(self, cache_dir: Path):
+        location = {name: FRAME[name] for name in ("LATITUDE", "LONGITUDE", "LOCATION_NAME")}
+        settings = load(an_environment(cache_dir, frame=False, **location))
+
+        brightness = settings.screen_brightness
+        assert settings.frame is None
+        assert brightness.location is not None
+        assert (brightness.location.latitude, brightness.location.longitude) == (45.68, -111.04)
+        assert brightness.location.name == "Bozeman"
+        # Owner, 2026-11-13: night 5, day 50.
+        assert (brightness.minimum, brightness.maximum) == (5, 50)
+        assert settings.startup_lines()["screen_brightness"] == "5 to 50 with the sun at Bozeman, every 300 s"
+
+    def test_the_levels_and_the_interval_are_read_from_the_environment(self, cache_dir: Path):
+        settings = load(
+            an_environment(cache_dir, SCREEN_MIN_BRIGHTNESS="12", SCREEN_MAX_BRIGHTNESS="71", BRIGHTNESS_INTERVAL_SECONDS="91")
+        )
+
+        brightness = settings.screen_brightness
+        assert (brightness.minimum, brightness.maximum, brightness.interval_seconds) == (12, 71, 91.0)
+
+    @pytest.mark.parametrize("missing", ["LATITUDE", "LONGITUDE", "LOCATION_NAME"])
+    def test_half_a_location_is_refused_by_name_even_with_no_frame(self, cache_dir: Path, missing: str):
+        location = {name: FRAME[name] for name in ("LATITUDE", "LONGITUDE", "LOCATION_NAME") if name != missing}
+
+        with pytest.raises(ConfigError, match=missing):
+            load(an_environment(cache_dir, frame=False, **location))
+
+    @pytest.mark.parametrize(
+        ("night", "day"),
+        [("51", "50"), ("-1", "50")],
+    )
+    def test_levels_that_cannot_be_a_curve_are_refused(self, cache_dir: Path, night: str, day: str):
+        with pytest.raises(ConfigError, match="SCREEN_MIN_BRIGHTNESS"):
+            load(an_environment(cache_dir, SCREEN_MIN_BRIGHTNESS=night, SCREEN_MAX_BRIGHTNESS=day))
+
+    def test_the_same_level_for_night_and_day_is_allowed(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, SCREEN_MIN_BRIGHTNESS="30", SCREEN_MAX_BRIGHTNESS="30"))
+
+        assert (settings.screen_brightness.minimum, settings.screen_brightness.maximum) == (30, 30)
+
+    def test_the_switch_turns_it_off_even_with_a_location(self, cache_dir: Path):
+        """A client with a Frame must set a location for the Frame, so the screens need a switch of their own."""
+        settings = load(an_environment(cache_dir, SCREEN_BRIGHTNESS="off"))
+
+        assert settings.frame is not None
+        assert settings.screen_brightness.location is not None
+        assert not settings.screen_brightness.active
+        assert settings.startup_lines()["screen_brightness"] == "off: SCREEN_BRIGHTNESS is off"
+
+    def test_a_switch_that_is_neither_on_nor_off_is_refused(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="SCREEN_BRIGHTNESS"):
+            load(an_environment(cache_dir, SCREEN_BRIGHTNESS="dim"))
+
+    def test_levels_are_not_held_against_a_player_with_brightness_off(self, cache_dir: Path):
+        """Turning the feature on must not stop a Player that started before it existed."""
+        load(an_environment(cache_dir, frame=False, SCREEN_MIN_BRIGHTNESS="60", SCREEN_MAX_BRIGHTNESS="50"))
+        load(an_environment(cache_dir, SCREEN_BRIGHTNESS="off", SCREEN_MIN_BRIGHTNESS="60", SCREEN_MAX_BRIGHTNESS="50"))
+
+    def test_an_interval_the_frame_accepts_is_accepted_for_the_screens(self, cache_dir: Path):
+        """One key, read one way: a Frame on `BRIGHTNESS_INTERVAL_SECONDS=0` started before this existed."""
+        settings = load(an_environment(cache_dir, BRIGHTNESS_INTERVAL_SECONDS="0"))
+
+        assert settings.frame is not None
+        assert settings.frame.brightness_interval_seconds == 0
+        assert settings.screen_brightness.interval_seconds == 0
+
+    def test_the_frame_and_the_screens_read_one_location(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, LOCATION_REGION="Montana"))
+
+        assert settings.frame is not None
+        assert settings.frame.location == settings.screen_brightness.location
+        assert settings.frame.location.region == "Montana"
+
+    def test_a_frame_with_no_location_at_all_is_refused_by_name(self, cache_dir: Path):
+        environment = an_environment(cache_dir)
+        for name in ("LATITUDE", "LONGITUDE", "LOCATION_NAME"):
+            del environment[name]
+
+        with pytest.raises(ConfigError, match="LATITUDE, LONGITUDE and LOCATION_NAME"):
+            load(environment)

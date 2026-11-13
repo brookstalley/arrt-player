@@ -385,6 +385,37 @@ async def test_an_unchanged_client_document_is_asked_for_with_its_etag(client, s
     assert link.cached() == first
 
 
+async def test_a_document_cached_without_its_etag_leaves_no_older_etag_beside_it(monkeypatch, client, server):
+    """The document is replaced, and then the ETag write fails (a full disk, or a
+    crash between the two). The ETag left must not be the old document's: sent
+    with the new document cached, it would get a 304 for the old one if the
+    server went back to it, and the walls would follow a document it no longer
+    serves."""
+    from arrt_player import pull as pull_module
+
+    link = ClientPull(client)
+    etag_path = client.cache_dir / pull_module.CLIENT_ETAG_FILENAME
+    try:
+        await link.fetch()
+        assert etag_path.is_file(), "the first document was not cached with its ETag"
+
+        server.clients[CLIENT_ID]["name"] = "The Pi in the kitchen"
+        real_write = pull_module._write_atomically
+
+        def etag_write_fails(path: Path, data: bytes) -> None:
+            if path == etag_path:
+                raise OSError(28, "No space left on device")
+            real_write(path, data)
+
+        monkeypatch.setattr(pull_module, "_write_atomically", etag_write_fails)
+        await link.fetch()
+    finally:
+        await link.close()
+
+    assert json.loads(client.client_document_path.read_text())["name"] == "The Pi in the kitchen"
+    assert not etag_path.exists()
+
+
 def _etag_not_utf8(path: Path) -> None:
     path.write_bytes(b'\xff\xfe"stale"')
 

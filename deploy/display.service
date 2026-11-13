@@ -33,10 +33,19 @@ User=tvpi
 Group=tvpi
 
 # The e-paper HAT is reached through SPI and GPIO; an HDMI screen through the
-# display card (`/dev/dri/card*`, group `video`). A slideshow's mpv also needs the
-# GPU's render node (`/dev/dri/renderD*`, group `render`): measured on the Pi
-# 2026-11-10, it cannot draw without it.
-SupplementaryGroups=spi gpio video render
+# display card (`/dev/dri/card*`, group `video`), and its brightness through the
+# connector's DDC/CI bus (`/dev/i2c-*`, group `i2c`; `deploy/modules-load.d`).
+# A slideshow's mpv also needs the GPU's render node (`/dev/dri/renderD*`, group
+# `render`): measured on the Pi 2026-11-10, it cannot draw without it.
+SupplementaryGroups=spi gpio video render i2c
+
+# **Everything the Player writes is tvpi's alone.** The television library
+# writes the pairing token with a plain open(), so without this the token file
+# takes the default umask and any account on the Pi can read it, and with it
+# drive the set's art channel. The cache, the settings file and a venv that
+# `uv run` syncs at start are created owner-only too; the runbook already does
+# all its work as tvpi.
+UMask=0077
 
 WorkingDirectory=/opt/arrt-player
 

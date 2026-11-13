@@ -59,6 +59,8 @@ class ServerDouble:
         self.client_heartbeats: list[dict] = []
         #: Forced answers, for the failure tests.
         self.media_status: int | None = None
+        #: False serves manifests with no ETag, as a server or proxy may, and never 304.
+        self.manifest_etags = True
         self.client_status: int | None = None
         self.client_body: bytes | None = None
         self.authorizations: list[str | None] = []
@@ -163,6 +165,8 @@ class ServerDouble:
         if manifest is None or self.served_at.get(wall_id, manifest["schema"]["major"]) != major:
             return web.json_response({"error": f"No manifest of major {major} is published for this wall."}, status=404)
         body = json.dumps(manifest).encode()
+        if not self.manifest_etags:
+            return web.Response(body=body, content_type="application/json")
         etag = f'"{hashlib.sha256(body).hexdigest()}"'
         if request.headers.get("If-None-Match") == etag:
             return web.Response(status=304, headers={"ETag": etag})

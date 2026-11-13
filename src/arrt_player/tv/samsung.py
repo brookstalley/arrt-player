@@ -194,10 +194,42 @@ class SamsungTv(TvClient):
         self._art_mode_announced = False
 
     async def connect(self) -> None:
-        """Build the client off the loop, then open the art channel under a ceiling."""
+        """Build the client off the loop, then open the art channel under a ceiling.
+
+        **The token file is made private on the way out, however connecting
+        ended.** The library writes it with a plain `open(path, "w")`, while
+        constructing (pairing) or when the art channel's first message carries a
+        token, so it takes the umask's mode: world-readable on the Pi's default.
+        `UMask=0077` in the unit closes that on the Pi from the file's creation;
+        this covers a run outside the unit and a file an older Player left.
+        """
         if self._art is not None:
             return
+        try:
+            await self._connect()
+        finally:
+            self._keep_the_token_private()
 
+    def _keep_the_token_private(self) -> None:
+        """Owner read and write only, if the file exists.
+
+        **Never created here.** The library reads a missing file and an empty one
+        differently: the pairing URL carries `token=None` for one and `token=`
+        for the other, and how the set takes the second has never been tried.
+        """
+        try:
+            self._token_file.chmod(0o600)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            log.warning(
+                "the television's token file could not be made private to this account (%s); "
+                "anyone who can read it can drive the set's art channel",
+                type(exc).__name__,
+                extra={"event": "tv.token_file_open", "tv_token_file": str(self._token_file)},
+            )
+
+    async def _connect(self) -> None:
         try:
             art = await asyncio.to_thread(self._construct)
         except _LIBRARY_FAILURES as exc:

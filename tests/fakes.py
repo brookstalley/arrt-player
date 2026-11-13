@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
+from arrt_player.ddc import BRIGHTNESS, NoAnswer, Reading, Unsupported
 from arrt_player.panel import (
     Extent,
     Geometry,
@@ -518,3 +519,49 @@ def drm_tree(root: Path, connectors: dict[str, tuple[str, str]]) -> Path:
         (connector / "status").write_text(status + "\n")
         (connector / "modes").write_text(modes)
     return root
+
+
+class FakeMonitor:
+    """A monitor's DDC/CI, behind `ddc.DdcBus`: brightness on its own scale, and the ways it fails.
+
+    Fails where the real exchange fails: `unsupported` answers as a monitor with
+    no brightness control does, `silent` as nothing acknowledging the address
+    does, and `fails` as a fault of the host. `ignores_writes` models the
+    monitor that takes a set and keeps its old value, which only a read-back
+    reveals.
+    """
+
+    def __init__(self, *, current: int = 10, maximum: int = 100) -> None:
+        self.current = current
+        self.maximum = maximum
+        self.unsupported = False
+        self.silent = False
+        self.fails: Exception | None = None
+        self.ignores_writes = False
+        self.reads = 0
+        self.writes: list[int] = []
+        self.closed = 0
+
+    def read(self, code: int) -> Reading:
+        self._answer()
+        self.reads += 1
+        if self.unsupported or code != BRIGHTNESS:
+            raise Unsupported(f"the monitor does not support feature 0x{code:02x}")
+        if self.silent:
+            raise NoAnswer("nothing answers at the display's address")
+        return Reading(current=self.current, maximum=self.maximum)
+
+    def write(self, code: int, value: int) -> None:
+        self._answer()
+        if self.silent:
+            raise NoAnswer("nothing answers at the display's address")
+        self.writes.append(value)
+        if not self.ignores_writes:
+            self.current = value
+
+    def close(self) -> None:
+        self.closed += 1
+
+    def _answer(self) -> None:
+        if self.fails is not None:
+            raise self.fails

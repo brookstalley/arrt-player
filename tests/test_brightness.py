@@ -4,6 +4,7 @@ Time is a parameter to every function here, so a December dusk is a test rather
 than a wait.
 """
 
+import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -49,6 +50,32 @@ class TestTheCurve:
 
         assert max(angles) == pytest.approx(23.44, abs=0.05)
         assert min(angles) == pytest.approx(-23.44, abs=0.05)
+
+    @pytest.mark.parametrize(
+        ("latitude", "month", "why"),
+        [
+            (60.0, 6, "the sun never gets 12 degrees below the horizon"),
+            (70.0, 6, "the sun never sets"),
+            (70.0, 12, "the sun never rises"),
+        ],
+    )
+    def test_a_day_without_dawn_dusk_sunrise_or_sunset_still_has_a_brightness(self, latitude, month, why):
+        """astral raises on such a day, and the error crashed every wall that followed the sun."""
+        place = {**BOZEMAN, "latitude": latitude, "longitude": 0.0}
+        for hour in range(24):
+            state = sun_state(datetime(2026, month, 21, hour, tzinfo=UTC), **place)
+            assert state.relative_brightness >= 0, why
+
+    def test_on_a_white_night_the_lift_follows_the_suns_height(self):
+        """At 60° N on the solstice the sun is about 6.6° down at midnight: dark, with half the lift."""
+        place = {**BOZEMAN, "latitude": 60.0, "longitude": 0.0}
+        midnight = sun_state(datetime(2026, 6, 21, 0, 0, tzinfo=UTC), **place)
+        noon_ = sun_state(datetime(2026, 6, 21, 12, 0, tzinfo=UTC), **place)
+
+        assert -7.5 < midnight.solar_angle_degrees < -5.5
+        lift = 0.15 * (midnight.solar_angle_degrees + 12) / 12
+        assert midnight.relative_brightness == pytest.approx(lift)
+        assert noon_.relative_brightness == pytest.approx(math.sin(math.radians(noon_.solar_angle_degrees)) + 0.15)
 
     def test_a_naive_datetime_is_refused_rather_than_answered_for_the_wrong_hour(self):
         with pytest.raises(TypeError):
