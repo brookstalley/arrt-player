@@ -909,9 +909,9 @@ class TestTheTokenFileIsPrivate:
         await client.connect()
 
         assert not (tmp_path / "token_file").exists()
-        assert [r for r in caplog.records if getattr(r, "event", None) == "tv.token_file_open"] == [], (
-            "a set not yet paired is not a token file left open"
-        )
+        assert [
+            r for r in caplog.records if getattr(r, "event", None) == "tv.token_file_open"
+        ] == [], "a set not yet paired is not a token file left open"
 
     async def test_a_mode_it_cannot_set_is_said_and_the_set_still_connects(self, art: StubArt, tmp_path, monkeypatch, caplog):
         client = self._client(tmp_path)
