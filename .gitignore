@@ -49,3 +49,7 @@ token_file
 
 # Agent worktrees, created per subagent and removed with them.
 .claude/worktrees/
+
+# Prawduct session files
+.prawduct/.native-reviews/
+.prawduct/.pr-body.md
