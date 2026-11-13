@@ -8,24 +8,31 @@ log record.
 """
 
 import asyncio
+import base64
+import html
 import json
 import logging
 import os
 import signal
 import socket
 import stat
+from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from conftest import journal
 
 from arrt_player import __main__ as entry
-from arrt_player.client import player_name
+from arrt_player.client import OutputReport, player_name
 from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequired, UiSettings
+from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.settings_ui import auth, store
 from arrt_player.settings_ui import server as server_module
 from arrt_player.settings_ui.server import SECURITY_HEADERS, PageState, build
+from arrt_player.sources import Outcome
 
 CODE = "the-setup-code"
 PASSWORD = "correct horse battery"
@@ -80,7 +87,8 @@ class TestTheFile:
         [
             ("not json", "not JSON"),
             ("[]", "object"),
-            ('{"version": 2}', "version 2"),
+            ('{"version": 3}', "version 3"),
+            ('{"version": true}', "version True"),
             ('{"version": 1, "values": {"CACHE_DIR": "/elsewhere"}}', "CACHE_DIR"),
             ('{"version": 1, "values": {"SERVER_URL": 8770}}', "not text"),
             ('{"version": 1, "auth": {"password": 1}}', "not text"),
@@ -877,3 +885,301 @@ async def test_setup_mode_says_so_in_the_journal_and_names_the_page(monkeypatch,
     assert by_event["daemon.setup_mode"].missing == ["SERVER_URL"]
     listening = by_event["settings_page.listening"]
     assert (listening.bind, listening.port, listening.setup_mode) == ("127.0.0.1", port, True)
+
+
+# -- the slideshow ---------------------------------------------------------------------------
+
+DAY = 86400.0
+
+
+def a_cookie(expires_at: float | None, secret: str = "the-cookies-secret-part") -> str:  # noqa: S107 -- a test value
+    claims = {"sub": "t2_x"} if expires_at is None else {"exp": expires_at}
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"eyJhbGciOiJIUzI1NiJ9.{body}.{secret}"
+
+
+async def save_slideshow(client: TestClient, **fields: str):
+    """The whole form as the page draws it in slideshow mode."""
+    form = {
+        "server_url": "",
+        "client_token": "",
+        "player_name": "",
+        "player_mode": "slideshow",
+        "slideshow_url": "https://www.reddit.com/r/EarthPorn/top/?t=month",
+        "reddit_session": "",
+        "slideshow_min_seconds": "",
+        "slideshow_max_seconds": "",
+        "slideshow_output": "hdmi-a-1",
+        **fields,
+    }
+    return await post(client, "/settings", form)
+
+
+class TestTheSlideshowsSettings:
+    async def test_a_slideshow_is_saved_and_the_player_restarts_into_it(self, signed_in, cache_dir, restarts):
+        cookie = a_cookie(1_900_000_000)
+
+        response = await save_slideshow(signed_in, reddit_session=cookie, slideshow_min_seconds="20")
+        await settled()
+
+        assert response.status == 200
+        assert store.read(cache_dir).values == {
+            "PLAYER_MODE": "slideshow",
+            "SLIDESHOW_URL": "https://www.reddit.com/r/EarthPorn/top/?t=month",
+            "REDDIT_SESSION": cookie,
+            "SLIDESHOW_MIN_SECONDS": "20",
+            "SLIDESHOW_OUTPUT": "hdmi-a-1",
+        }
+        assert restarts.count == 1
+
+    async def test_the_cookie_is_never_in_a_page_and_its_name_is_dropped_if_pasted(self, signed_in, cache_dir, restarts, caplog):
+        cookie = a_cookie(1_900_000_000)
+
+        with caplog.at_level(logging.DEBUG):
+            saved = await save_slideshow(signed_in, reddit_session=f"reddit_session={cookie}")
+            shown = await signed_in.get("/")
+
+        assert store.read(cache_dir).values["REDDIT_SESSION"] == cookie
+        for response in (saved, shown):
+            assert "the-cookies-secret-part" not in await response.text()
+        assert "the-cookies-secret-part" not in journal(caplog)
+        assert "A cookie is set." in await shown.text()
+
+    async def test_an_empty_cookie_field_keeps_the_cookie(self, signed_in, cache_dir, restarts):
+        cookie = a_cookie(1_900_000_000)
+        await save_slideshow(signed_in, reddit_session=cookie)
+
+        await save_slideshow(signed_in, slideshow_min_seconds="45")
+
+        assert store.read(cache_dir).values["REDDIT_SESSION"] == cookie
+
+    async def test_a_form_without_the_slideshows_fields_leaves_them_as_they_are(self, signed_in, cache_dir, restarts):
+        await save_slideshow(signed_in, reddit_session=a_cookie(None))
+
+        await save(signed_in, player_name="Hall")
+
+        assert {"PLAYER_MODE", "SLIDESHOW_URL", "REDDIT_SESSION", "PLAYER_NAME"} <= set(store.read(cache_dir).values)
+
+    @pytest.mark.parametrize(
+        ("fields", "said"),
+        [
+            ({"slideshow_min_seconds": "90", "slideshow_max_seconds": "60"}, "not be more than the maximum"),
+            ({"slideshow_min_seconds": "2"}, "at least 5"),
+            ({"slideshow_max_seconds": "a minute"}, "numbers of seconds"),
+            ({"slideshow_url": "https://www.reddit.com/"}, "names no listing"),
+            ({"slideshow_url": "https://imgur.com/gallery/x"}, "reddit.com address"),
+            ({"reddit_session": "two words"}, "REDDIT_SESSION"),
+            ({"player_mode": "both"}, "PLAYER_MODE"),
+            ({"slideshow_output": "hdmi-a-1; reboot"}, "HDMI connector"),
+        ],
+    )
+    async def test_a_value_config_would_refuse_is_refused_here(self, signed_in, cache_dir, restarts, fields, said):
+        response = await save_slideshow(signed_in, **fields)
+        await settled()
+
+        assert response.status == 400
+        assert said in await response.text()
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0
+
+    async def test_a_new_minimum_is_judged_against_the_maximum_already_saved(self, signed_in, cache_dir, restarts):
+        await save_slideshow(signed_in, slideshow_max_seconds="40")
+
+        response = await save_slideshow(signed_in, slideshow_min_seconds="50", slideshow_max_seconds="40")
+        lone = await post(signed_in, "/settings", {"slideshow_min_seconds": "50"})
+
+        assert response.status == 400
+        assert lone.status == 400
+        assert "SLIDESHOW_MIN_SECONDS" not in store.read(cache_dir).values
+
+    async def test_a_pinned_cookie_is_neither_taken_nor_shown_but_its_expiry_is(
+        self, signed_in, state, cache_dir, restarts, clock
+    ):
+        state.ui = UiSettings(
+            cache_dir=state.ui.cache_dir,
+            bind=state.ui.bind,
+            port=state.ui.port,
+            pinned=frozenset({"REDDIT_SESSION"}),
+            pinned_session_expiry=clock.now + 3 * DAY,
+        )
+
+        await save_slideshow(signed_in, reddit_session=a_cookie(None, "another"))
+        text = await (await signed_in.get("/")).text()
+
+        assert "REDDIT_SESSION" not in store.read(cache_dir).values
+        assert "in 3 days" in text
+        assert 'id="reddit_session" type="password" name="reddit_session" value="" autocomplete="off" disabled' in text
+
+
+class TestTheCookiesExpiry:
+    @pytest.mark.parametrize(
+        ("days", "said", "warned"),
+        [
+            (20, "It expires on", False),
+            (14.5, "It expires on", False),
+            (13.5, "in 14 days", True),
+            (5, "in 5 days", True),
+            (0.2, "in 1 day.", True),
+            (-1, "it expired on", True),
+        ],
+    )
+    async def test_a_warning_inside_two_weeks_and_none_outside(self, signed_in, clock, restarts, days, said, warned):
+        await save_slideshow(signed_in, reddit_session=a_cookie(clock.now + days * DAY))
+
+        text = await (await signed_in.get("/")).text()
+
+        assert said in text
+        assert ("Expiring" in text) is warned
+        assert ("Paste a new one" in text) is warned
+
+    async def test_a_cookie_that_does_not_say_is_said_so_without_a_warning(self, signed_in, restarts):
+        await save_slideshow(signed_in, reddit_session=a_cookie(None))
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "It does not say when it expires." in text
+        assert "Expiring" not in text
+
+    async def test_no_cookie_is_said(self, signed_in):
+        assert "No cookie is set." in await (await signed_in.get("/")).text()
+
+
+class TestWhatTheSlideshowSays:
+    async def test_setup_mode_for_a_slideshow_says_nothing_is_shown(self, signed_in, state):
+        state.mode, state.missing = "slideshow", ("SLIDESHOW_URL", "REDDIT_SESSION")
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "SLIDESHOW_URL, REDDIT_SESSION not set when the Player started, so nothing is shown." in text
+        assert "no walls" not in text
+
+    @pytest.mark.parametrize(
+        ("outcome", "said"),
+        [
+            (Outcome.LISTED, "Reddit gave the listing."),
+            (Outcome.REFUSED, "Reddit refuses this listing even with a good cookie. Try its top listing instead"),
+            (Outcome.COOKIE_REJECTED, "Reddit no longer accepts the cookie. Paste a new one"),
+            (Outcome.RATE_LIMITED, "Reddit asked the Player to wait"),
+            (Outcome.UNREACHABLE, "Reddit could not be reached."),
+        ],
+    )
+    async def test_each_answer_from_reddit_is_said_in_its_own_words(self, signed_in, state, clock, outcome, said):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(outcome=outcome, answered_at=clock.now - 30, items=4)
+        others = [words for kind, words in TestWhatTheSlideshowSays.WORDS if kind is not outcome]
+
+        text = html.unescape(await (await signed_in.get("/")).text())
+
+        assert said in text
+        assert "30 s ago" in text
+        assert not any(other in text for other in others), "another outcome's words were drawn too"
+
+    WORDS: ClassVar = [
+        (Outcome.LISTED, "Reddit gave the listing."),
+        (Outcome.REFUSED, "refuses this listing"),
+        (Outcome.COOKIE_REJECTED, "no longer accepts the cookie"),
+        (Outcome.RATE_LIMITED, "asked the Player to wait"),
+        (Outcome.UNREACHABLE, "could not be reached"),
+    ]
+
+    async def test_a_listing_names_the_sites_that_gave_nothing(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(
+            outcome=Outcome.LISTED, items=87, unresolved=Counter({"gfycat.com": 3, "youtube.com": 2}), showing="A heron"
+        )
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "87 items to show. Posts with nothing playable, by site: gfycat.com 3, youtube.com 2." in text
+        assert "On screen: A heron" in text
+        assert "Running" in text
+        assert "a Reddit slideshow" in text
+
+    async def test_downloads_are_said_by_the_tier_that_gave_them(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(
+            outcome=Outcome.LISTED, items=47, downloaded=47, tiers=Counter({"reddit": 45, "host:imgur": 2}), failed=3
+        )
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "Downloaded since start: 47 (reddit 45, host:imgur 2)." in text
+        assert "3 would not download last time" in text
+
+    async def test_nothing_downloaded_and_nothing_failed_says_neither(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(outcome=Outcome.LISTED, items=4)
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "Downloaded since start" not in text
+        assert "would not download" not in text
+
+    async def test_a_cookie_claiming_an_impossible_expiry_still_draws_the_page(self, signed_in, restarts):
+        body = base64.urlsafe_b64encode(b'{"exp": 1e300}').decode().rstrip("=")
+        await save_slideshow(signed_in, reddit_session=f"eyJh.{body}.sig")
+
+        response = await signed_in.get("/")
+
+        assert response.status == 200
+        assert "It does not say when it expires." in await response.text()
+
+    async def test_what_would_stop_mpv_is_said_as_a_problem_and_absent_when_there_is_none(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(outcome=Outcome.LISTED, renderer_problems=("this account is not in group render",))
+        warned = await (await signed_in.get("/")).text()
+        state.slideshow = SlideshowStatus(outcome=Outcome.LISTED)
+        quiet = await (await signed_in.get("/")).text()
+
+        assert '<p class="note error" role="alert">The slideshow cannot draw: this account is not in group render.</p>' in warned
+        assert "cannot draw" not in quiet
+
+    async def test_an_outage_says_it_plays_on_from_what_was_listed(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(outcome=Outcome.UNREACHABLE, items=12)
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "Playing on from the 12 items already listed." in text
+
+    async def test_before_reddit_answers_it_says_it_is_waiting(self, signed_in, state):
+        state.missing = ()
+        state.slideshow = SlideshowStatus(items=5, from_saved=True)
+
+        text = await (await signed_in.get("/")).text()
+
+        assert "Reddit has not answered yet. Playing the 5 items saved from the last listing." in text
+
+    async def test_outside_a_slideshow_none_of_it_is_drawn(self, signed_in):
+        text = await (await signed_in.get("/")).text()
+
+        assert "Reddit has not answered" not in text
+        assert 'role="status"' not in text.split("Slideshow</h2>", 1)[1].split("</section>", 1)[0]
+
+    async def test_the_screens_on_offer_are_this_machines_hdmi_connectors_with_whether_one_is_connected(self, signed_in, state):
+        state.outputs = lambda: [
+            OutputReport("hdmi-a-1", "framebuffer", True, (3840, 2160)),
+            OutputReport("hdmi-a-2", "framebuffer", False, None),
+        ]
+
+        text = await (await signed_in.get("/")).text()
+
+        assert '<option value="hdmi-a-1" selected>hdmi-a-1 (a screen at 3840×2160)</option>' in text
+        assert '<option value="hdmi-a-2">hdmi-a-2 (no screen connected)</option>' in text
+
+    async def test_a_chosen_screen_this_machine_does_not_have_is_still_offered_and_named(self, signed_in, restarts):
+        await save_slideshow(signed_in, slideshow_output="hdmi-a-2")
+
+        text = await (await signed_in.get("/")).text()
+
+        assert '<option value="hdmi-a-2" selected>hdmi-a-2 (not found on this machine)</option>' in text
+
+    async def test_the_mode_the_player_is_set_to_is_the_one_checked(self, signed_in, restarts):
+        before = await (await signed_in.get("/")).text()
+        await save_slideshow(signed_in)
+        after = await (await signed_in.get("/")).text()
+
+        assert 'value="arrt" checked' in before
+        assert 'value="slideshow" checked' not in before
+        assert 'value="slideshow" checked' in after
+        assert 'value="arrt" checked' not in after

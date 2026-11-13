@@ -283,6 +283,70 @@ input {
   padding: var(--space-2) var(--space-3);
 }
 
+/* A choice among a few: drawn as a field is. */
+select {
+  min-height: var(--control-h);
+  width: 100%;
+  font: var(--text-md) / 1.4 var(--font-ui);
+  color: var(--text);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+}
+
+select:disabled {
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+/* The mode: two choices, each a radio with its words beside it. */
+fieldset.choices {
+  border: 0;
+  margin: 0 0 var(--space-4);
+  padding: 0;
+  max-width: 28rem;
+}
+
+fieldset.choices legend {
+  font-size: var(--text-sm);
+  color: var(--text-strong);
+  margin-bottom: var(--space-2);
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h);
+}
+
+.choice input {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+}
+
+/* Steps a person follows elsewhere (a browser's developer tools), kept folded. */
+details.steps {
+  max-width: 28rem;
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+details.steps summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+details.steps ol {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+}
+
 /* The token, typed once and never shown back. */
 input.secret {
   font-family: var(--font-mono);

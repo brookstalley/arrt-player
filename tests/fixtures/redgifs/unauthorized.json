@@ -1,0 +1,9 @@
+{
+ "body": {
+  "error": {
+   "code": "Unauthorized",
+   "description": "Could not authenticate your request."
+  }
+ },
+ "status": 401
+}

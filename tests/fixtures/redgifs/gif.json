@@ -1,0 +1,47 @@
+{
+ "body": {
+  "gif": {
+   "avgColor": "redacted",
+   "canBoost": false,
+   "contentType": null,
+   "createDate": 0,
+   "cta": null,
+   "description": "redacted",
+   "duration": 12.5,
+   "folders": null,
+   "gallery": null,
+   "hasAudio": false,
+   "height": 1280,
+   "hideHome": false,
+   "hideTrending": false,
+   "hls": true,
+   "id": "redactedgifid",
+   "likes": 0,
+   "niches": [],
+   "promoted": null,
+   "published": true,
+   "sexuality": [
+    "redacted"
+   ],
+   "tags": [
+    "redacted",
+    "redacted"
+   ],
+   "type": 1,
+   "urls": {
+    "hd": "https://media.redgifs.com/redactedHd.mp4",
+    "html": "https://www.redgifs.com/redactedHtml",
+    "poster": "https://media.redgifs.com/redactedPoster.jpg",
+    "sd": "https://media.redgifs.com/redactedSd.mp4",
+    "silent": "https://media.redgifs.com/redactedSilent.mp4",
+    "thumbnail": "https://media.redgifs.com/redactedThumbnail.jpg"
+   },
+   "userName": "redacted",
+   "verified": false,
+   "views": 0,
+   "width": 720
+  },
+  "niches": []
+ },
+ "status": 200
+}

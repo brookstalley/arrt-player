@@ -26,7 +26,7 @@ USB-C power) by a micro-HDMI→HDMI cable.
 | `python3-kms++` (the Pi's packaged binding) | out | Built for the system Python (`python3 << 3.14`); the Player runs 3.14 from uv |
 | A display server (X, Wayland, a kiosk browser) | out | A desktop's worth of packages and a login session to draw one still picture |
 | The fbdev emulation (`/dev/fb0`) | out | Fixed at the console's mode, no hotplug, and deprecated on KMS drivers |
-| Atomic KMS with planes | not needed | Only a crossfade would need composition, and `clients.md` asks only "fitted to the screen" |
+| Atomic KMS with planes | not needed for stills | Only a crossfade would need composition, and `clients.md` asks only "fitted to the screen". Moving media does need planes, and gets them through mpv (§ mpv) |
 
 The `ctypes` structure layouts (`drmModeRes`, `drmModeConnector`,
 `drmModeModeInfo`, `drmModeEncoder`) and the dumb-buffer ioctl numbers
@@ -80,6 +80,26 @@ not seen.
   (no `video` group, another program holding the card) raises, and the wall
   logs it, keeps rotating and tries again on every poll.
 
+## mpv: moving media in slideshow mode
+
+**Measured 2026-11-10** on the same Pi (kernel `6.18.34+rpt`, mpv 0.40 from
+trixie with Raspberry Pi's ffmpeg), on the LG at 4K, with the owner at the set.
+What `mpv.py` is built on; its options are `mpv.MPV_OPTIONS`.
+
+| Question | Observed |
+|---|---|
+| Does `kms.py`'s path do video? | Not tried: Python writing frames into a dumb buffer has neither the hardware decoder nor the display scaler. mpv has both |
+| Hardware-decoded 1080p H.264 shown at 4K | `--vo=gpu --gpu-context=drm --hwdec=v4l2m2m --gpu-hwdec-interop=drmprime-overlay --drm-drmprime-video-plane=primary --drm-draw-plane=overlay`: **0 dropped frames and 0 failed commits over 20 s**, and the owner saw it play |
+| The same with the planes the other way round | **Every atomic commit failed (`EINVAL`) and nothing was shown, while mpv reported `hwdec=v4l2m2m` and 0 dropped frames.** mpv's own report is not evidence of a picture, so `MpvOutput` counts an item shown only when its file loaded and none of `mpv.FAILURE_LINES` arrived over the socket while it was up |
+| GPU-scaled to 4K instead | About a third of frames dropped |
+| What the service user needs | Group `render` for the GPU's render node, beside `video` for the card. `deploy/display.service` adds it; `mpv.renderer_problems` names its absence at start |
+| Running the screen at 1080p to spare the scaler | The LG puts up its own "not the recommended resolution" dialog over the picture. mpv keeps the first mode (4K) |
+| A probe that crashed | Left mpv running for five minutes, holding the card and the screen. Hence the pid file and `mpv.stop_stale` at the next start |
+| One mpv per card | Only one process can be DRM master, and both of a Pi 4's HDMI connectors are on one card, so one mpv drives one connector, and the slideshow has one output |
+
+**Inference, not measured:** a clip taller than 1080 lines may exceed what
+`v4l2m2m` decodes on a Pi 4. Not yet tested (§ Not observed).
+
 ## Controlling the monitor over the cable
 
 **Measured 2026-11-13** on the same Pi and the same LG, with the owner watching
@@ -116,5 +136,11 @@ is read from debugfs, never assumed: HDMI-A-1 is on `pixelvalve-2`, not
 - A screen changing to a different size while the Player runs (the test covers it
   with a double).
 - A 4K60 mode (`hdmi_enable_4kp60=1`); 4K30 is ample for a still picture.
+- **A redgifs HD clip taller than 1080 lines through mpv on the Pi**, which
+  decides whether `RedgifsResolver` should prefer `sd` over `hd`. Owed by the
+  slideshow plan's acceptance on the Pi.
+- **The whole slideshow on the Pi**: a listing played at 4K with captions on the
+  panel, and the mode switched both ways from the settings page. Also owed by
+  that acceptance.
 - How long the LG takes to reach standby once the signal stops, and whether
   DDC/CI still answers (brightness, input) while it is there.

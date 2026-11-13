@@ -554,3 +554,97 @@ async def test_the_api_check_selects_on_a_set_in_art_mode(api_check, monkeypatch
     await api_check.check_callbacks(art, api_check.Report(), "MY-F0001")
 
     assert art.selected == ["MY-F0001"]
+
+
+# -- mpv_check ---------------------------------------------------------------------------
+
+
+class ToolClock:
+    """The tool's own clock: a dwell passes as fast as it is checked, while mpv's messages still get a moment to arrive.
+
+    Only the tool's `time` is replaced. The renderer keeps the real one, because
+    its start-up and load deadlines are what the fake mpv answers within.
+    """
+
+    def __init__(self) -> None:
+        import time
+
+        self._real = time
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self._real.sleep(0.01)
+        self.now += seconds
+
+
+@pytest.fixture
+def mpv_check(monkeypatch):
+    """`mpv_check`, with its renderer pointed at the fake mpv and a fake card, since the suite has neither mpv nor a screen."""
+    import shutil
+    import tempfile
+    from functools import partial
+
+    from fakes import drm_tree
+
+    from arrt_player import mpv
+
+    monkeypatch.syspath_prepend(str(TOOLS))
+    monkeypatch.delitem(sys.modules, "mpv_check", raising=False)
+    import mpv_check as module
+
+    # Short, because a Unix socket path must fit in 104 bytes on macOS.
+    scratch = Path(tempfile.mkdtemp(prefix="mpvc-", dir="/tmp"))
+    drm = drm_tree(scratch / "drm", {"card1-HDMI-A-1": ("connected", "3840x2160\n")})
+    fake = Path(__file__).with_name("fake_mpv.py")
+    monkeypatch.setattr(
+        module,
+        "MpvOutput",
+        partial(mpv.MpvOutput, command=(sys.executable, str(fake)), drm_root=drm, dev_root=scratch / "dev"),
+    )
+    monkeypatch.setattr(module, "time", ToolClock())
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    monkeypatch.setenv("FAKE_MPV_BEHAVIOUR", "")
+    media = scratch / "media"
+    media.mkdir()
+    yield module, media
+    shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_mpv_check_puts_each_file_up_for_its_dwell_and_counts_the_shown(mpv_check, capsys, monkeypatch):
+    module, media = mpv_check
+    (media / "a.png").write_text("still")
+    (media / "b.mp4").write_text("2.0")
+    assert module.main(["--min", "5", "--max", "10", str(media / "a.png"), str(media / "b.mp4")]) == 0
+    out = capsys.readouterr().out
+    assert "a.png (still) for 5.0 s" in out
+    assert "b.mp4 (2.00 s clip) for 6.0 s" in out, "three plays of a 2 s clip reach a 5 s minimum"
+    assert "2 of 2 shown" in out
+
+
+def test_mpv_check_says_which_item_was_lost_and_exits_non_zero(mpv_check, capsys, monkeypatch):
+    module, media = mpv_check
+    monkeypatch.setenv("FAKE_MPV_BEHAVIOUR", "commit_fail")
+    (media / "b.mp4").write_text("30.0")
+    assert module.main(["--min", "5", "--max", "10", str(media / "b.mp4")]) == 1
+    out = capsys.readouterr().out
+    assert "LOST       b.mp4: Failed to commit atomic request" in out
+    assert "0 of 1 shown" in out
+
+
+def test_mpv_check_refuses_files_from_two_directories(mpv_check, capsys):
+    module, media = mpv_check
+    (media / "sub").mkdir()
+    (media / "a.png").write_text("still")
+    (media / "sub" / "b.png").write_text("still")
+    assert module.main([str(media / "a.png"), str(media / "sub" / "b.png")]) == 2
+    assert "one directory" in capsys.readouterr().err
+
+
+def test_mpv_check_refuses_limits_the_page_would_refuse(mpv_check, capsys):
+    module, media = mpv_check
+    (media / "a.png").write_text("still")
+    assert module.main(["--min", "20", "--max", "10", str(media / "a.png")]) == 2
+    assert "not be more than the maximum" in capsys.readouterr().err

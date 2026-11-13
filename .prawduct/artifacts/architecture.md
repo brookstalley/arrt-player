@@ -45,6 +45,8 @@ sides share, are Arrt's:
 | The Frame (Samsung television) | on the LAN | the household's | No: a device |
 | HDMI screens | on the Pi's connectors | the household's | No: a device |
 | E-paper panel | on the Pi's SPI bus | powered with the Pi | No: a device |
+| mpv (slideshow mode) | a child process of the Player, in its own process group | started on the first draw, stopped on every way out (`mpv.MpvOutput`) | Run by the Player; not our code |
+| Reddit, redgifs, and any host a post links (slideshow mode) | the internet | theirs | No: services |
 
 ```
                      HTTP (aiohttp), Bearer CLIENT_TOKEN
@@ -61,6 +63,22 @@ sides share, are Arrt's:
                                                                └── SPI + GPIO ────────> e-paper panel (omni_epd)
 ```
 
+**Two modes, never both** (`PLAYER_MODE`: `arrt`, the default, or
+`slideshow`; `config.PLAYER_MODES`). Everything above is **Arrt mode**.
+**Slideshow mode** needs no Arrt server: `__main__._run` hands a
+`SlideshowSettings` to `run_slideshow`, which plays one Reddit listing on one
+HDMI connector through mpv and captions each post on the panel. It has no
+supervisor, no client document, no pull and no heartbeat; the settings page and
+the panel are the parts the two modes share.
+
+```
+   www.reddit.com, api.redgifs.com  <── listing and API calls (cookie to Reddit only) ──┐
+   any public host a post links     <── media downloads, public addresses only ─────────┤ sources/fetch.py
+                                                                                         │
+              CACHE_DIR/.slideshow/ <── reads/writes ─── Player process ─── JSON IPC ──> mpv ── DRM ──> HDMI
+                                                                        └── SPI + GPIO ──> e-paper panel
+```
+
 **Why the split.** The Player is a separate runtime from the server because it
 sits beside the walls and the server does not (Arrt's `re-architecture.md`). It
 is one process rather than one per wall so that several walls share one
@@ -70,11 +88,19 @@ module docstring).
 
 ## The process and its concurrency
 
-**One process, one event loop.** `__main__.main` calls `asyncio.run(_run())`;
-nothing in `src/` starts a second process or a second event loop. Searched:
-`grep -rn "subprocess\|multiprocessing\|new_event_loop" src/` returns nothing.
+**One process, one event loop, and in slideshow mode one child.**
+`__main__.main` calls `asyncio.run(_run())`; nothing in `src/` starts a second
+event loop. The one other process is mpv, which `mpv.MpvOutput._start` runs with
+`subprocess.Popen` in its own process group and which the Player owns for its
+whole life: stopped by group on every way out, its pid kept in
+`CACHE_DIR/.mpv/` so one left by a Player killed outright is stopped at the next
+start (`mpv.stop_stale`, which checks the pid's command line names this
+directory's socket before stopping it, since pids are reused). `mpv.py` also runs
+`ps` once for that check. Searched 2026-11-11:
+`grep -rn "subprocess\|multiprocessing\|new_event_loop" src/` finds only
+`mpv.py`.
 
-**The task tree.** All tasks are created by `asyncio.create_task` at six sites
+**The task tree.** Every `asyncio.create_task` in `src/`
 (`grep -rn create_task src/`):
 
 | Task | Created by | Runs | Lives |
@@ -85,6 +111,10 @@ nothing in `src/` starts a second process or a second event loop. Searched:
 | `pull:<wall_id>`, `stop:<wall_id>` | `__main__._beside_its_pull` | `pull.Pull.run` beside the wall loop, and a relay of the supervisor's stop | with their wall's worker |
 | `label:<output>` | `Supervisor._start_label` | `_keep_running` around `__main__.run_label` → `label_renderer.LabelRenderer.run` | while the label output is mapped |
 | `compose:<wall_id>:<work_id>` | `programmes/schedule.py:Schedule._start` | composing one work for this wall's geometry, on a thread | one composition |
+| `settings-page` (slideshow mode) | `__main__.run_slideshow`, beside the programme | as in Arrt mode | the process |
+| `slideshow-listing` | `programmes/slideshow.py:Slideshow` | one read of the listing, every `REFRESH_S` (600 s), or `FAILED_REFRESH_S` (120 s) or Reddit's own retry-after after a failure; taken between items | one read |
+| `slideshow-fill` | `Slideshow.run` | `MediaCache.fill`: downloads from the play position onward, after each listing taken or when nothing is ready | the programme |
+| `slideshow-caption` | `Slideshow` | one label draw for the post on screen | one draw |
 
 Inside a wall worker, `wall.Wall.run` is the loop: `Wall.tick` reads the cached
 manifest (`manifest.Watcher.poll`), asks the programme
@@ -107,6 +137,11 @@ is chosen by `__main__.run_wall` on the output's kind.
 - `tv/samsung.py:SamsungTv.connect`: the library's constructor, which blocks on
   `get_token()`.
 - `programmes/schedule.py`: composing a picture with Pillow.
+- `programmes/slideshow.py`: every call into the screen (`MpvOutput.load`,
+  `check`, `close`), each of which waits on mpv's socket with a timeout.
+  `MpvOutput._lock` keeps two threads from interleaving commands on that socket.
+- `settings_ui/server.py`: scrypt for the page's password (tenths of a second
+  and 16 MiB on a Pi).
 
 The heartbeat write (`heartbeat.write`) stays on the loop on purpose: a few
 hundred bytes and one `fsync` a minute (its docstring).
@@ -169,6 +204,15 @@ is that walk's output, not a recollection.
 | `settings_ui/auth` | The page's password hash, session cookie, setup code and throttle | — |
 | `settings_ui/server` | The settings page (`aiohttp.web`); the Player's one listening socket | `config`, `settings_ui.auth`, `settings_ui.store` |
 | `brightness` | Sun-angle brightness (astral), for the Frame and the HDMI screens | — |
+| `programmes/slideshow` | Slideshow mode's programme: the listing on its own task, the cache filled on another, playback from what is cached, the caption; the saved listing | `dwell`, `episodes`, `label_rule`, `mpv`, `programmes.slideshow_status`, `sources`, `sources.cache` |
+| `programmes/slideshow_status` | What the settings page shows of a running slideshow | `sources` |
+| `dwell` | How long an item stays up: a still for the minimum, a clip repeated to reach it and cut at the maximum | — |
+| `mpv` | `MpvOutput`, an HDMI connector through an mpv this process runs; `renderer_problems`, `stop_stale` | `client`, `episodes`, `kms` |
+| `sources` | The source seam (`Item`, `Listing`, `Outcome`, `Kind`), so another source can replace Reddit | — |
+| `sources/fetch` | The slideshow's one HTTP client: API calls to `API_HOSTS`, media from public addresses only | `sources` |
+| `sources/reddit`, `sources/reddit_settings` | The Reddit listing read into items; the listing URL and cookie checks the page uses, with no network import | `sources`, `sources.fetch`, `sources.reddit_settings` |
+| `sources/cache` | `MediaCache`: the 2 GB media cache under `CACHE_DIR/.slideshow/` | `sources`, `sources.fetch` |
+| `sources/resolvers/*` | Per-host resolvers (redgifs HD, imgur) tried before Reddit's own copy | `sources`, `sources.fetch` |
 
 **Dependency direction, as the graph shows it.** `__main__` sits on top. Below it
 the Frame and screen drivers depend on `wall`, `programmes.schedule` and the
@@ -180,7 +224,7 @@ sideways rather than down: `kms` imports `client` (for `DRM_ROOT`,
 document parser).
 
 **Third-party imports by module** (same walk, stdlib excluded): `aiohttp` in
-`pull` only, and `aiohttp.web` (the server half) in `settings_ui/server` only; `samsungtvws`, `websockets` in `tv/samsung` only; `omni_epd` in
+`pull` and `sources/fetch` only (with `yarl` in the latter), and `aiohttp.web` (the server half) in `settings_ui/server` only; `samsungtvws`, `websockets` in `tv/samsung` only; `omni_epd` in
 `panel/epaper.open_panel` only, inside the function; `gi`, `cairo` in
 `panel/pango` only; `PIL` in `compose`, `kms`, `panel/epaper`; `astral` in
 `brightness`; `dotenv` in `config`. `arrt_contract` is imported by no module in
@@ -194,11 +238,19 @@ argument counted, followed transitively through repo-local files):
 
 - No module under `src/arrt_player` imports `arrt` or `arrt.*`
   (`test_no_display_module_reaches_the_curation_plane`).
-- No module but `pull.py` reaches an HTTP client (`aiohttp`, `httpx`,
-  `requests`, `urllib3`, `http.client`, `urllib.request`, `httplib2`,
-  `aiohttp_client_cache`), directly or through a helper
-  (`test_no_display_module_but_the_pull_opens_an_http_client`).
+- No module but `pull.py` and `sources/fetch.py` reaches an HTTP client
+  (`aiohttp`, `httpx`, `requests`, `urllib3`, `http.client`, `urllib.request`,
+  `httplib2`, `aiohttp_client_cache`), directly or through a helper
+  (`test_no_display_module_but_the_pull_and_the_slideshow_fetch_opens_an_http_client`).
   `samsungtvws` and `websockets` are deliberately not on the list.
+- `sources/fetch.py` is imported only from `sources/`, the slideshow programme
+  and `__main__` (`test_only_the_slideshow_imports_its_fetch`); its API calls go
+  only to `SLIDESHOW_API_HOSTS` (`test_the_slideshow_fetch_calls_only_its_api_hosts`);
+  it imports nothing that could tell it the server's address or token
+  (`test_the_slideshow_fetch_cannot_learn_the_server`). That its media downloads
+  reach public addresses only is held by `tests/test_fetch.py`.
+- mpv is handed files under the media cache, never a URL (`MpvOutput._refusal`),
+  so it cannot become a third network client.
 - `pull.py` is imported by `__main__.py` and nothing else
   (`test_only_the_entry_point_imports_the_pull`).
 - The one exception beside the pull: `settings_ui/server.py` may import
@@ -249,6 +301,10 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 | 9 | HDMI | `ioctl` on `/dev/dri/card*` through libdrm (`ctypes`) | Player → screen | blocking, on a thread | `kms.py`; `hdmi-output-findings.md` |
 | 10 | E-paper | SPI and GPIO through `omni_epd` | Player → panel | blocking, on a thread | `panel/epaper.py`; `platform-and-dependency-findings.md` § The e-paper panel |
 | 11 | Connector discovery | reads `/sys/class/drm` | kernel → Player | each client poll | `client.hdmi_outputs` |
+| 13 | Reddit listing and API | `GET` over https to `www.reddit.com`, `reddit_session` cookie as a header; no redirects followed | Reddit → Player | the listing task | foreign; `sources/reddit.py`, `sources/fetch.Fetcher.get_api` |
+| 14 | redgifs API | `GET` over https to `api.redgifs.com`, a temporary token taken without an account | redgifs → Player | per clip resolved | foreign; `sources/resolvers/redgifs.py` |
+| 15 | Media downloads | `GET` of any host a post links, public addresses only, checked at connect; up to `MAX_REDIRECTS` hops by hand; kept only if the bytes sniff as a picture or clip | host → Player | the fill task | `sources/fetch.Fetcher.download` |
+| 16 | mpv | JSON IPC over a Unix socket in `CACHE_DIR/.mpv/` | Player ↔ mpv | blocking, on a thread, each call with a timeout | `mpv.py`; `hdmi-output-findings.md` § mpv |
 | 12 | Settings page | HTTP served on `UI_BIND`:`UI_PORT` (default all interfaces, 8771), session cookie | owner's browser → Player | request/response | `settings_ui/server.py`; `security-model.md` § To the Player: the settings page |
 
 **Trust boundaries.** Channels 1–6 cross the LAN and carry `CLIENT_TOKEN` as a
@@ -260,6 +316,13 @@ document from the server is parsed and refused whole if it is malformed
 Channels 7–8 cross the LAN to a device that authenticates the Player by a token
 it issued, held in `TV_TOKEN_FILE` (default `CACHE_DIR/token_file`,
 `config._frame`). Arrt's `security-model.md` owns the server side.
+Channels 13–15 cross the internet in slideshow mode. The cookie goes to
+`www.reddit.com` and nowhere else: there is no cookie jar, media downloads carry
+none, and redirects are not followed on API calls. Channel 15 is the one where
+the far end is chosen by whoever posted: every address is checked at connection
+time to be public (`PublicOnlyResolver`), so a post linking the router cannot
+make the Player fetch from it (`sources/fetch.py` docstring;
+`security-model.md` § To Reddit: the session cookie).
 
 **Channel 5 is a file first.** The wall loop writes
 `CACHE_DIR/<wall_id>/display-heartbeat-<wall_id>.json` atomically
@@ -290,6 +353,10 @@ CACHE_DIR/
     composed/                  pictures composed for this display (config.COMPOSED_DIRNAME; Schedule)
     display-heartbeat-<wall_id>.json                         (heartbeat.HEARTBEAT_FILENAME_TEMPLATE; Wall._beat)
     display-state.sqlite       Frame walls only              (config.STATE_FILENAME; state.DisplayState)
+  .settings.json               the settings page's file, layout version 2 (settings_ui.store.SETTINGS_FILENAME)
+  .slideshow/<item_id>.<ext>   slideshow media, at most 2 GB (config.SLIDESHOW_MEDIA_DIRNAME; MediaCache)
+  .slideshow-listing.json      the last listing taken        (config.SLIDESHOW_LISTING_FILENAME; Slideshow._take)
+  .mpv/                        mpv's socket and pid          (config.MPV_RUNTIME_DIRNAME; MpvOutput)
 ```
 
 **Single writer per file.** Each file above has one writer, named in the
@@ -298,6 +365,14 @@ right-hand column. Two walls cannot share a directory: a wall id must match
 `ClientSettings.wall` raises `WallIdUnusable`, and the supervisor reports it and
 does not start the wall. The leading-dot rule is what keeps `.client.json` apart
 from every wall directory.
+
+**Slideshow mode's files** start with a dot, so no wall id can name them. A
+download is written beside its name and moved into place whole; one a crash left
+unfinished is removed at the next start (`MediaCache.__init__`). Files of posts
+no longer listed are deleted when a listing is taken. The settings file's layout
+is versioned: version 2 added the slideshow's keys, an older Player refuses it by
+name, and rolling back means deleting those keys and setting `version` to 1
+(`settings_ui/store.py` docstring; `deploy/README.md` § The slideshow).
 
 **Atomic writes.** `pull._write_atomically` for the client document, manifest,
 ETags and media; `heartbeat.write` for the heartbeat. Media are evicted only
@@ -343,6 +418,15 @@ is its test.
 | A panel draw hangs | The renderer stops waiting at 15 s; the gate stays shut until the thread returns | `LABEL_DRAW_BUDGET_SECONDS` |
 | Heartbeat file cannot be written | Said once; the wall is unaffected | `Wall._beat` |
 | Frame store from a newer Player | That wall is parked until a rollout | `__main__.run_frame_wall` |
+| Slideshow: Reddit gives no listing (refused, cookie rejected, rate limited, unreachable) | The last listing plays on from the cache; asked again later; the page says why | `FAILED_REFRESH_S` (120 s) or Reddit's retry-after; `Slideshow._take` |
+| Slideshow: Reddit lists nothing showable | Taken as no listing, not as "delete everything"; the cache plays on | `slideshow.listed_nothing` |
+| Slideshow: a restart while Reddit is down | The saved listing plays from the cache | `Slideshow.run`, `load_listing` |
+| Slideshow: a download fails | That item waits before being tried again; a run of unreachable items is taken as the network being down, and those are not held back | `RETRY_AFTER_S` (30 min), `UNREACHABLE_RUN` (3) |
+| Slideshow: a host resolver fails | The item keeps Reddit's own copy | `resolvers._fell_back` |
+| Slideshow: the media cache is full | The fill stops until the listing moves on | `CAP_BYTES` (2 GB), `MAX_FILE_BYTES` (200 MB) |
+| Slideshow: mpv missing, or the account not in `render` | Said once at start in the journal and on the page; the slideshow, page and label run on | `mpv.renderer_problems` |
+| Slideshow: mpv will not start, dies, or reports a failure line | That item is not shown; the next waits `NOT_SHOWN_PAUSE_S`; mpv is restarted with backoff | `RESTART_BACKOFF_SECONDS` (1 s doubling to 60 s), `START_TIMEOUT_SECONDS` 10, `LOAD_TIMEOUT_SECONDS` 15 |
+| Slideshow: a Player killed outright leaves mpv holding the screen | Stopped at the next start | `mpv.stop_stale` |
 | Disk full | Writes raise `OSError` inside the pull or the loop; each is the corresponding row above. Nothing checks free space ahead | — |
 
 **No unbounded queues.** Nothing in `src/` uses `asyncio.Queue` (searched). Work
@@ -365,6 +449,10 @@ that cannot proceed is retried on the next poll, not buffered.
 - **The Frame store is forward-refusing** (`StateSchemaTooNew`), and migrates
   forward on open (`DisplayState._widen`). Rolling back a Player across a store
   migration parks its Frame wall.
+- **System packages.** Slideshow mode needs mpv from the distribution (`apt-get
+  install --no-install-recommends mpv`) and the account in `render`
+  (`deploy/display.service`, `SupplementaryGroups`). Neither is in the lockfile;
+  `platform-and-dependency-findings.md` § mpv records the measured version.
 - **Settings retired by a release are refused by name** (`config.RETIRED_SETTINGS`),
   so an old `.env` fails at start rather than being half-read.
 
@@ -435,6 +523,18 @@ Decisions visible in the code, with where each is argued. New entries append.
 7. **The panel belongs to the client, not to a wall**: opened once per process
    and mapped by the server (`__main__.label_panel`; Arrt's
    `labels-and-surfaces.md`).
+8. **Slideshow mode is a second mode, not a second kind of wall** (owner,
+   2026-11-10): no server, one listing, one HDMI connector, never at the same
+   time as Arrt mode (`config` docstring; `build-plan-slideshow.md` § Goals).
+9. **Moving media goes through mpv, a process the Player owns**, not through
+   `kms.py`'s buffers, because only mpv has the Pi's hardware decoder and scaler
+   (`mpv.py` docstring; `hdmi-output-findings.md` § mpv). It is handed files,
+   never URLs, so it adds no network client.
+10. **A second HTTP client, bounded by what it can reach** (`sources/fetch.py`):
+    API calls to two named hosts, media from any public address, owner's
+    request 2026-11-10 (`tests/test_plane_isolation.py` docstring). It narrows
+    decision 3 rather than reversing it: the client cannot learn the server's
+    address or token.
 
 ## Discrepancies with Arrt's record
 

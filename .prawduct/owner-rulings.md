@@ -4,6 +4,13 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-13.** "let's push and deploy to the pi", then "yeah we need to get
+everything pushed to develop, released to main, then to the pi". The slideshow
+branch merges into develop, develop is released to main as v0.8.0, and the Pi is
+moved to that release. Chunk 05's Pi acceptance runs at that deploy, after the
+release rather than before the PR. Landed as the disposition of R-2 in review
+`rev-20261113T204743Z-fdd90287` and in `release-plan-v0.8.0.md`.
+
 **2026-11-11, later.** "yes to all of your recommednations", on the norm registry
 put to them in one batch. Confirmed: (A) the Enforcement table carried from Arrt on
 2026-10-26 is this repo's ratified registry, with Arrt's Direction sections as the

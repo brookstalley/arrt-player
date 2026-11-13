@@ -3,7 +3,7 @@
 The composition root, and the only module that knows a real television exists —
 everything above the seam is written against `TvClient`, so this is where the
 `samsungtvws` fork is named and where it stays. It is also the only module that
-imports the pull, which holds this plane's one HTTP client.
+imports the pull, which holds the HTTP client that talks to the Arrt server.
 
 **One process per client, one worker per wall** (`clients.md` § The Player). The
 supervisor (`client.Supervisor`) asks the server which walls this client drives
@@ -37,6 +37,14 @@ has both runs its walls and the page together, and a page that cannot bind its
 port costs the page and nothing else, because a wall never waits on its settings.
 Until a password is set the page needs the setup code minted here and printed with
 its address; it is new on every start and dies once a password is set.
+
+**In slideshow mode there is no server, supervisor or pull** (`run_slideshow`).
+One programme plays a Reddit listing on one HDMI screen through mpv and
+captions it on the panel, beside the same page. Its parts are composed in
+`slideshow_parts`, which is where the host resolvers are wired to both ends: the
+source, so a post only a resolver can play is listed, and the cache, so the
+resolver is asked first when the post is downloaded. This module and the
+programme are the only places outside `sources/` that import its network client.
 """
 
 import asyncio
@@ -51,7 +59,9 @@ from functools import partial
 from arrt_player import logs
 from arrt_player.client import FRAME_KIND, FrameIdentity, LabelAssignment, OutputReport, Supervisor, client_outputs
 from arrt_player.config import (
+    ARRT_MODE,
     PANEL_OUTPUT,
+    SLIDESHOW_MODE,
     ClientSettings,
     ConfigError,
     FrameSettings,
@@ -59,6 +69,7 @@ from arrt_player.config import (
     ScreenBrightnessSettings,
     Settings,
     SetupRequired,
+    SlideshowSettings,
     UiSettings,
     WallSettings,
     load,
@@ -71,10 +82,19 @@ from arrt_player.displays.screen_brightness import ScreenBrightness
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.manifest import Watcher
+from arrt_player.mpv import MpvOutput, renderer_problems
 from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
 from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
+from arrt_player.programmes.slideshow import Screen, Slideshow
+from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.pull import ClientPull, LabelPull, Pull
 from arrt_player.settings_ui import auth, server, store
+from arrt_player.sources.cache import MediaCache
+from arrt_player.sources.fetch import Fetcher
+from arrt_player.sources.reddit import RedditSource
+from arrt_player.sources.resolvers import Resolvers
+from arrt_player.sources.resolvers.imgur import ImgurResolver
+from arrt_player.sources.resolvers.redgifs import RedgifsResolver
 from arrt_player.state import DisplayState, StateSchemaTooNew
 from arrt_player.tv.samsung import SamsungTv
 from arrt_player.wall import Clock
@@ -320,13 +340,28 @@ def screen_brightness(
     clock: Clock,
 ) -> ScreenBrightness | None:
     """The screen's brightness on the sun over its connector's DDC/CI bus, or None with no location to follow."""
+    return _brightness_on(output, settings, clock, wall_id=wall.wall_id)
+
+
+def slideshow_brightness(settings: SlideshowSettings, clock: Clock) -> ScreenBrightness | None:
+    """The slideshow screen's brightness, as a wall's screen has it. Its journal lines carry `wall_id` "slideshow"."""
+    return _brightness_on(settings.output, settings.screen_brightness, clock, wall_id=SLIDESHOW_MODE)
+
+
+def _brightness_on(
+    output: str,
+    settings: ScreenBrightnessSettings | None,
+    clock: Clock,
+    *,
+    wall_id: str,
+) -> ScreenBrightness | None:
     if settings is None or not settings.active or settings.location is None:
         return None
     return ScreenBrightness(
         settings=settings,
         location=settings.location,
         output=output,
-        wall_id=wall.wall_id,
+        wall_id=wall_id,
         bus=lambda: screen_ddc(output),
         clock=clock,
     )
@@ -392,7 +427,13 @@ def _pull_ended(task: asyncio.Task[None], ending: asyncio.Event, wall_id: str) -
     ending.set()
 
 
-def settings_page(ui: UiSettings, *, missing: tuple[str, ...] = ()) -> server.PageState:
+def settings_page(
+    ui: UiSettings,
+    *,
+    missing: tuple[str, ...] = (),
+    mode: str = ARRT_MODE,
+    slideshow: SlideshowStatus | None = None,
+) -> server.PageState:
     """The page's state for this start, with a setup code when no password is set yet."""
     code = auth.new_setup_code() if store.read(ui.cache_dir).password is None else None
     return server.PageState(
@@ -402,7 +443,73 @@ def settings_page(ui: UiSettings, *, missing: tuple[str, ...] = ()) -> server.Pa
         throttle=auth.Throttle(monotonic=time.monotonic),
         restart=restart_this_process,
         missing=missing,
+        mode=mode,
+        slideshow=slideshow,
     )
+
+
+def slideshow_parts(settings: SlideshowSettings, fetcher: Fetcher) -> tuple[RedditSource, MediaCache]:
+    """The slideshow's source and cache, with the host resolvers wired to both.
+
+    **Both ends, or the resolvers do nothing useful.** Given only to the source,
+    a post that only a resolver can play is listed and has nothing to download;
+    given only to the cache, such a post is never listed, and every other post
+    still downloads Reddit's copy rather than the host's better one.
+    """
+    resolvers = Resolvers([RedgifsResolver(fetcher), ImgurResolver()])
+    source = RedditSource(settings.listing_url, fetcher, claims=resolvers.claims)
+    cache = MediaCache(settings.media_root, fetcher, candidates=resolvers.candidates)
+    return source, cache
+
+
+def slideshow_screen(settings: SlideshowSettings) -> Screen:
+    """The screen a slideshow draws on: its HDMI connector, through an mpv this process owns."""
+    return MpvOutput(settings.output, runtime_dir=settings.runtime_dir, media_root=settings.media_root)
+
+
+async def run_slideshow(
+    settings: SlideshowSettings,
+    ui: UiSettings,
+    stop: asyncio.Event,
+    *,
+    fetcher: Fetcher | None = None,
+    screen: Callable[[SlideshowSettings], Screen] = slideshow_screen,
+    problems: Callable[[], list[str]] = renderer_problems,
+    clock: Clock | None = None,
+) -> int:
+    """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped."""
+    log.info("starting a slideshow", extra={"event": "slideshow.starting", **settings.startup_lines()})
+    status = SlideshowStatus(renderer_problems=tuple(problems()))
+    for problem in status.renderer_problems:
+        # Said and played on: the page and the label still work, and a fix
+        # (installing mpv, adding the group) is picked up at the next start.
+        log.error(
+            "the slideshow cannot draw: %s",
+            problem,
+            extra={"event": "slideshow.renderer_unavailable", "reason": problem},
+        )
+    panel = label_panel(settings.panel)
+    page = asyncio.create_task(run_settings_page(settings_page(ui, slideshow=status), stop), name="settings-page")
+    try:
+        async with fetcher if fetcher is not None else Fetcher(cookie=settings.reddit_session) as client:
+            source, cache = slideshow_parts(settings, client)
+            programme = Slideshow(
+                source=source,
+                cache=cache,
+                screen=screen(settings),
+                limits=settings.limits,
+                captioner=panel,
+                brightness=slideshow_brightness(settings, clock if clock is not None else Clock.system()),
+                listing_path=settings.listing_path,
+                status=status,
+            )
+            await programme.run(stop)
+    finally:
+        if panel is not None:
+            panel.close()
+        stop.set()
+        await page
+    return 0
 
 
 def restart_this_process() -> None:
@@ -454,11 +561,16 @@ async def _run() -> int:
         settings = load()
     except SetupRequired as exc:
         log.warning(
-            "no server is configured, so only the settings page runs",
-            extra={"event": "daemon.setup_mode", "missing": list(exc.missing)},
+            "%s mode is missing %s, so only the settings page runs",
+            exc.mode,
+            ", ".join(exc.missing),
+            extra={"event": "daemon.setup_mode", "missing": list(exc.missing), "mode": exc.mode},
         )
-        served = await run_settings_page(settings_page(ui, missing=exc.missing), stop)
+        served = await run_settings_page(settings_page(ui, missing=exc.missing, mode=exc.mode), stop)
         return 0 if served else 1
+
+    if isinstance(settings, SlideshowSettings):
+        return await run_slideshow(settings, ui, stop)
 
     clock = Clock.system()
     identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None

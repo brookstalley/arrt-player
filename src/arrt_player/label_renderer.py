@@ -4,7 +4,7 @@
 output that `GET /client` maps (`client.Supervisor`), on whatever client holds
 the panel; the wall it captions may be shown by another client entirely. Every
 second the renderer asks for its label document (`pull.LabelPull`, through the
-one module allowed an HTTP client), applies the label rule (`label_rule.py`) at
+one module allowed to talk to the server), applies the label rule (`label_rule.py`) at
 its own clock, and redraws only when what the panel would show changes.
 
 **Two objects, because they live for different lengths of time.** `LabelPanel`

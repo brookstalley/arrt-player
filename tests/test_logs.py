@@ -7,8 +7,11 @@ somebody pastes into an issue, in a public repository, which is the thing this
 project's very first chunk existed to undo.
 """
 
+import ast
 import json
 import logging
+import pathlib
+from collections.abc import Iterator
 
 import pytest
 
@@ -134,3 +137,81 @@ class TestTheLineShape:
         logs.configure()
 
         assert someone_else in logging.getLogger().handlers
+
+
+_LEVELS = {"debug", "info", "warning", "error", "exception", "critical"}
+_SOURCE = pathlib.Path(logs.__file__).parent
+
+
+def _log_calls(tree: ast.Module) -> Iterator[ast.Call]:
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _LEVELS
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "log"
+        ):
+            yield node
+
+
+def _carries_an_event(call: ast.Call) -> bool:
+    for keyword in call.keywords:
+        if keyword.arg == "extra" and isinstance(keyword.value, ast.Dict):
+            return any(isinstance(key, ast.Constant) and key.value == "event" for key in keyword.value.keys)
+    return False
+
+
+_MODULES = sorted(_SOURCE.rglob("*.py"))
+
+
+class TestEveryLineIsFindableByItsEvent:
+    """A line whose event name lives only in its message is invisible to
+    `jq 'select(.event == ...)'`, the query the journal is shaped for, and it is
+    invisible silently: the line is still written, so nothing looks wrong until
+    somebody asks the journal a question and gets fewer answers than happened."""
+
+    def test_the_walk_reaches_the_source(self):
+        """The walk below passes vacuously over an empty tree or one with no
+        `log` calls, so it has to be seen reaching both."""
+        assert _SOURCE / "__main__.py" in _MODULES
+        assert sum(1 for module in _MODULES for _ in _log_calls(ast.parse(module.read_text()))) > 100
+
+    @pytest.mark.parametrize("module", _MODULES, ids=lambda path: str(path.relative_to(_SOURCE)))
+    def test_every_log_call_passes_its_event_as_a_field(self, module):
+        tree = ast.parse(module.read_text())
+
+        missing = [call.lineno for call in _log_calls(tree) if not _carries_an_event(call)]
+
+        assert missing == [], f"log calls with no `extra={{'event': ...}}` at lines {missing}"
+
+    @pytest.mark.parametrize("module", _MODULES, ids=lambda path: str(path.relative_to(_SOURCE)))
+    def test_nothing_logs_through_a_logger_the_walk_does_not_see(self, module):
+        """The walk above finds calls through the name `log`. A logger bound to
+        any other name and logged through would go unseen; one bound only to be
+        configured (`logs.configure` sets the root's handler) logs nothing."""
+        tree = ast.parse(module.read_text())
+        others = {
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "getLogger"
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id != "log"
+        }
+
+        logged_through = sorted(
+            {
+                node.func.value.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _LEVELS
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in others
+            }
+        )
+
+        assert logged_through == []

@@ -20,6 +20,13 @@ means it has none, and none of them are required.
 the server may map to any wall on any client; a client with a panel and no Frame
 is an ordinary client.
 
+**A Player runs in one of two modes, never both** (`PLAYER_MODE`, owner
+2026-11-10). In `arrt` mode it is the client described above. In `slideshow`
+mode it needs no server: it plays a Reddit listing on one HDMI screen and
+captions it on the label panel, and `load` returns `SlideshowSettings` instead.
+Each mode's own keys are required only in that mode, and lacking them is setup
+mode, not a refusal, because the page is how they get set.
+
 Resolution is a function rather than module-level constants, so importing this
 module does not require an environment — otherwise the test suite and every tool
 that merely wants to read a docstring would need one. Fail-fast is preserved by
@@ -49,8 +56,10 @@ from dotenv import load_dotenv
 # The heartbeat's own module owns what its file is called; this only reports it
 # in the startup line.
 from arrt_player.compose import Geometry, pixels_per_inch
+from arrt_player.dwell import DwellLimits, limits_problem
 from arrt_player.heartbeat import path_in as heartbeat_path_in
 from arrt_player.settings_ui import store as settings_store
+from arrt_player.sources.reddit_settings import clean_session, listing_url_problem, session_expiry, session_problem
 
 #: The Frame's own store, in the wall's directory beside the manifest it reads.
 #: The Frame worker is its sole writer and nothing else ever opens it.
@@ -227,6 +236,33 @@ DEFAULT_UI_PORT: Final[int] = 8771
 #: setup mode rather than refusing: the page is how they get set.
 SERVER_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN")
 
+#: The two modes. `arrt` is the default, so a Player configured before the
+#: slideshow existed runs as it did.
+ARRT_MODE: Final[str] = "arrt"
+SLIDESHOW_MODE: Final[str] = "slideshow"
+PLAYER_MODES: Final[tuple[str, ...]] = (ARRT_MODE, SLIDESHOW_MODE)
+
+#: The keys without which a slideshow has nothing to play. Missing either is setup mode.
+SLIDESHOW_REQUIRED_KEYS: Final[tuple[str, ...]] = ("SLIDESHOW_URL", "REDDIT_SESSION")
+
+#: The dwell limits when none are set. *Inferred*: the owner's own examples used
+#: these (a 2-minute clip shows for 60 s, an 18 s one plays twice).
+DEFAULT_SLIDESHOW_MIN_SECONDS: Final[float] = 30.0
+DEFAULT_SLIDESHOW_MAX_SECONDS: Final[float] = 60.0
+
+#: The connector a slideshow draws on when none is chosen: the first HDMI port,
+#: where the reference wall's screen is.
+DEFAULT_SLIDESHOW_OUTPUT: Final[str] = "hdmi-a-1"
+
+#: What an HDMI connector is called, as `client.hdmi_outputs` reports it.
+_HDMI_OUTPUT: Final = re.compile(r"hdmi-a-[1-9]")
+
+#: The slideshow's files, directly under `CACHE_DIR`, each under a leading dot so
+#: that no wall's directory can be named the same (`ClientSettings.wall`).
+SLIDESHOW_MEDIA_DIRNAME: Final[str] = ".slideshow"
+SLIDESHOW_LISTING_FILENAME: Final[str] = ".slideshow-listing.json"
+MPV_RUNTIME_DIRNAME: Final[str] = ".mpv"
+
 
 #: The longest name a Player may give itself. It is a label for a person, shown
 #: in the settings page's title and the startup line, not an identifier.
@@ -274,17 +310,43 @@ def player_name_problem(value: str) -> str | None:
     return None
 
 
+def player_mode_problem(value: str) -> str | None:
+    """Why `value` cannot be `PLAYER_MODE`, or None when it can. Empty is the default, `arrt`."""
+    if value and value not in PLAYER_MODES:
+        return f"PLAYER_MODE must be {' or '.join(PLAYER_MODES)}, not {value!r}."
+    return None
+
+
+def slideshow_output_problem(value: str) -> str | None:
+    """Why `value` cannot be `SLIDESHOW_OUTPUT`, or None when it can. Empty is the default, `hdmi-a-1`."""
+    if value and not _HDMI_OUTPUT.fullmatch(value):
+        return f"SLIDESHOW_OUTPUT must name an HDMI connector such as {DEFAULT_SLIDESHOW_OUTPUT}, not {value!r}."
+    return None
+
+
+def dwell_problem(minimum: str, maximum: str) -> str | None:
+    """Why these cannot be the slideshow's dwell limits, or None when they can. Empty is the default."""
+    try:
+        low = float(minimum) if minimum else DEFAULT_SLIDESHOW_MIN_SECONDS
+        high = float(maximum) if maximum else DEFAULT_SLIDESHOW_MAX_SECONDS
+    except ValueError:
+        return "SLIDESHOW_MIN_SECONDS and SLIDESHOW_MAX_SECONDS must be numbers of seconds."
+    said = limits_problem(low, high)
+    return None if said is None else f"Dwell: {said}."
+
+
 class SetupRequired(Exception):
-    """There is no server to pull from yet, so the Player serves only its settings page.
+    """There is nothing to play yet, so the Player serves only its settings page.
 
     **Not a `ConfigError`, deliberately.** That one exits 2 for systemd to restart
     until `.env` is fixed; this one starts the page that fixes it. Kept apart so
     a handler for one can never quietly take the other.
     """
 
-    def __init__(self, missing: tuple[str, ...]) -> None:
+    def __init__(self, missing: tuple[str, ...], mode: str = ARRT_MODE) -> None:
         super().__init__(f"{', '.join(missing)} not set")
         self.missing = missing
+        self.mode = mode
 
 
 @dataclass(frozen=True)
@@ -298,8 +360,12 @@ class UiSettings:
     #: wins over the page's file, so the page shows these read-only and says why.
     pinned: frozenset[str]
     #: What the environment sets the pinned keys to, for the page to show. Never
-    #: `CLIENT_TOKEN`'s value: the page says only whether one is set.
+    #: a secret's value (`CLIENT_TOKEN`, `REDDIT_SESSION`): the page says only
+    #: whether one is set.
     pinned_values: dict[str, str] = field(default_factory=dict)
+    #: When a `REDDIT_SESSION` the environment pins says it expires, so the page
+    #: can warn about a cookie it may not show.
+    pinned_session_expiry: float | None = None
 
     def startup_lines(self) -> dict[str, object]:
         return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned)}
@@ -673,13 +739,68 @@ class ClientSettings:
         }
 
 
+@dataclass(frozen=True)
+class SlideshowSettings:
+    """A Player in slideshow mode: one Reddit listing on one HDMI screen, captioned on the label panel.
+
+    No server, so none of `ClientSettings`' server keys. Its files are derived
+    from `CACHE_DIR`, as a wall's are, under names no wall's directory can take.
+    """
+
+    cache_dir: Path
+    #: As the person wrote it; `reddit_settings.listing_url` makes it the JSON listing.
+    listing_url: str
+    #: The `reddit_session` cookie's value. Kept out of `repr` and every startup
+    #: line, as the client token is, and sent only to `www.reddit.com`.
+    reddit_session: str = field(repr=False)
+    limits: DwellLimits
+    output: str
+    panel: PanelSettings
+    player_name: str = ""
+    #: The slideshow screen's brightness, read from the keys an Arrt-mode screen
+    #: reads; off with no location.
+    screen_brightness: ScreenBrightnessSettings = field(default_factory=lambda: ScreenBrightnessSettings(location=None))
+
+    @property
+    def media_root(self) -> Path:
+        """The media cache: the only directory mpv is handed files from."""
+        return self.cache_dir / SLIDESHOW_MEDIA_DIRNAME
+
+    @property
+    def listing_path(self) -> Path:
+        """The last listing Reddit gave, so a restart while Reddit is down still has captions to play."""
+        return self.cache_dir / SLIDESHOW_LISTING_FILENAME
+
+    @property
+    def runtime_dir(self) -> Path:
+        """mpv's socket and pid file."""
+        return self.cache_dir / MPV_RUNTIME_DIRNAME
+
+    def startup_lines(self) -> dict[str, object]:
+        """The slideshow's startup line. Never the cookie."""
+        return {
+            "mode": SLIDESHOW_MODE,
+            "listing": self.listing_url,
+            "dwell": f"{self.limits.minimum:g}-{self.limits.maximum:g} s",
+            "output": self.output,
+            "screen_brightness": self.screen_brightness.screen_brightness_line(),
+            "player_name": self.player_name or "(none — PLAYER_NAME is not set)",
+            "cache_dir": str(self.cache_dir),
+            "panel": self.panel.panel_lines(),
+        }
+
+
 def _fields_of(instance: object) -> dict[str, object]:
     """A dataclass's fields as keyword arguments, shallowly — `asdict` would copy the paths."""
     return {item.name: getattr(instance, item.name) for item in fields(instance)}  # type: ignore[arg-type]
 
 
-def load(environ: dict[str, str] | None = None) -> ClientSettings:
-    """Resolve the environment into `ClientSettings`, or refuse to start.
+def load(environ: dict[str, str] | None = None) -> ClientSettings | SlideshowSettings:
+    """Resolve the environment into the settings for its mode, or refuse to start.
+
+    `ClientSettings` in `arrt` mode, `SlideshowSettings` in `slideshow` mode.
+    Raises `SetupRequired` when the mode's own required keys are missing, and
+    `ConfigError` for a value that is set and unusable.
 
     `environ` is injectable so tests do not have to mutate the process's own — a
     test that set a value globally would leak it into every test after it.
@@ -693,6 +814,11 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
 
     cache_dir = _absolute(_require(env, "CACHE_DIR"), "CACHE_DIR")
     env = _beneath_the_environment(env, cache_dir)
+    mode = (env.get("PLAYER_MODE") or "").strip()
+    if said := player_mode_problem(mode):
+        raise ConfigError(said)
+    if mode == SLIDESHOW_MODE:
+        return _slideshow(env, cache_dir)
     missing = tuple(name for name in SERVER_KEYS if not env.get(name))
     if missing:
         raise SetupRequired(missing)
@@ -718,6 +844,53 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
     )
 
 
+def _slideshow(env: dict[str, str], cache_dir: Path) -> SlideshowSettings:
+    """Slideshow mode's settings. The server's keys are not read: there is no server."""
+    missing = tuple(name for name in SLIDESHOW_REQUIRED_KEYS if not env.get(name))
+    if missing:
+        raise SetupRequired(missing, mode=SLIDESHOW_MODE)
+    url = env["SLIDESHOW_URL"].strip()
+    session = clean_session(env["REDDIT_SESSION"])
+    output = (env.get("SLIDESHOW_OUTPUT") or "").strip()
+    minimum = (env.get("SLIDESHOW_MIN_SECONDS") or "").strip()
+    maximum = (env.get("SLIDESHOW_MAX_SECONDS") or "").strip()
+    name = (env.get("PLAYER_NAME") or "").strip()
+    for said in (
+        listing_url_problem(url),
+        session_problem(session),
+        slideshow_output_problem(output),
+        dwell_problem(minimum, maximum),
+        player_name_problem(name),
+    ):
+        if said:
+            raise ConfigError(said)
+    return SlideshowSettings(
+        cache_dir=cache_dir,
+        listing_url=url,
+        reddit_session=session,
+        limits=DwellLimits(
+            float(minimum) if minimum else DEFAULT_SLIDESHOW_MIN_SECONDS,
+            float(maximum) if maximum else DEFAULT_SLIDESHOW_MAX_SECONDS,
+        ),
+        output=output or DEFAULT_SLIDESHOW_OUTPUT,
+        panel=_panel(env),
+        player_name=name,
+        screen_brightness=_screen_brightness(env),
+    )
+
+
+#: How the page shows a pinned key, cleaned as `load` cleans it. Never a secret key's value.
+_PINNED_SHOWN: Final[dict[str, object]] = {
+    "SERVER_URL": lambda value: value.rstrip("/"),
+    "PLAYER_NAME": str.strip,
+    "PLAYER_MODE": str.strip,
+    "SLIDESHOW_URL": str.strip,
+    "SLIDESHOW_MIN_SECONDS": str.strip,
+    "SLIDESHOW_MAX_SECONDS": str.strip,
+    "SLIDESHOW_OUTPUT": str.strip,
+}
+
+
 def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
     """Where the settings page listens. Needs only `CACHE_DIR`, so it resolves in setup mode too.
 
@@ -738,11 +911,8 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
         port=port,
         pinned=frozenset(name for name in settings_store.MANAGED_KEYS if env.get(name)),
         # Cleaned as `load` cleans them, so the page shows the value the Player uses.
-        pinned_values={
-            name: clean(env[name])
-            for name, clean in (("SERVER_URL", lambda value: value.rstrip("/")), ("PLAYER_NAME", str.strip))
-            if env.get(name)
-        },
+        pinned_values={name: clean(env[name]) for name, clean in _PINNED_SHOWN.items() if env.get(name)},  # type: ignore[operator]
+        pinned_session_expiry=session_expiry(clean_session(env["REDDIT_SESSION"])) if env.get("REDDIT_SESSION") else None,
     )
 
 
