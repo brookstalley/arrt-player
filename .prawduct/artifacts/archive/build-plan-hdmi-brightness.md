@@ -22,7 +22,14 @@ governed_by:
       - "The Player never requires the server to be reachable → conforms: brightness is computed on the device from the clock and the location."
 partition: serial — 02 wires 01's bus into the screen display, and 03 deploys and accepts both on the Pi
 last_validated: 2026-11-13
+lifecycle: completed
+archived: 2026-11-13
+released_in: v0.7.0
+unbuilt_at_archive: 2 of 3 chunks not done (Chunk 01, Chunk 03) — the scope shipped, but this plan did not finish with it
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build plan: an HDMI screen's brightness follows the sun (#34)
 
