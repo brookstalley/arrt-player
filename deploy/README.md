@@ -349,14 +349,20 @@ The Player does not use ddcutil, which stays useful for looking by hand.
 **Check it worked:** the client's start line carries `screen_brightness`
 (`5 to 50 with the sun at <place>, every 300 s`), and the journal shows
 `screen.brightness_set` with `brightness` and `read_back` equal, once the wall
-is showing art. A monitor with no DDC/CI logs `screen.brightness_unsupported`
-once and is left alone. `screen.brightness_failed` naming `Permission denied`
+is showing art. A monitor with no brightness control logs
+`screen.brightness_unsupported` once and is left alone, and one where nothing
+answers on the bus logs `screen.brightness_no_answer` once and is asked again
+each interval. `screen.brightness_failed` naming `Permission denied`
 means the unit is not the one above (no `i2c` group). Naming `No such file`
 means `i2c-dev` is not loaded.
 
-**The way back** is the previous revision, or `SCREEN_MAX_BRIGHTNESS` and
-`SCREEN_MIN_BRIGHTNESS` both set to the level wanted, which holds the screen
-there. The group and the module file are harmless to leave.
+**A restart writes the curve's value**, as the Frame's does: a brightness set
+by hand stays until the sun moves the value or the Player restarts, whichever
+comes first.
+
+**The way back** is `SCREEN_BRIGHTNESS=off`, which leaves every screen at
+whatever it was set to, or the previous revision. The group and the module
+file are harmless to leave.
 
 ## The two new units, and where everything they name now lives
 

@@ -45,7 +45,7 @@ physical sizes, and the pictures drawn were the right size and colour.
 | Colour order and range | Owner, on a test pattern of greys 0/8/16/28/48/96/255 and a yellow block: black is black, 0, 8 and 16 distinct, yellow is yellow. The connector sends full-range RGB, 8 bpc (`broadcast_rgb=Automatic`, `is_limited_range=n` in debugfs) |
 | When the program exits | The kernel restores the text console: the owner saw art, then the login prompt. The Player must hold the device for its life, and a Player that has stopped shows the console on the wall |
 | Cable pulled, then pushed back (~24 s) | One kernel uevent per edge on `/devices/platform/gpu/drm/card1`, `ACTION=change HOTPLUG=1 CONNECTOR=35`; the sysfs `status` follows. The CRTC stayed enabled on the program's buffer throughout, and **the picture came back by itself** (owner) |
-| Brightness | DDC/CI answers on `/dev/i2c-20` (needs `i2c-dev` loaded, root): brightness 0–100 and contrast read and set with `ddcutil`; display mode (`0xDC`) unsupported. Set to 10 at the owner's request. Nothing in the Player does this, and nothing asks it to. The full set, and power, in § Controlling the monitor over the cable |
+| Brightness | DDC/CI answers on `/dev/i2c-20` (needs `i2c-dev` loaded, root): brightness 0–100 and contrast read and set with `ddcutil`; display mode (`0xDC`) unsupported. Set to 10 at the owner's request. Since #34 the Player sets brightness itself (`displays/screen_brightness.py`). The full set, and power, in § Controlling the monitor over the cable |
 
 ## A screen the Pi cannot see
 
@@ -83,9 +83,10 @@ not seen.
 ## Controlling the monitor over the cable
 
 **Measured 2026-11-13** on the same Pi and the same LG, with the owner watching
-the screen and the Player stopped (`systemctl stop`) for the power tests. Nothing
-in the Player does any of this, and nothing asks it to; it is the evidence a
-requirement would be written from.
+the screen and the Player stopped (`systemctl stop`) for the power tests. It was
+measured before the Player did any of it. Brightness was then built on it (#34,
+`displays/screen_brightness.py`, with its acceptance in the rows below), and
+power by signal is #35, not yet built.
 
 | Question | Observed |
 |---|---|

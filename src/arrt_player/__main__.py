@@ -320,7 +320,7 @@ def screen_brightness(
     clock: Clock,
 ) -> ScreenBrightness | None:
     """The screen's brightness on the sun over its connector's DDC/CI bus, or None with no location to follow."""
-    if settings is None or settings.location is None:
+    if settings is None or not settings.active or settings.location is None:
         return None
     return ScreenBrightness(
         settings=settings,
