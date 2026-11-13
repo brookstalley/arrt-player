@@ -100,6 +100,23 @@ What `mpv.py` is built on; its options are `mpv.MPV_OPTIONS`.
 **Inference, not measured:** a clip taller than 1080 lines may exceed what
 `v4l2m2m` decodes on a Pi 4. Not yet tested (§ Not observed).
 
+## The slideshow on the Pi: its acceptance
+
+**Measured 2026-11-13** on the same Pi and LG, at v0.8.0 (`054c373`), with the
+owner at the set, switching modes from the settings page. The listing was
+`https://www.reddit.com/r/cats/`. Times are UTC, from the journal.
+
+| Question | Observed |
+|---|---|
+| Arrt mode after the deploy | `client.wall_started` on hdmi-a-1 at 21:12:23, and `screen.brightness_set` 42, read back 42. The server showed the heartbeat with `problem` null, and the wall with `reads_feed` true |
+| Switching to the slideshow from the page | The save at 21:30:46 changed `PLAYER_MODE` alone, and the wall stopped. `slideshow.starting` came at 21:30:53 with dwell 30–120 s and the screen's brightness "5 to 80 with the sun at Bozeman" |
+| Reddit with the pasted cookie | `slideshow.reddit.listed` 267 items, with 2 unresolved (`self.cats`, text posts), 4 s after the start. The cache filled at once, every item tier `reddit` |
+| The first post up | `mpv.started` at 21:31:00, then `slideshow.shown` at 21:31:03 (dwell 30 s), and `label.drawn` a second later. The owner: "yep looks great", at 4K with the caption on the panel |
+| The slideshow screen's brightness | `screen.brightness_set` 39, read back 39, with `wall_id` `slideshow`: the wiring from v0.8.0 on the real monitor |
+| Switching back from the page | The save at 21:32:28 changed `PLAYER_MODE` alone. `client.wall_started` came at 21:32:38, brightness 39 and the label drawn by 21:32:40. Afterwards, no mpv process was left running. No warning or error was logged across both switches |
+| The cookie as pasted | Issued 2026-11-08T19:09Z, `exp` 2027-05-08T19:09Z (read on the Pi, value never printed). Whether Reddit renews it is shown only if a later reading's `exp` is past 2027-05-08 |
+| Choosing the mode on the page | Two saves sent `player_mode=arrt` although the owner meant the slideshow. The one that took followed a click on the radio button itself. #46 |
+
 ## Controlling the monitor over the cable
 
 **Measured 2026-11-13** on the same Pi and the same LG, with the owner watching
@@ -137,10 +154,9 @@ is read from debugfs, never assumed: HDMI-A-1 is on `pixelvalve-2`, not
   with a double).
 - A 4K60 mode (`hdmi_enable_4kp60=1`); 4K30 is ample for a still picture.
 - **A redgifs HD clip taller than 1080 lines through mpv on the Pi**, which
-  decides whether `RedgifsResolver` should prefer `sd` over `hd`. Owed by the
-  slideshow plan's acceptance on the Pi.
-- **The whole slideshow on the Pi**: a listing played at 4K with captions on the
-  panel, and the mode switched both ways from the settings page. Also owed by
-  that acceptance.
+  decides whether `RedgifsResolver` should prefer `sd` over `hd`. The acceptance
+  listing had no redgifs posts, so it is still open: try a listing that has them.
+- **Whether Reddit renews the session cookie**: the next reading of the Pi's
+  copy, compared with the `exp` above.
 - How long the LG takes to reach standby once the signal stops, and whether
   DDC/CI still answers (brightness, input) while it is there.
