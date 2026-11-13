@@ -37,9 +37,8 @@ never both (backlog #27).
   cache plays on, and the page says why: listing refused, cookie rejected, rate
   limited or unreachable. The page also shows when the cookie expires.
 - **The settings file is now layout version 2**, which adds the slideshow's keys.
-- **Every log line is findable by its event field.** The source, cache and
-  resolvers wrote their event names into the message text, where a query on the
-  `event` field cannot see them. A test now walks every log call. Tests that
+- **Every log line is findable by its event field**, and a test walks every
+  log call to keep it so. Tests that
   check something is absent from the log now read the formatted journal line,
   fields included, through `conftest.journal`, so a secret in a field cannot
   slip past them.
