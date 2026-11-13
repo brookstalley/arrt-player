@@ -4,7 +4,7 @@ A wall's feed (manifest major 2) names each work's presentation master and is
 cached whole (`_adopt_feed` says why).
 
 **The only module in this plane that speaks HTTP**, and
-`tests/preferences/test_plane_isolation.py` holds it to that. It spells five
+`tests/test_plane_isolation.py` holds it to that. It spells five
 routes — the client document and the client heartbeat, a wall's manifest at
 each major it asks for, a wall's heartbeat, and a label's document — as
 `contract/routes.json` spells them. Masters are fetched
@@ -300,6 +300,13 @@ class Pull:
         if self._media_failing.end():
             log.info("renders for this wall arrive again", extra={"event": "pull.media_ok"})
         previous = self._cached_render_names()
+        # **The old ETag goes before the manifest it describes is replaced**, and
+        # a new one is written only after: an ETag left beside a manifest it
+        # does not describe gets a 304 if the server goes back to that ETag's
+        # document, and the wall keeps a feed the server no longer serves. In
+        # this order a crash between the writes leaves no ETag, which costs one
+        # full download.
+        (self._cache / ETAG_FILENAME).unlink(missing_ok=True)
         _write_atomically(self._cache / CACHED_MANIFEST_FILENAME, json.dumps(document, indent=2).encode("utf-8"))
         if served_etag:
             _write_atomically(self._cache / ETAG_FILENAME, served_etag.encode("utf-8"))
@@ -579,11 +586,11 @@ class ClientPull:
         # the process, and every restart would meet the same disk.
         try:
             self._document_path.parent.mkdir(parents=True, exist_ok=True)
+            # The old ETag goes first, for the reason `Pull._adopt_feed` gives.
+            self._etag_path.unlink(missing_ok=True)
             _write_atomically(self._document_path, text.encode("utf-8"))
             if served_etag:
                 _write_atomically(self._etag_path, served_etag.encode("utf-8"))
-            else:
-                self._etag_path.unlink(missing_ok=True)
         except OSError as exc:
             if self._uncacheable.begin():
                 log.error(  # noqa: TRY400 -- the message is the finding

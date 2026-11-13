@@ -1,6 +1,6 @@
 """The label: what it says, how it is arranged, and what it is drawn onto.
 
-**A display device renders its own label** (`architecture.md` § Direction). What
+**A display device renders its own label** (Arrt's `architecture.md` § Direction). What
 crosses from curation is text; everything about how that text is arranged and
 what it lands on is decided here, by the device that owns the surface. This
 package is that decision split into the parts the norm names — three tiers, and

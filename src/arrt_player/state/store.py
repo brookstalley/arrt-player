@@ -9,7 +9,7 @@ it, and losing it costs a re-upload rather than a curatorial record.
 
 Two things live here:
 
-* **`tv_binding`** — the work-to-content-id map, modelled in `data-model.md`
+* **`tv_binding`** — the work-to-content-id map, modelled in Arrt's `data-model.md`
   because it is the entity that carries the norm across the plane boundary.
 * **`daemon_state`** — which work the wall last showed, and whether the set's
   own slideshow has been switched off. Display-internal, never read by anything
@@ -232,7 +232,7 @@ class DisplayState:
         """Record that the television is holding this work's image, under this id.
 
         **`tv_thumb_md5` is modelled and nothing writes it**, which is stated here
-        rather than left to be discovered from a column of nulls. `data-model.md`
+        rather than left to be discovered from a column of nulls. Arrt's `data-model.md`
         gives it as "used to re-match after the TV loses or renames content", and
         re-matching as built does not need it: a binding whose id the set stops
         listing is marked orphaned and uploaded again, which costs one transfer

@@ -38,9 +38,11 @@ shorter side.
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -48,6 +50,7 @@ from dotenv import load_dotenv
 # in the startup line.
 from arrt_player.compose import Geometry, pixels_per_inch
 from arrt_player.heartbeat import path_in as heartbeat_path_in
+from arrt_player.settings_ui import store as settings_store
 
 #: The Frame's own store, in the wall's directory beside the manifest it reads.
 #: The Frame worker is its sole writer and nothing else ever opens it.
@@ -77,7 +80,7 @@ PANEL_OUTPUT: Final[str] = "epd-0"
 
 #: How often a label renderer asks the server for its label document. **The
 #: label's latency budget is 15 s from a picture changing**
-#: (`nonfunctional-requirements.md`), and most of that is the panel's own redraw;
+#: (Arrt's `nonfunctional-requirements.md`), and most of that is the panel's own redraw;
 #: a one-second poll with an ETag costs a 304 a second.
 DEFAULT_LABEL_POLL_SECONDS: Final[float] = 1.0
 
@@ -144,6 +147,12 @@ DEFAULT_TV_MAX_BRIGHTNESS: Final[int] = 10
 #: so this interval costs a local calculation and no traffic.
 DEFAULT_BRIGHTNESS_INTERVAL_SECONDS: Final[float] = 300.0
 
+#: An HDMI monitor's brightness at night and in full daylight, on the monitor's
+#: own DDC/CI scale (0 to the maximum it reports, which is 100 on the reference
+#: LG). The owner's numbers for the office monitor (2026-11-13).
+DEFAULT_SCREEN_MIN_BRIGHTNESS: Final[int] = 5
+DEFAULT_SCREEN_MAX_BRIGHTNESS: Final[int] = 50
+
 #: The wait for the set's `image_added` acknowledgement. **A correctness value,
 #: not a tuning knob**: the library's own default of 10 seconds was measured
 #: failing on this deployment's 4K composites while the image landed anyway, so a
@@ -163,7 +172,7 @@ DEFAULT_TV_CONNECT_TIMEOUT_SECONDS: Final[float] = 30.0
 #: **A television that is reachable and refuses one image is a different fault
 #: from one that is asleep**, and it does not back off with the connection: the
 #: pass would otherwise retry it every second, each attempt costing a round trip,
-#: a WARNING and a row rewritten. `observability-strategy.md` sizes writes on this
+#: a WARNING and a row rewritten. Arrt's `observability-strategy.md` sizes writes on this
 #: medium deliberately, and an unbounded small-write source on an SD card is the
 #: thing it says not to build. Wall time rather than elapsed, so the wait survives
 #: a restart — a crash loop must not turn into a retry loop.
@@ -206,8 +215,94 @@ DEFAULT_MAT_WIDTH_INCHES: Final[float] = 1.5
 DEFAULT_MAT_BOTTOM_WEIGHT: Final[float] = 1.15
 
 
+#: Where the settings page listens. Every interface, because the page is used
+#: from another machine on the LAN; `UI_BIND` narrows it (to `127.0.0.1` behind an
+#: ssh tunnel, say). Read from the environment only, never from the page: a page
+#: that could move its own address could lock its user out.
+DEFAULT_UI_BIND: Final[str] = "0.0.0.0"  # noqa: S104 -- the page is reached from another machine; UI_BIND narrows it
+#: Beside the server's 8770, and distinct from it, so one host can run both.
+DEFAULT_UI_PORT: Final[int] = 8771
+
+#: The keys without which there is no server to pull from. Missing either starts
+#: setup mode rather than refusing: the page is how they get set.
+SERVER_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN")
+
+
+#: The longest name a Player may give itself. It is a label for a person, shown
+#: in the settings page's title and the startup line, not an identifier.
+MAXIMUM_PLAYER_NAME_LENGTH: Final[int] = 64
+
+
 class ConfigError(RuntimeError):
     """A deployment value is missing or unusable, and starting would be worse."""
+
+
+def server_url_problem(value: str) -> str | None:
+    """Why `value` cannot be `SERVER_URL`, or None when it can.
+
+    **No credentials in it.** `SERVER_URL` is logged at start, so a password
+    written into it as userinfo would reach the journal; the token travels in a
+    header, never in the address.
+    """
+    try:
+        parts = urlsplit(value)
+        _ = parts.port  # reading it is what raises on a port that is not a number
+    except ValueError as exc:
+        return f"SERVER_URL is not an address ({exc})."
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        return "SERVER_URL must be an http:// or https:// address with a host, e.g. http://arrt.local:8770."
+    if parts.username is not None or parts.password is not None:
+        return "SERVER_URL must not carry a user name or password; it is logged, and the token is sent separately."
+    if parts.query or parts.fragment:
+        return "SERVER_URL must not carry a query or a fragment."
+    return None
+
+
+def client_token_problem(value: str) -> str | None:
+    """Why `value` cannot be `CLIENT_TOKEN`, or None when it can. It goes into a header, so no whitespace."""
+    if not value or any(character.isspace() for character in value):
+        return "CLIENT_TOKEN must be the token as issued, with no spaces or line breaks."
+    return None
+
+
+def player_name_problem(value: str) -> str | None:
+    """Why `value` cannot be `PLAYER_NAME`, or None when it can. Empty is allowed: no name."""
+    if len(value) > MAXIMUM_PLAYER_NAME_LENGTH:
+        return f"PLAYER_NAME must be at most {MAXIMUM_PLAYER_NAME_LENGTH} characters."
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        return "PLAYER_NAME must be plain text, with no control characters."
+    return None
+
+
+class SetupRequired(Exception):
+    """There is no server to pull from yet, so the Player serves only its settings page.
+
+    **Not a `ConfigError`, deliberately.** That one exits 2 for systemd to restart
+    until `.env` is fixed; this one starts the page that fixes it. Kept apart so
+    a handler for one can never quietly take the other.
+    """
+
+    def __init__(self, missing: tuple[str, ...]) -> None:
+        super().__init__(f"{', '.join(missing)} not set")
+        self.missing = missing
+
+
+@dataclass(frozen=True)
+class UiSettings:
+    """Where the settings page listens, and what it may and may not change."""
+
+    cache_dir: Path
+    bind: str
+    port: int
+    #: The page-managed keys the environment (or `.env`) sets. The environment
+    #: wins over the page's file, so the page shows these read-only and says why.
+    pinned: frozenset[str]
+    #: What the environment sets the pinned keys to, for the page to show. Never
+    #: `CLIENT_TOKEN`'s value: the page says only whether one is set.
+    pinned_values: dict[str, str] = field(default_factory=dict)
+
+    def startup_lines(self) -> dict[str, object]:
+        return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned)}
 
 
 class WallIdUnusable(ValueError):
@@ -351,7 +446,7 @@ class PanelSettings:
 
     #: omni-epd's identifier for this device's panel, or empty for a device that
     #: has none. **Empty is a supported deployment, not a broken one**
-    #: (`architecture.md` § Direction): a wall whose device drives a television
+    #: (Arrt's `architecture.md` § Direction): a wall whose device drives a television
     #: and nothing else is exactly what most of them are, and it must not be
     #: reported as a fault. `omni_epd.mock` drives the library's own no-op device
     #: on a machine where the panel is absent but the driver is installed.
@@ -371,7 +466,7 @@ class PanelSettings:
     def panel_lines(self) -> dict[str, object]:
         """The panel's part of the client's startup line.
 
-        This plane's own panel geometry, per `operational-spec.md`
+        This plane's own panel geometry, per Arrt's `operational-spec.md`
         § Configuration — a wrong panel otherwise shows up as a label that renders
         off the edge of a display nobody is looking at closely.
         """
@@ -389,6 +484,16 @@ class PanelSettings:
             # only one of them is worth acting on.
             "epd_device": self.epd_device or "(none — this device renders no label)",
         }
+
+
+@dataclass(frozen=True)
+class Location:
+    """Where the sun is seen from: the Frame's brightness and a screen's both follow it."""
+
+    latitude: float
+    longitude: float
+    name: str
+    region: str
 
 
 @dataclass(frozen=True)
@@ -424,6 +529,10 @@ class FrameSettings:
     tv_panel_width_px: int
     tv_panel_height_px: int
     tv_panel_diagonal_inches: float
+
+    @property
+    def location(self) -> Location:
+        return Location(latitude=self.latitude, longitude=self.longitude, name=self.location_name, region=self.location_region)
 
     def frame_lines(self) -> dict[str, object]:
         """The Frame's part of a startup line, so a misconfiguration is one line away.
@@ -470,6 +579,35 @@ class Settings(WallSettings, FrameSettings):
 
 
 @dataclass(frozen=True)
+class ScreenBrightnessSettings:
+    """How an HDMI screen's brightness follows the sun, on every screen that answers DDC/CI.
+
+    **Off when no location is set**, and said in the start line: the sun is the
+    only thing brightness follows, and a guessed location would set it wrong at
+    every hour rather than not at all.
+    """
+
+    location: Location | None
+    minimum: int = DEFAULT_SCREEN_MIN_BRIGHTNESS
+    maximum: int = DEFAULT_SCREEN_MAX_BRIGHTNESS
+    interval_seconds: float = DEFAULT_BRIGHTNESS_INTERVAL_SECONDS
+    #: `SCREEN_BRIGHTNESS=off`: the screens are left alone even with a location,
+    #: which a client with a Frame must set for the Frame's own sake.
+    enabled: bool = True
+
+    @property
+    def active(self) -> bool:
+        return self.enabled and self.location is not None
+
+    def screen_brightness_line(self) -> str:
+        if not self.enabled:
+            return "off: SCREEN_BRIGHTNESS is off"
+        if self.location is None:
+            return "off: LATITUDE, LONGITUDE and LOCATION_NAME are not set"
+        return f"{self.minimum} to {self.maximum} with the sun at {self.location.name}, every {self.interval_seconds:g} s"
+
+
+@dataclass(frozen=True)
 class ClientSettings:
     """Everything this Player needs from its environment, resolved once."""
 
@@ -483,10 +621,16 @@ class ClientSettings:
     frame: FrameSettings | None
     #: The label panel; `epd_device` empty for a client that has none.
     panel: PanelSettings
+    #: This Player's own name, empty when none is set. **The server's name for
+    #: this client wins once there is one** (`client.player_name`): this is the
+    #: name of a Player not yet paired, or the fallback while the server is out.
+    player_name: str = ""
     client_poll_seconds: float = DEFAULT_CLIENT_POLL_SECONDS
     label_poll_seconds: float = DEFAULT_LABEL_POLL_SECONDS
     mat_width_inches: float = DEFAULT_MAT_WIDTH_INCHES
     mat_bottom_weight: float = DEFAULT_MAT_BOTTOM_WEIGHT
+    #: Brightness on the HDMI screens; off with no location.
+    screen_brightness: ScreenBrightnessSettings = field(default_factory=lambda: ScreenBrightnessSettings(location=None))
 
     @property
     def client_document_path(self) -> Path:
@@ -520,10 +664,12 @@ class ClientSettings:
         """The client's startup line. Never the token: a journal is what gets pasted into an issue."""
         return {
             "server_url": self.server_url,
+            "player_name": self.player_name or "(none — PLAYER_NAME is not set)",
             "cache_dir": str(self.cache_dir),
             "frame": self.frame.frame_lines() if self.frame is not None else "(none — TV_ADDRESS is not set)",
             "panel": self.panel.panel_lines(),
             "mat": f"{self.mat_width_inches} in, bottom x{self.mat_bottom_weight}",
+            "screen_brightness": self.screen_brightness.screen_brightness_line(),
         }
 
 
@@ -539,38 +685,105 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
     test that set a value globally would leak it into every test after it.
     """
     load_dotenv()
-    env = dict(os.environ) if environ is None else environ
+    env = dict(os.environ) if environ is None else dict(environ)
 
     for name, replaced_by in RETIRED_SETTINGS.items():
         if env.get(name):
             raise ConfigError(f"{name} is retired: {replaced_by}.")
 
     cache_dir = _absolute(_require(env, "CACHE_DIR"), "CACHE_DIR")
+    env = _beneath_the_environment(env, cache_dir)
+    missing = tuple(name for name in SERVER_KEYS if not env.get(name))
+    if missing:
+        raise SetupRequired(missing)
+    for name, problem in (
+        ("SERVER_URL", server_url_problem),
+        ("CLIENT_TOKEN", client_token_problem),
+        ("PLAYER_NAME", player_name_problem),
+    ):
+        said = problem(env.get(name, "").strip() if name == "PLAYER_NAME" else env[name])
+        if said:
+            raise ConfigError(said)
     return ClientSettings(
         server_url=_require(env, "SERVER_URL").rstrip("/"),
         client_token=_require(env, "CLIENT_TOKEN"),
+        player_name=(env.get("PLAYER_NAME") or "").strip(),
         cache_dir=cache_dir,
         poll_interval_seconds=_float(env, "MANIFEST_POLL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS),
         frame=_frame(env, cache_dir),
         panel=_panel(env),
         mat_width_inches=_positive_float(env, "MAT_WIDTH_INCHES", DEFAULT_MAT_WIDTH_INCHES),
         mat_bottom_weight=_positive_float(env, "MAT_BOTTOM_WEIGHT", DEFAULT_MAT_BOTTOM_WEIGHT),
+        screen_brightness=_screen_brightness(env),
     )
+
+
+def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
+    """Where the settings page listens. Needs only `CACHE_DIR`, so it resolves in setup mode too.
+
+    Raises `ConfigError` for a missing or relative `CACHE_DIR` (the page's file
+    lives there, so there is nowhere to keep settings without it), an unusable
+    port, or a settings file that cannot be trusted.
+    """
+    load_dotenv()
+    env = dict(os.environ) if environ is None else environ
+    cache_dir = _absolute(_require(env, "CACHE_DIR"), "CACHE_DIR")
+    _stored_values(cache_dir)
+    port = _int(env, "UI_PORT", DEFAULT_UI_PORT)
+    if not 0 < port < 65536:  # noqa: PLR2004 -- the range of a TCP port
+        raise ConfigError(f"UI_PORT must be a TCP port, not {port}.")
+    return UiSettings(
+        cache_dir=cache_dir,
+        bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
+        port=port,
+        pinned=frozenset(name for name in settings_store.MANAGED_KEYS if env.get(name)),
+        # Cleaned as `load` cleans them, so the page shows the value the Player uses.
+        pinned_values={
+            name: clean(env[name])
+            for name, clean in (("SERVER_URL", lambda value: value.rstrip("/")), ("PLAYER_NAME", str.strip))
+            if env.get(name)
+        },
+    )
+
+
+def _stored_values(cache_dir: Path) -> dict[str, str]:
+    try:
+        return dict(settings_store.read(cache_dir).values)
+    except settings_store.SettingsUnreadable as exc:
+        raise ConfigError(f"the settings page's file cannot be read: {exc}. Fix or remove it.") from exc
+
+
+def _beneath_the_environment(env: dict[str, str], cache_dir: Path) -> dict[str, str]:
+    """The environment, with the page's values filling only the keys it leaves empty.
+
+    Empty counts as unset, because `.env.example` ships `SERVER_URL=` and a `.env`
+    copied from it would otherwise pin an empty value over the page's.
+    """
+    merged = dict(env)
+    for name, value in _stored_values(cache_dir).items():
+        if not merged.get(name):
+            merged[name] = value
+    return merged
 
 
 def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
     """The Frame output when `TV_ADDRESS` is set, and None when it is not.
 
-    **Its own required values are required only once it is asked for.** The sun
-    drives the television's brightness and nothing else, so a client with no
-    Frame has no use for a location; requiring one anyway is how an installer
-    learns to type plausible values into keys that do nothing.
+    **Its own required values are required only once it is asked for.** The
+    location is required here because the Frame's brightness follows the sun; a
+    client with no Frame needs one only for its HDMI screens' brightness, which
+    is off without it (`_screen_brightness`). Requiring one anyway is how an
+    installer learns to type plausible values into keys that do nothing. Both
+    read it through `_location`, so the two cannot parse it differently.
 
     A label panel needs no Frame: it is a label output the server may map to any
     wall, so `EPD_DEVICE` is read by `_panel` whether or not this is set.
     """
     if not env.get("TV_ADDRESS"):
         return None
+    location = _location(env)
+    if location is None:
+        raise ConfigError("LATITUDE, LONGITUDE and LOCATION_NAME are not set, and a Frame follows the sun they place.")
 
     token_file = env.get("TV_TOKEN_FILE") or ""
     return FrameSettings(
@@ -578,10 +791,10 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_port=_int(env, "TV_PORT", 8002),
         tv_token_file=_absolute(token_file, "TV_TOKEN_FILE") if token_file else cache_dir / "token_file",
         tv_client_name=env.get("TV_CLIENT_NAME") or DEFAULT_TV_CLIENT_NAME,
-        latitude=_float(env, "LATITUDE", None),
-        longitude=_float(env, "LONGITUDE", None),
-        location_name=_require(env, "LOCATION_NAME"),
-        location_region=env.get("LOCATION_REGION") or "",
+        latitude=location.latitude,
+        longitude=location.longitude,
+        location_name=location.name,
+        location_region=location.region,
         tv_min_brightness=_int(env, "TV_MIN_BRIGHTNESS", DEFAULT_TV_MIN_BRIGHTNESS),
         tv_max_brightness=_int(env, "TV_MAX_BRIGHTNESS", DEFAULT_TV_MAX_BRIGHTNESS),
         brightness_interval_seconds=_float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS),
@@ -595,6 +808,48 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_panel_height_px=_positive_int(env, "TV_PANEL_HEIGHT_PX", DEFAULT_TV_PANEL_HEIGHT_PX),
         tv_panel_diagonal_inches=_positive_float(env, "TV_PANEL_DIAGONAL_INCHES", DEFAULT_TV_PANEL_DIAGONAL_INCHES),
     )
+
+
+#: The keys that place this Player under the sun. Any one set asks for all of
+#: them (the region is optional), because half a location is a typo, not a choice.
+_LOCATION_KEYS: Final[tuple[str, ...]] = ("LATITUDE", "LONGITUDE", "LOCATION_NAME")
+
+
+def _location(env: dict[str, str]) -> Location | None:
+    """The location when any of its keys is set, None when none is. Raises `ConfigError` on half of one."""
+    if not any(env.get(name) for name in _LOCATION_KEYS):
+        return None
+    return Location(
+        latitude=_float(env, "LATITUDE", None),
+        longitude=_float(env, "LONGITUDE", None),
+        name=_require(env, "LOCATION_NAME"),
+        region=env.get("LOCATION_REGION") or "",
+    )
+
+
+def _screen_brightness(env: dict[str, str]) -> ScreenBrightnessSettings:
+    """The HDMI screens' brightness: the switch, the levels, the interval, and the location they follow.
+
+    **The levels are checked only when it is on.** A client with brightness off
+    reads nothing it would refuse, so turning the feature on cannot stop a
+    Player that started before it existed. The interval is read as the Frame
+    reads it, because it is the same key.
+    """
+    switch = (env.get("SCREEN_BRIGHTNESS") or "on").strip().lower()
+    if switch not in ("on", "off"):
+        raise ConfigError(f"SCREEN_BRIGHTNESS is {switch!r}, and it must be on or off.")
+    location = _location(env)
+    interval = _float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS)
+    if switch == "off" or location is None:
+        return ScreenBrightnessSettings(location=location, interval_seconds=interval, enabled=switch == "on")
+    minimum = _int(env, "SCREEN_MIN_BRIGHTNESS", DEFAULT_SCREEN_MIN_BRIGHTNESS)
+    maximum = _int(env, "SCREEN_MAX_BRIGHTNESS", DEFAULT_SCREEN_MAX_BRIGHTNESS)
+    if not 0 <= minimum <= maximum:
+        raise ConfigError(
+            f"SCREEN_MIN_BRIGHTNESS is {minimum} and SCREEN_MAX_BRIGHTNESS is {maximum}: "
+            "both must be zero or more, and the night level no higher than the day level."
+        )
+    return ScreenBrightnessSettings(location=location, minimum=minimum, maximum=maximum, interval_seconds=interval)
 
 
 def _panel(env: dict[str, str]) -> PanelSettings:

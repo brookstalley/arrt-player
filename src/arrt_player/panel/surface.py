@@ -3,7 +3,7 @@
 The third tier. **Deliberately not named for e-ink**: the first implementation
 drives a 1448×1072 e-paper panel, and a display device may instead have a monitor
 and no panel at all, drawing its label into the mat area around the artwork
-(`architecture.md` § Direction). A seam called `EpaperPanel` would have made that
+(Arrt's `architecture.md` § Direction). A seam called `EpaperPanel` would have made that
 device a rewrite; this one it can implement.
 
 **The interface is deliberately tiny.** Two verbs, a geometry and a way to

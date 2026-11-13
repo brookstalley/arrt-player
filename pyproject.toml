@@ -1,6 +1,6 @@
 [project]
 name = "arrt-player"
-version = "0.6.0"
+version = "0.7.0"
 description = "Display plane — reads the theme manifest, drives the television, owns this device's own state."
 # **The plane whose version is pinned by hardware, and the reason the two planes
 # are sibling uv projects rather than one workspace.** Raspberry Pi OS Trixie
@@ -27,6 +27,10 @@ dependencies = [
     # resolve honouring the declared floor installs cleanly and fails at import.
     # A declared floor is a claim; what a package imports is the constraint.
     "websockets>=13",
+    # Imported directly by `tools/tv_api_check.py`, whose timeouts are `requests`'
+    # exceptions. The television client brings it today; declared rather than
+    # inherited, so the tool survives that client changing its own dependencies.
+    "requests>=2.32",
     # The wall's daily rhythm: television brightness follows the sun's position
     # rather than the clock, so a winter afternoon and a summer evening are not
     # given the same panel.
@@ -51,10 +55,13 @@ dependencies = [
     # `panel/epaper.py` except its one `open_panel` import runs on a laptop, so
     # the greyscale-mode read-back, the rotation and the conversion of a silent
     # driver failure into a raised one are exercised by the default suite instead
-    # of only on a Pi with a panel screwed to it.
-    "pillow",
+    # of only on a Pi with a panel screwed to it. The floor is a security floor:
+    # 13.0.0 fixes JPEG and TIFF decoder overflows and decompression-bomb
+    # bypasses (5 critical), and the Player decodes every picture its server hands
+    # it. Lowering it to resolve a conflict reopens those.
+    "pillow>=13.0.0",
     # The HTTP mode's one client, in `src/arrt_player/pull.py` and nowhere else
-    # (`tests/preferences/test_plane_isolation.py` holds that). Already installed
+    # (`tests/test_plane_isolation.py` holds that). Already installed
     # through the fork above, at the version the lockfile resolves; declared
     # because an indirect copy disappears the day that package changes its own
     # dependencies. asyncio, like the daemon, and its test server is the stub the
@@ -93,7 +100,7 @@ dependencies = [
 #     job.
 #
 #     **Enforced mechanically since 2026-08-06** by
-#     `tests/preferences/test_plane_isolation.py`, which landed in the same commit
+#     `tests/test_plane_isolation.py`, which landed in the same commit
 #     as this plane's first modules — the sequencing this comment previously
 #     described as owed, and owed for a reason: a check written over an empty
 #     package passes vacuously, and a green suite is exactly what a violation
@@ -110,10 +117,15 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     # **The Player contract's schemas are checked with this**, against real
-    # documents, so the contract under contract/ is tested rather than trusted.
+    # documents, so the contract is tested rather than trusted.
     # Declared rather than inherited, because an indirect copy disappears the
     # day the package that brings it changes its own dependencies.
     "jsonschema>=4.23",
+    # **The contract both sides are tested against**, read through the package
+    # rather than by a path of this project's own, so the version a project
+    # depends on is the contract it is tested against. Arrt owns the source;
+    # this repository takes a released tag (`[tool.uv.sources]` below).
+    "arrt-contract",
     "ruff>=0.6",
     "black>=24",
     # **The label engine is defined by invariants over a space too large to
@@ -169,6 +181,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/arrt_player"]
+
+[tool.uv.sources]
+# **A released tag of Arrt's contract package, never a path.** Arrt owns the
+# contract: a change to it is a pull request there and a new tag, and this Player
+# takes that version when it is ready, so the skew between the two is a version
+# number anyone can read here. A tag is named and does not move, which is what
+# "published" asks of it without an index account to hold; swapping to PyPI is
+# this one line.
+arrt-contract = { git = "https://github.com/brookstalley/arrt", tag = "contract-v1.0.0", subdirectory = "contract" }
 
 [tool.uv]
 # **The pin that a `[dependency-groups]` entry cannot express, and the decision it
@@ -300,6 +321,14 @@ ignore = [
 # their output through the logging configuration would put a JSON envelope around
 # a sentence somebody is reading.
 "tools/*" = ["T201"]
+# **The CI guard is carried byte-for-byte from Arrt**, so the two copies can be
+# compared by `diff` rather than by reading. Its stdout is the interface: GitHub
+# Actions raises annotations from `::error::` lines on a step's standard output,
+# so `print()` is the mechanism (T201). The XML it parses is the report this
+# job's own pytest wrote a step earlier, not outside input (S314). `main` is one
+# verdict read top to bottom, in the order the checks must run (C901), and its
+# one literal is the usage's argument count (PLR2004).
+".github/scripts/*.py" = ["T201", "S314", "C901", "PLR2004"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

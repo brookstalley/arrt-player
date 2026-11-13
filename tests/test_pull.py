@@ -216,6 +216,56 @@ async def test_an_unchanged_manifest_is_not_downloaded_again(pull, stub, session
     assert http_settings.manifest_path.stat().st_mtime_ns == before
 
 
+async def test_a_feed_served_with_no_etag_drops_the_etag_of_the_feed_it_replaced(pull, stub, session, http_settings):
+    """The cached ETag describes the cached manifest, so a manifest adopted
+    without one leaves none. Kept, it would name a document no longer here: when
+    the server goes back to that document, it answers the old ETag with 304, and
+    the wall keeps the feed the server has stopped serving."""
+    stub.publish("w1")
+    await pull.cycle(session)
+    first = stub.manifests[WALL_ID]
+    assert (http_settings.wall_dir / ETAG_FILENAME).is_file(), "the first feed was not cached with its ETag"
+
+    stub.manifest_etags = False
+    stub.publish("w2")
+    await pull.cycle(session)
+    assert _works(http_settings) == ["w2"]
+    assert not (http_settings.wall_dir / ETAG_FILENAME).exists()
+
+    stub.manifest_etags = True
+    stub.manifests[WALL_ID] = first
+    await pull.cycle(session)
+
+    assert _works(http_settings) == ["w1"], "the server went back to the first feed and the wall did not"
+
+
+async def test_a_manifest_replaced_while_its_etag_cannot_be_written_leaves_no_older_etag(
+    pull, stub, session, http_settings, monkeypatch
+):
+    """A crash or a full disk between the manifest's write and its ETag's must
+    not leave the old ETag beside the new manifest, for the reason the test
+    above gives."""
+    stub.publish("w1")
+    await pull.cycle(session)
+    etag_path = http_settings.wall_dir / ETAG_FILENAME
+    assert etag_path.is_file()
+
+    real_write = pull_module._write_atomically
+
+    def etag_write_fails(path, data: bytes) -> None:
+        if path == etag_path:
+            raise OSError(28, "No space left on device")
+        real_write(path, data)
+
+    monkeypatch.setattr(pull_module, "_write_atomically", etag_write_fails)
+    stub.publish("w2")
+    with pytest.raises(OSError, match="No space"):
+        await pull.cycle(session)
+
+    assert _works(http_settings) == ["w2"]
+    assert not etag_path.exists()
+
+
 async def test_a_master_that_does_not_match_its_hash_is_discarded_and_reported_once(pull, stub, session, http_settings, caplog):
     """The feed is cached whole: the work stays in it, for the programme to pass over until good bytes arrive."""
     stub.publish("w1", "w2")

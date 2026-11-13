@@ -1,6 +1,6 @@
 """The e-paper panel, as a surface a label can be put on.
 
-The first implementation of `LabelSurface`, and — per `architecture.md`
+The first implementation of `LabelSurface`, and — per Arrt's `architecture.md`
 § Direction — deliberately not the only one it is written for: it holds a
 rasterizer rather than being one, so a device with a monitor and no e-ink can
 reuse the typesetting and supply its own delivery.
@@ -185,7 +185,7 @@ class EpaperSurface(LabelSurface):
         """The configured panel, not the driver's report.
 
         Configuration wins because the layout has to be arranged before anything
-        is drawn and `operational-spec.md` § Configuration makes the panel a
+        is drawn and Arrt's `operational-spec.md` § Configuration makes the panel a
         deployment value; the driver's own answer is compared against it at
         construction and any disagreement is said out loud there.
         """

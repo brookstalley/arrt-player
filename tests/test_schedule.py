@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from arrt_contract import root
 from conftest import WALL_ID, a_master
 
 from arrt_player.compose import Geometry, Uncomposable, compose, composition_key
@@ -22,7 +23,7 @@ from arrt_player.manifest import Feed, parse
 from arrt_player.programmes.schedule import COMPOSE_RETRY_SECONDS, RETRY_SECONDS, InMemory, Schedule, what_to_show
 from arrt_player.wall import DisplayRecord, Picture, Shown
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contract"
+CONTRACT = root()
 VECTORS = json.loads((CONTRACT / "vectors" / "schedule.json").read_text(encoding="utf-8"))
 
 
@@ -573,7 +574,7 @@ async def test_a_directory_inside_the_composed_one_is_left_alone(schedule, displ
 
 
 async def test_every_line_a_composition_logs_names_its_work(schedule, display, media_root, caplog):
-    """`observability-strategy.md` § Correlation: a work's journal is one filter on its id, the thread's lines included."""
+    """Arrt's `observability-strategy.md` § Correlation: a work's journal is one filter on its id, the thread's lines included."""
     from arrt_player.logs import WorkCorrelationFilter
 
     caplog.handler.addFilter(WorkCorrelationFilter())

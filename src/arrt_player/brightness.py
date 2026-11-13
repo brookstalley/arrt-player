@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import Final
 
 from astral import LocationInfo
-from astral.sun import sun
+from astral.sun import noon, sun
 
 log = logging.getLogger(__name__)
 
@@ -75,9 +75,8 @@ def sun_state(now: datetime, *, latitude: float, longitude: float, location_name
     quietly answering for the wrong hour.
     """
     location = LocationInfo(name=location_name, region=location_region, latitude=latitude, longitude=longitude)
-    today = sun(location.observer, date=now, tzinfo=now.tzinfo, dawn_dusk_depression=_TWILIGHT_DEPRESSION)
 
-    hours_from_noon = (now - today["noon"]).total_seconds() / 3600
+    hours_from_noon = (now - noon(location.observer, date=now, tzinfo=now.tzinfo)).total_seconds() / 3600
     hour_angle = hours_from_noon * 15  # The earth turns 15° an hour.
     declination = solar_declination(now.timetuple().tm_yday)
 
@@ -92,18 +91,30 @@ def sun_state(now: datetime, *, latitude: float, longitude: float, location_name
     # way in 2024; below the horizon it goes negative, and the floor is what makes
     # night black rather than inverted.
     brightness = max(0.0, math.cos(math.radians(90 - solar_angle)))
-    brightness += _TWILIGHT_LIFT * _twilight_fraction(now, today)
+    brightness += _TWILIGHT_LIFT * _twilight_fraction(now, location, solar_angle)
 
     return SunState(at=now, solar_angle_degrees=solar_angle, relative_brightness=brightness)
 
 
-def _twilight_fraction(now: datetime, today: dict[str, datetime]) -> float:
+def _twilight_fraction(now: datetime, location: LocationInfo, solar_angle: float) -> float:
     """How much of the twilight lift applies at this instant, 0..1.
 
     Full between sunrise and sunset, nothing outside dawn..dusk, and a straight
     ramp across each twilight so the panel changes smoothly rather than stepping
     at the horizon.
+
+    **A day with no dawn, dusk, sunrise or sunset is measured by the sun's
+    height instead.** astral raises `ValueError` when one of the four does not
+    happen: north of about 54.6° near the June solstice the sun never gets 12°
+    below the horizon, and inside the polar circles it never rises or never sets.
+    Then the lift ramps from none with the sun 12° down to full at the horizon,
+    which is the same shape the events give on an ordinary day. Without this the
+    error reached the wall, which crashed on every pass until the season turned.
     """
+    try:
+        today = sun(location.observer, date=now, tzinfo=now.tzinfo, dawn_dusk_depression=_TWILIGHT_DEPRESSION)
+    except ValueError:
+        return max(0.0, min(1.0, (solar_angle + _TWILIGHT_DEPRESSION) / _TWILIGHT_DEPRESSION))
     if now < today["dawn"] or now > today["dusk"]:
         return 0.0
     if today["sunrise"] <= now <= today["sunset"]:
@@ -131,3 +142,23 @@ def television_brightness(relative_brightness: float, *, minimum: int, maximum: 
     """
     span = maximum - minimum
     return max(minimum, min(maximum, round(relative_brightness * span) + minimum))
+
+
+def level_at(
+    now: datetime,
+    *,
+    latitude: float,
+    longitude: float,
+    location_name: str,
+    location_region: str,
+    minimum: int,
+    maximum: int,
+) -> tuple[int, SunState]:
+    """The level the sun asks for at `now` on a `minimum`..`maximum` scale, and the sun it came from.
+
+    The one place the Frame and the HDMI screens turn the sun into a value, so
+    the two cannot drift apart while each keeps its own scale and its own
+    write-on-change.
+    """
+    state = sun_state(now, latitude=latitude, longitude=longitude, location_name=location_name, location_region=location_region)
+    return television_brightness(state.relative_brightness, minimum=minimum, maximum=maximum), state

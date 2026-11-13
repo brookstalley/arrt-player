@@ -21,7 +21,7 @@ person trying to read the label.
 **Text is set literally, never as markup.** `Pango.Layout.set_text` rather than
 `set_markup`, which is the fix for a defect the 2024 label had by construction: it
 interpolated museum-supplied description text into a markup string, so a title
-containing `<` produced either mangled type or a parse failure (`data-model.md`).
+containing `<` produced either mangled type or a parse failure (Arrt's `data-model.md`).
 The metadata tier deliberately does not escape, on the grounds that knowing one
 renderer's markup is this tier's business — and this tier's answer is to use none.
 

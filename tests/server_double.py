@@ -24,12 +24,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
-from jsonschema import Draft202012Validator
+from arrt_contract import root, routes, validator
 from PIL import Image
 
-CONTRACT = Path(__file__).resolve().parents[2] / "contract"
-ROUTES = json.loads((CONTRACT / "routes.json").read_text(encoding="utf-8"))["routes"]
-CLIENT_HEARTBEAT_SCHEMA = json.loads((CONTRACT / "schemas" / "client-heartbeat.v1.schema.json").read_text())
+CONTRACT = root()
+ROUTES = routes()
+CLIENT_HEARTBEAT = validator("schemas/client-heartbeat.v1.schema.json")
 
 #: The client every test's Player is, unless it says otherwise.
 TOKEN = "the-clients-token"
@@ -59,6 +59,8 @@ class ServerDouble:
         self.client_heartbeats: list[dict] = []
         #: Forced answers, for the failure tests.
         self.media_status: int | None = None
+        #: False serves manifests with no ETag, as a server or proxy may, and never 304.
+        self.manifest_etags = True
         self.client_status: int | None = None
         self.client_body: bytes | None = None
         self.authorizations: list[str | None] = []
@@ -126,7 +128,7 @@ class ServerDouble:
             document = json.loads(await request.read())
         except ValueError:
             return web.json_response({"error": "The body is not JSON."}, status=400)
-        errors = [error.message for error in Draft202012Validator(CLIENT_HEARTBEAT_SCHEMA).iter_errors(document)]
+        errors = [error.message for error in CLIENT_HEARTBEAT.iter_errors(document)]
         names = [output.get("name") for output in document.get("outputs", []) if isinstance(output, dict)]
         if len(names) != len(set(names)):
             errors.append("two outputs share a name")
@@ -163,6 +165,8 @@ class ServerDouble:
         if manifest is None or self.served_at.get(wall_id, manifest["schema"]["major"]) != major:
             return web.json_response({"error": f"No manifest of major {major} is published for this wall."}, status=404)
         body = json.dumps(manifest).encode()
+        if not self.manifest_etags:
+            return web.Response(body=body, content_type="application/json")
         etag = f'"{hashlib.sha256(body).hexdigest()}"'
         if request.headers.get("If-None-Match") == etag:
             return web.Response(status=304, headers={"ETag": etag})

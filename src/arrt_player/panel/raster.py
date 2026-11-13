@@ -4,7 +4,7 @@ The third tier's first half. `surface.py` says what a label can be *put onto*;
 this says what a label *looks like*, and the two are separate because a
 deployment may pair one answer with several of the other. The e-paper panel and a
 monitor drawing into the mat area around the artwork want the same typesetting
-and different delivery (`architecture.md` § Direction), so the typesetter is its
+and different delivery (Arrt's `architecture.md` § Direction), so the typesetter is its
 own object that a device is handed rather than something each device grows.
 
 **The pixels are eight-bit greyscale and nothing more.** No image library appears

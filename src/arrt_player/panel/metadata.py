@@ -16,7 +16,7 @@ line where a value is missing would be worse than the missing value.
 told to treat this as literal text, which is the fix for the injection that a
 2024-era label had by construction: it passed description text to Pango markup,
 so a title containing `<` produced either mangled type or a parse failure
-(`data-model.md`). Escaping here instead would push knowledge of one renderer's
+(Arrt's `data-model.md`). Escaping here instead would push knowledge of one renderer's
 markup into the tier that is supposed to be renderer-agnostic.
 
 **This tier says how its text is set, and that is not the same as knowing a

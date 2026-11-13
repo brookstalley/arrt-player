@@ -8,7 +8,7 @@ the work go", never a second one worked out by an image library's fitting
 arithmetic.
 
 **The mat takes the work's shape, and everything beyond it is black**
-(`nonfunctional-requirements.md` § The mat is geometric). `full` is the one mode
+(Arrt's `nonfunctional-requirements.md` § The mat is geometric). `full` is the one mode
 that paints the mat colour to the screen's edges, and `none` puts the work on
 black. **No work is ever enlarged**: a small master is drawn at its own size,
 inside a mat of the usual width, with more black around it.
