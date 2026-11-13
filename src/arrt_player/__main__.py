@@ -56,6 +56,7 @@ from arrt_player.config import (
     ConfigError,
     FrameSettings,
     PanelSettings,
+    ScreenBrightnessSettings,
     Settings,
     SetupRequired,
     UiSettings,
@@ -63,8 +64,10 @@ from arrt_player.config import (
     load,
     load_ui,
 )
+from arrt_player.ddc import Ddc, DdcBus, I2cTransport, bus_for
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import ScreenOutput, screen_wall
+from arrt_player.displays.screen_brightness import ScreenBrightness
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.manifest import Watcher
@@ -283,17 +286,50 @@ async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Cloc
         await _beside_its_pull(settings, stop, frame.run)
 
 
-async def run_screen_wall(wall: WallSettings, output: str, stop: asyncio.Event, *, clock: Clock | None = None) -> None:
+async def run_screen_wall(
+    wall: WallSettings,
+    output: str,
+    stop: asyncio.Event,
+    *,
+    clock: Clock | None = None,
+    brightness: ScreenBrightnessSettings | None = None,
+) -> None:
     """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped."""
     wall.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(wall.manifest_path)
+    clock = clock if clock is not None else Clock.system()
     screen = screen_wall(
         wall=wall,
         output=screen_output(wall, output),
         watcher=watcher,
-        clock=clock if clock is not None else Clock.system(),
+        clock=clock,
+        brightness=screen_brightness(wall, output, brightness, clock),
     )
     await _beside_its_pull(wall, stop, screen.run)
+
+
+def screen_ddc(output: str) -> DdcBus:
+    """The DDC/CI bus of the screen on an HDMI connector, found from the connector."""
+    return Ddc(I2cTransport(bus_for(output)))
+
+
+def screen_brightness(
+    wall: WallSettings,
+    output: str,
+    settings: ScreenBrightnessSettings | None,
+    clock: Clock,
+) -> ScreenBrightness | None:
+    """The screen's brightness on the sun over its connector's DDC/CI bus, or None with no location to follow."""
+    if settings is None or settings.location is None:
+        return None
+    return ScreenBrightness(
+        settings=settings,
+        location=settings.location,
+        output=output,
+        wall_id=wall.wall_id,
+        bus=lambda: screen_ddc(output),
+        clock=clock,
+    )
 
 
 def screen_output(
@@ -309,7 +345,7 @@ async def run_wall(settings: ClientSettings, wall: WallSettings, output: OutputR
     if output.kind == FRAME_KIND:
         await run_frame_wall(settings.frame_wall(wall.wall_id), stop)
     else:
-        await run_screen_wall(wall, output.name, stop)
+        await run_screen_wall(wall, output.name, stop, brightness=settings.screen_brightness)
 
 
 async def _beside_its_pull(wall: WallSettings, stop: asyncio.Event, loop: Callable[[asyncio.Event], Awaitable[None]]) -> None:

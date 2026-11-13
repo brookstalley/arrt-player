@@ -157,13 +157,17 @@ class Transport(Protocol):
 
     def receive(self, length: int) -> bytes: ...
 
+    def close(self) -> None: ...
+
 
 class DdcBus(Protocol):
-    """One monitor's features: what `displays/screen.py` drives, and what the suite doubles."""
+    """One monitor's features: what `displays/screen_brightness.py` drives, and what the suite doubles."""
 
     def read(self, code: int) -> Reading: ...
 
     def write(self, code: int, value: int) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class Ddc:
@@ -202,6 +206,9 @@ class Ddc:
         self._send(set_request(code, value))
         # The display is not ready for the next request until this has passed.
         self._sleep(REPLY_WAIT_SECONDS)
+
+    def close(self) -> None:
+        self._transport.close()
 
     def _send(self, data: bytes) -> None:
         try:

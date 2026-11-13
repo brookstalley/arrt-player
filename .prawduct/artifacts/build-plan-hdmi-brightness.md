@@ -48,6 +48,9 @@ last_validated: 2026-11-13
 ### Decisions
 - **DDC/CI over `/dev/i2c-N` from Python** (owner, 2026-11-13). The spike on the Pi measured it working as a non-root user in group `i2c`: Get and Set VCP `0x10` at about 50 ms each, a reply checksum seeded with `0x50`, and an unsupported code answered with result `0x01` and a valid checksum (`hdmi-output-findings.md` § Controlling the monitor over the cable).
 - **The bus is found from the connector**, through the `ddc` link in the connector's sysfs directory (`card1-HDMI-A-1/ddc` → `i2c-20`), never assumed.
+- **Nothing acknowledging the address is the screen's answer, not a fault of this host** (decided building chunk 01; measured: the empty HDMI-A-2 raises `EREMOTEIO`, errno 121). `ddc.NoAnswer` is said once as `screen.brightness_unsupported` and asked again each interval, quietly, because a screen asleep may answer later. `ddc.Unsupported` (the monitor says it has no such control) is not asked again until the screen is replaced.
+- **Every write is read back** (decided building chunk 02). The monitor sends nothing in reply to a set, so `screen.brightness_set` carries `read_back`, and a monitor that keeps its old value logs it at WARNING instead of looking applied.
+- **A screen is asked afresh when it comes back.** Unplugged and replugged, it is probed and written at once, whatever the interval, because the screen that comes back need not be the one that left (as `kms.py` redraws).
 
 ## Build Chunks
 

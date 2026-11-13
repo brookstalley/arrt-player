@@ -147,6 +147,12 @@ DEFAULT_TV_MAX_BRIGHTNESS: Final[int] = 10
 #: so this interval costs a local calculation and no traffic.
 DEFAULT_BRIGHTNESS_INTERVAL_SECONDS: Final[float] = 300.0
 
+#: An HDMI monitor's brightness at night and in full daylight, on the monitor's
+#: own DDC/CI scale (0 to the maximum it reports, which is 100 on the reference
+#: LG). The owner's numbers for the office monitor (2026-11-13).
+DEFAULT_SCREEN_MIN_BRIGHTNESS: Final[int] = 5
+DEFAULT_SCREEN_MAX_BRIGHTNESS: Final[int] = 50
+
 #: The wait for the set's `image_added` acknowledgement. **A correctness value,
 #: not a tuning knob**: the library's own default of 10 seconds was measured
 #: failing on this deployment's 4K composites while the image landed anyway, so a
@@ -559,6 +565,36 @@ class Settings(WallSettings, FrameSettings):
 
 
 @dataclass(frozen=True)
+class Location:
+    """Where the sun is seen from: the Frame's brightness and a screen's both follow it."""
+
+    latitude: float
+    longitude: float
+    name: str
+    region: str
+
+
+@dataclass(frozen=True)
+class ScreenBrightnessSettings:
+    """How an HDMI screen's brightness follows the sun, on every screen that answers DDC/CI.
+
+    **Off when no location is set**, and said in the start line: the sun is the
+    only thing brightness follows, and a guessed location would set it wrong at
+    every hour rather than not at all.
+    """
+
+    location: Location | None
+    minimum: int = DEFAULT_SCREEN_MIN_BRIGHTNESS
+    maximum: int = DEFAULT_SCREEN_MAX_BRIGHTNESS
+    interval_seconds: float = DEFAULT_BRIGHTNESS_INTERVAL_SECONDS
+
+    def screen_brightness_line(self) -> str:
+        if self.location is None:
+            return "off: LATITUDE, LONGITUDE and LOCATION_NAME are not set"
+        return f"{self.minimum} to {self.maximum} with the sun at {self.location.name}, every {self.interval_seconds:g} s"
+
+
+@dataclass(frozen=True)
 class ClientSettings:
     """Everything this Player needs from its environment, resolved once."""
 
@@ -580,6 +616,8 @@ class ClientSettings:
     label_poll_seconds: float = DEFAULT_LABEL_POLL_SECONDS
     mat_width_inches: float = DEFAULT_MAT_WIDTH_INCHES
     mat_bottom_weight: float = DEFAULT_MAT_BOTTOM_WEIGHT
+    #: Brightness on the HDMI screens; off with no location.
+    screen_brightness: ScreenBrightnessSettings = field(default_factory=lambda: ScreenBrightnessSettings(location=None))
 
     @property
     def client_document_path(self) -> Path:
@@ -618,6 +656,7 @@ class ClientSettings:
             "frame": self.frame.frame_lines() if self.frame is not None else "(none — TV_ADDRESS is not set)",
             "panel": self.panel.panel_lines(),
             "mat": f"{self.mat_width_inches} in, bottom x{self.mat_bottom_weight}",
+            "screen_brightness": self.screen_brightness.screen_brightness_line(),
         }
 
 
@@ -662,6 +701,7 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings:
         panel=_panel(env),
         mat_width_inches=_positive_float(env, "MAT_WIDTH_INCHES", DEFAULT_MAT_WIDTH_INCHES),
         mat_bottom_weight=_positive_float(env, "MAT_BOTTOM_WEIGHT", DEFAULT_MAT_BOTTOM_WEIGHT),
+        screen_brightness=_screen_brightness(env),
     )
 
 
@@ -749,6 +789,40 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_panel_width_px=_positive_int(env, "TV_PANEL_WIDTH_PX", DEFAULT_TV_PANEL_WIDTH_PX),
         tv_panel_height_px=_positive_int(env, "TV_PANEL_HEIGHT_PX", DEFAULT_TV_PANEL_HEIGHT_PX),
         tv_panel_diagonal_inches=_positive_float(env, "TV_PANEL_DIAGONAL_INCHES", DEFAULT_TV_PANEL_DIAGONAL_INCHES),
+    )
+
+
+#: The keys that place this Player under the sun. Any one set asks for all of
+#: them (the region is optional), because half a location is a typo, not a choice.
+_LOCATION_KEYS: Final[tuple[str, ...]] = ("LATITUDE", "LONGITUDE", "LOCATION_NAME")
+
+
+def _location(env: dict[str, str]) -> Location | None:
+    """The location when any of its keys is set, None when none is. Raises `ConfigError` on half of one."""
+    if not any(env.get(name) for name in _LOCATION_KEYS):
+        return None
+    return Location(
+        latitude=_float(env, "LATITUDE", None),
+        longitude=_float(env, "LONGITUDE", None),
+        name=_require(env, "LOCATION_NAME"),
+        region=env.get("LOCATION_REGION") or "",
+    )
+
+
+def _screen_brightness(env: dict[str, str]) -> ScreenBrightnessSettings:
+    """The HDMI screens' brightness: the levels, the interval, and the location they follow."""
+    minimum = _int(env, "SCREEN_MIN_BRIGHTNESS", DEFAULT_SCREEN_MIN_BRIGHTNESS)
+    maximum = _int(env, "SCREEN_MAX_BRIGHTNESS", DEFAULT_SCREEN_MAX_BRIGHTNESS)
+    if not 0 <= minimum <= maximum:
+        raise ConfigError(
+            f"SCREEN_MIN_BRIGHTNESS is {minimum} and SCREEN_MAX_BRIGHTNESS is {maximum}: "
+            "both must be zero or more, and the night level no higher than the day level."
+        )
+    return ScreenBrightnessSettings(
+        location=_location(env),
+        minimum=minimum,
+        maximum=maximum,
+        interval_seconds=_positive_float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS),
     )
 
 

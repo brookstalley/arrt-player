@@ -130,12 +130,16 @@ class Wire:
     def __init__(self, *replies: bytes) -> None:
         self.sent: list[bytes] = []
         self._replies = list(replies)
+        self.closed = False
 
     def send(self, data: bytes) -> None:
         self.sent.append(data)
 
     def receive(self, length: int) -> bytes:
         return self._replies.pop(0)[:length]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_a_read_sends_the_request_waits_and_reads_the_reply():
@@ -189,6 +193,12 @@ def test_a_write_sends_the_set_and_waits_before_anything_else():
 
     assert wire.sent == [SET_BRIGHTNESS_10]
     assert pauses == [REPLY_WAIT_SECONDS]
+
+
+def test_closing_the_bus_closes_its_transport():
+    wire = Wire()
+    Ddc(wire).close()
+    assert wire.closed
 
 
 def test_a_failing_bus_is_an_oserror_not_a_garbled_reply():
