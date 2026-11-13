@@ -524,6 +524,7 @@ class TestThePlayersName:
 # -- slideshow mode ----------------------------------------------------------------------
 
 #: A cookie of the shape Reddit's is (a JWT), whose last part stands in for the secret.
+# prawduct:allow prawduct/credential-shape -- a made-up cookie in a JWT's shape; it signs nothing and Reddit never saw it
 COOKIE = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE4MTAwMDAwMDB9.the-secret-part"
 LISTING = "https://www.reddit.com/r/EarthPorn/top/?t=month"
 

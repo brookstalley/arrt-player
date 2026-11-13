@@ -34,6 +34,7 @@ from arrt_player.sources.fetch import (
 )
 
 LOOPBACK = ipaddress.ip_address("127.0.0.1")
+# prawduct:allow prawduct/credential-shape -- a made-up cookie in a JWT's shape; it signs nothing and Reddit never saw it
 COOKIE = "eyJhbGciOiJSUzI1NiJ9.c2VjcmV0LWNvb2tpZS12YWx1ZQ.sig-zzz"
 
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 500

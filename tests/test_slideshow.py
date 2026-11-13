@@ -59,6 +59,7 @@ AUTH = json.loads((FIXTURES / "redgifs" / "auth.json").read_text())
 LIMITS = DwellLimits(30.0, 60.0)
 #: On the equator at the prime meridian, so the test clock's noon UTC is the sun's noon.
 EQUATOR = Location(latitude=0.0, longitude=0.0, name="Null Island", region="")
+# prawduct:allow prawduct/credential-shape -- a made-up cookie in a JWT's shape; it signs nothing and Reddit never saw it
 COOKIE = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE4MTAwMDAwMDB9.the-secret-part"
 
 
