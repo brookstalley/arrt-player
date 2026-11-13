@@ -512,9 +512,17 @@ class KmsOutput:
         return OutputReport(name=self._name, kind=FRAMEBUFFER_KIND, connected=False, screen=None)
 
     def _card(self) -> Path:
-        """The device node of the card listing this connector: the first, as `hdmi_outputs` takes the first."""
-        number = self._name.removeprefix("hdmi-a-")
-        cards = sorted(path.name.split("-", 1)[0] for path in self._drm_root.glob(f"card*-HDMI-A-{number}"))
-        if not cards:
-            raise ScreenAbsent(f"the kernel lists no connector {self._name}")
-        return self._dev_root / cards[0]
+        return card_for(self._name, self._drm_root, self._dev_root)
+
+
+def card_for(name: str, drm_root: Path = DRM_ROOT, dev_root: Path = DEV_ROOT) -> Path:
+    """The device node of the card listing connector `name` (`hdmi-a-1`): the first, as `hdmi_outputs` takes the first.
+
+    Raises `ScreenAbsent` when no card lists it. Shared with `mpv.MpvOutput`, so the
+    two outputs can never disagree about which card a connector is on.
+    """
+    number = name.removeprefix("hdmi-a-")
+    cards = sorted(path.name.split("-", 1)[0] for path in drm_root.glob(f"card*-HDMI-A-{number}"))
+    if not cards:
+        raise ScreenAbsent(f"the kernel lists no connector {name}")
+    return dev_root / cards[0]

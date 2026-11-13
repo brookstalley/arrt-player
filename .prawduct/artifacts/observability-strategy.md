@@ -87,11 +87,21 @@ that will not serialise is rendered with `str` (`json.dumps(…, default=str)`).
 `tests/test_logs.py` holds the one-object-per-line shape, the `work_id`
 binding, nesting, and that `configure` twice does not duplicate lines.
 
-**Every call site carries an `event`.** Checked by walking every
-`log.debug/info/warning/error/exception` call in `src/arrt_player` with `ast`:
-109 call sites, each with an `extra` dict literal holding an `event` key, and no
-logger other than `logging.getLogger(__name__)` bound to `log` (16 modules). No
-test enforces this; it holds today by that walk.
+**Every call site carries an `event`, as a field.** Held by
+`tests/test_logs.py::TestEveryLineIsFindableByItsEvent`, which walks every
+`log.debug/info/warning/error/exception` call in `src/arrt_player` with `ast` and
+requires an `extra` dict literal holding an `event` key, and fails any module
+that logs through a logger bound to a name other than `log`. An event name
+written only into the message (`log.info("slideshow.cache.downloaded item=%s",
+…)`) is invisible to `jq 'select(.event == …)'`; the slideshow's source, cache
+and resolvers were written that way until 2026-11-11, which is why the walk is a
+test and not a claim.
+
+**A test that searches the log for what must not be there reads
+`conftest.journal(caplog)`**, the records through `logs.JsonFormatter`, never
+`caplog.text`, which is the message alone: a secret or an account name in an
+`extra` field would pass a `caplog.text` search. `conftest.events(caplog, name)`
+finds records by the `event` field.
 
 **Levels, as the code uses them** (derived from the inventory below, not
 prescribed anywhere):
@@ -116,8 +126,7 @@ event name is built rather than written: `client.Supervisor._keep_running`
 `client.label`), `wall.Wall.run` (`f"{name}.started/stopped/crashed"`, with
 `name` = `FrameDisplay.journal_name` `daemon` or `ScreenDisplay.journal_name`
 `screen`), and `programmes/schedule.py:Schedule._collect` (a variable set to one
-of three names). **114 distinct names.** A grep for `"event": "` alone finds 101
-and misses those 13.
+of three names). A grep for `"event": "` alone misses the built ones.
 
 | Events | Level | Emitted by | Says |
 |---|---|---|---|
@@ -179,7 +188,7 @@ and misses those 13.
 | `tv.token_file_open` | WARNING | `SamsungTv._keep_the_token_private` | The token file could not be set to 0600 (`tv_token_file`, never its content); anyone who can read it can drive the art channel |
 | `tv.close_failed` | WARNING | `SamsungTv._quietly_close` | Closing the connection raised; the set may hold the abandoned channel and refuse the next connection for minutes |
 | `brightness.set` | INFO | `FrameDisplay._apply_brightness` | Brightness set from the sun's angle |
-| **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`) | | | |
+| **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`; in slideshow mode the `screen.brightness_*` events come from the slideshow's screen, with `wall_id` `slideshow`) | | | |
 | `screen.absent` / `screen.returned` | WARNING / INFO | `KmsOutput._gone`, `_draw` | No screen on the connector, then one (drawn at once) |
 | `screen.draw_failed` / `screen.draw_recovered` | WARNING / INFO | `ScreenDisplay.show` | The output refused a picture |
 | `screen.refresh_failed` / `screen.refresh_recovered` | WARNING / INFO | `ScreenDisplay._refresh` | The per-poll redraw failed |
@@ -205,6 +214,44 @@ and misses those 13.
 | `label.shrunk` | WARNING | `LabelPanel.draw` | Identifying facts set below the legibility floor (`floor_px`, `smallest_px`) |
 | `label.name_wrapped` | WARNING | `LabelPanel.draw` | The line breaker split a name across rows |
 | `label.truncated` | INFO | `LabelPanel.draw` | Lines dropped for room (`dropped`) |
+| **The settings page** (`__main__`, `settings_ui/server.py`) | | | |
+| `daemon.setup_mode` | WARNING | `__main__.main` | The chosen mode is missing settings (`mode`, `missing`), so only the settings page runs |
+| `settings_page.listening` | INFO | `__main__.run_settings_page` | The page is up (bind, port, `setup_mode`); the setup link itself goes to stdout, never the journal |
+| `settings_page.unavailable` | ERROR | `__main__.run_settings_page` | The page cannot listen (address in use); the walls run on |
+| `settings_page.password_set`, `settings_page.password_changed` | INFO | `server._setup`, `_change_password` | The first password set from the setup link; a password changed |
+| `settings_page.login_refused`, `settings_page.password_refused` | WARNING | `server._login`, `_change_password` | A wrong password at sign-in; a wrong current password when changing it |
+| `settings_page.saved` | INFO | `server._save` | Settings saved (`changed`: the keys, never the values); the Player restarts onto them |
+| `settings_page.write_failed` | ERROR | `server._wrote` | The settings file could not be written (full disk, permission) |
+| **Slideshow mode: the programme** (`__main__.run_slideshow`, `programmes/slideshow.py:Slideshow`) | | | |
+| `slideshow.starting` | INFO | `run_slideshow` | Slideshow mode started, with `SlideshowSettings.startup_lines` (never the cookie) |
+| `slideshow.renderer_unavailable` | ERROR | `run_slideshow` | mpv is missing, or the account is not in `render` (`mpv.renderer_problems`, asked once at start); said on the page too, and the slideshow plays on |
+| `slideshow.saved_listing` | INFO | `Slideshow.run` | Playing the listing saved by the last run until Reddit answers (`items`) |
+| `slideshow.saved_unreadable` | WARNING | `load_listing` | The saved listing could not be read; starting without it |
+| `slideshow.listed` | INFO | `Slideshow._take` | A listing taken (`items`), and the files of posts no longer listed deleted |
+| `slideshow.listed_nothing` | WARNING | `Slideshow._take` | Reddit answered with nothing showable (`unresolved` by domain); the cache is kept and plays on |
+| `slideshow.refresh_failed` | WARNING | `Slideshow._take` | Reddit gave no listing (`outcome`); playing on from the cache and asking again later |
+| `slideshow.save_failed` | WARNING | `Slideshow._take` | The listing could not be saved for the next start |
+| `slideshow.filled` | INFO | `Slideshow._report_fill` | A fill ended: files downloaded and failed, by tier |
+| `slideshow.nothing_ready` | INFO | `Slideshow._show_next` | Nothing is cached to show yet; once per episode |
+| `slideshow.shown` | INFO | `Slideshow._show_next` | An item is on the screen (`item`, dwell) |
+| `slideshow.not_shown` | WARNING | `Slideshow._not_shown` | An item could not be shown (`item`, `reason`); the next one is tried |
+| **Slideshow mode: the source and the cache** (`sources/reddit.py`, `sources/cache.py:MediaCache`, `sources/resolvers/`) | | | |
+| `slideshow.reddit.listed` | INFO | `reddit._logged` | Reddit answered with a listing (`items`, `unresolved`: posts with nothing to show, by domain) |
+| `slideshow.reddit.not_listed` | WARNING | `reddit._logged` | It did not; `outcome` is `refused`, `cookie_rejected`, `rate_limited` or `unreachable`, with a `detail` |
+| `slideshow.reddit.post_unreadable` | WARNING | `reddit.parse_listing` | One post in a shape this does not read (`post`); only that post is lost |
+| `slideshow.resolver.fallback` | WARNING | `resolvers._fell_back` | A host resolver gave nothing usable (`resolver`, `item`, `reason`); the item keeps Reddit's copy, or has nothing |
+| `slideshow.resolver.redgifs.token`, `…token_refused` | INFO | `RedgifsResolver._current_token`, `resolve` | A temporary token taken (`valid_for_s`, never the token); one refused and renewed once |
+| `slideshow.resolver.redgifs.gone`, `…lookup_failed` | INFO, WARNING | `RedgifsResolver.resolve` | The clip is gone (404); the lookup failed otherwise (`status`) |
+| `slideshow.cache.downloaded`, `slideshow.cache.fell_back` | INFO, WARNING | `MediaCache._fetch_one` | A file kept (`item`, `tier`, `bytes`); kept from a lesser tier after a better one failed (`reasons`) |
+| `slideshow.cache.download_failed` | WARNING | `MediaCache._fail` | Every place the item's media may be failed (`reason`); it waits before being tried again |
+| `slideshow.cache.cap_reached`, `slideshow.cache.network_down` | WARNING | `MediaCache.fill` | The fill stopped: the 2 GB cap (`used_bytes`, `cap_bytes`), or enough unreachable items in a row to say the network is down |
+| `slideshow.cache.evicted`, `slideshow.cache.partial_cleared` | INFO | `MediaCache.evict`, `__init__` | Files of posts no longer listed removed (`count`); an unfinished download from a previous run removed |
+| **mpv** (`mpv.py:MpvOutput`, the slideshow's screen) | | | |
+| `mpv.started` | INFO | `MpvOutput._start` | mpv is up on an output (`output`, `pid`) |
+| `mpv.stale` | WARNING | `stop_stale` | An mpv a previous run left behind was stopped (`pid`); checked against its socket path, so a reused pid is never killed |
+| `mpv.refused` | ERROR | `MpvOutput._load` | A path mpv must not be given (not a regular file under the media cache); never sent |
+| `mpv.file_failed` | WARNING | `MpvOutput._failed` | mpv could not play one file (`reason`) |
+| `mpv.not_shown` / `mpv.recovered` | WARNING / INFO | `MpvOutput._not_shown`, `_put_up` | mpv is not drawing on the output (`reason`), then is; once per episode |
 
 **Destinations and retention.** stderr, captured by systemd
 (`deploy/display.service`: `StandardOutput=journal`, `StandardError=journal`,
@@ -283,8 +330,8 @@ above is a hand-placed call. There is no layer 2.
   `label_renderer.LabelRenderer._show`. Because it is a `ContextVar`, it follows
   into `asyncio.to_thread` work, which copies the context. It is the one id that
   spans the Player and the server (Arrt § Correlation).
-- **`wall_id`** is an `extra` field, not bound. 24 of the 109 call sites carry
-  it by the same `ast` walk: 21 as a literal key, three through a spread dict
+- **`wall_id`** is an `extra` field, not bound. 24 of the 151 call sites
+  (2026-11-11) carry it by the same `ast` walk: 21 as a literal key, three through a spread dict
   (`Supervisor._keep_running`'s `extra`, twice, and `Wall.run`'s
   `start_lines()`). Which ones do not, and why that matters, is under
   Known gaps.
@@ -301,7 +348,8 @@ above is a hand-placed call. There is no layer 2.
 
 Arrt § Sensitive Data in Logs is the rule. The two secrets on the Player are
 `CLIENT_TOKEN` and the Frame's pairing token (`project-state.yaml`,
-`handles_sensitive_data`). What keeps each out:
+`handles_sensitive_data`), and, in slideshow mode, the owner's Reddit session
+cookie, which signs in as their account. What keeps each out:
 
 | Secret | Mechanism | Held by |
 |---|---|---|
@@ -312,6 +360,10 @@ Arrt § Sensitive Data in Logs is the rule. The two secrets on the Player are
 | The TV token, logged by `samsungtvws` at INFO (`New token %s`) | `logs.configure` floors the `samsungtvws` logger at WARNING | `tests/test_logs.py::test_a_token_logged_at_info_by_that_logger_is_not_emitted` and its DEBUG sibling |
 | The TV token's value in the startup line | Only its path is logged (`FrameSettings.frame_lines`, `tv_token_file`) | — |
 | A token file in git | — | `tests/test_repository.py::test_no_credential_file_is_tracked` |
+| The Reddit cookie (`REDDIT_SESSION`) in a repr or the slideshow's startup line | `field(repr=False)`; `SlideshowSettings.startup_lines` lists its fields by hand | `tests/test_config.py::test_the_cookie_is_in_no_repr_and_no_startup_line` |
+| The cookie anywhere in a slideshow's journal | Every record of a whole run, message and every field, searched for it | `tests/test_slideshow.py::test_a_whole_slideshow_run_logs_no_cookie` |
+| The cookie, or the account it signs in, from the settings page | Never echoed in a page; the account's own data (`/api/me`) is read for its kind only | `tests/test_settings_ui.py::…test_the_cookie_is_never_in_a_page_and_its_name_is_dropped_if_pasted`, `tests/test_reddit_source.py::test_the_accounts_own_data_reaches_no_log_and_no_listing` |
+| redgifs' temporary token | Only how long it is valid is logged | — |
 
 Tracebacks go in the `exception` field; `Formatter.formatException` prints no
 local variables. Nothing else the Player logs is personal: works, walls, file

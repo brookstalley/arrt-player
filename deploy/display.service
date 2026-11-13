@@ -35,7 +35,9 @@ Group=tvpi
 # The e-paper HAT is reached through SPI and GPIO; an HDMI screen through the
 # display card (`/dev/dri/card*`, group `video`), and its brightness through the
 # connector's DDC/CI bus (`/dev/i2c-*`, group `i2c`; `deploy/modules-load.d`).
-SupplementaryGroups=spi gpio video i2c
+# A slideshow's mpv also needs the GPU's render node (`/dev/dri/renderD*`, group
+# `render`): measured on the Pi 2026-11-10, it cannot draw without it.
+SupplementaryGroups=spi gpio video render i2c
 
 # **Everything the Player writes is tvpi's alone.** The television library
 # writes the pairing token with a plain open(), so without this the token file

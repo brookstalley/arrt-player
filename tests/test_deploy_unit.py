@@ -129,6 +129,17 @@ def test_a_save_on_the_settings_page_comes_back():
     assert directives.get("KillSignal") == ["SIGTERM"]
 
 
+def test_the_unit_can_reach_the_display_and_the_gpus_render_node():
+    """`video` for the display card, `render` for the render node a slideshow's mpv draws through.
+
+    Without `render` the Player starts, and every slideshow item fails with a
+    reason that names neither the group nor the unit.
+    """
+    groups = " ".join(_directives().get("SupplementaryGroups", [])).split()
+
+    assert {"video", "render"} <= set(groups), groups
+
+
 def test_what_the_player_writes_is_its_own_to_read():
     """The television library writes its pairing token with a plain
     `open(path, "w")`, so the token file gets whatever the umask leaves, and the

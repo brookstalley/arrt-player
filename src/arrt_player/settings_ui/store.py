@@ -18,8 +18,16 @@ cookie is genuine, under a secret that survives the restart a save causes
 add its keys without guessing what an older file meant. A version this code does
 not know is refused rather than read in part.
 
-**It holds `CLIENT_TOKEN` in the clear**, as `.env` does: the Player has to send
-it. The file is created 0600, and written by temp-and-rename with an `fsync`
+**Version 2 is version 1 plus the slideshow's keys** (`SLIDESHOW_KEYS`). A
+version 1 file is read as it stands, since every key it may hold is still
+managed, and the next write makes it version 2. An older Player refuses a
+version 2 file and names the version, which is the point of bumping it: without
+the bump it would refuse the slideshow keys as unmanaged, a less useful message.
+Rolling back across it means deleting the slideshow keys and setting `version`
+back to 1 by hand (`deploy/README.md`).
+
+**It holds `CLIENT_TOKEN` and `REDDIT_SESSION` in the clear**, as `.env` does: the
+Player has to send them. The file is created 0600, and written by temp-and-rename with an `fsync`
 between, the same discipline as `heartbeat.write`, because a Pi on an SD card with
 no UPS can otherwise keep a file that exists and holds nothing.
 """
@@ -34,16 +42,32 @@ from typing import Final
 #: The file, directly under `CACHE_DIR`.
 SETTINGS_FILENAME: Final[str] = ".settings.json"
 
-#: The layout this code reads and writes.
-VERSION: Final[int] = 1
+#: The layout this code writes.
+VERSION: Final[int] = 2
+
+#: The layouts this code reads. Version 1 holds a subset of version 2's keys.
+READABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, VERSION})
 
 #: The keys the page may set. Everything else stays in `.env`: a page that could
 #: move `CACHE_DIR` or its own port could lose its own file or lock itself out.
 #: `TV_CLIENT_NAME` is absent on purpose, because changing it costs a pairing
 #: prompt at the television.
-MANAGED_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN", "PLAYER_NAME")
+#: The slideshow's keys, new in version 2: which mode the Player runs in, and
+#: the slideshow's listing, cookie, dwell limits and screen.
+SLIDESHOW_KEYS: Final[tuple[str, ...]] = (
+    "PLAYER_MODE",
+    "SLIDESHOW_URL",
+    "REDDIT_SESSION",
+    "SLIDESHOW_MIN_SECONDS",
+    "SLIDESHOW_MAX_SECONDS",
+    "SLIDESHOW_OUTPUT",
+)
+MANAGED_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN", "PLAYER_NAME", *SLIDESHOW_KEYS)
 
-#: Owner read and write only: the file holds the client token.
+#: The keys the page takes and never shows back.
+SECRET_KEYS: Final[frozenset[str]] = frozenset({"CLIENT_TOKEN", "REDDIT_SESSION"})
+
+#: Owner read and write only: the file holds the client token and the Reddit cookie.
 FILE_MODE: Final[int] = 0o600
 
 
@@ -83,8 +107,10 @@ def read(cache_dir: Path) -> Stored:
         raise SettingsUnreadable(f"{path} is not JSON ({exc.msg})") from exc
     if not isinstance(document, dict):
         raise SettingsUnreadable(f"{path} does not hold an object")
-    if document.get("version") != VERSION:
-        raise SettingsUnreadable(f"{path} is layout version {document.get('version')!r}, and this Player reads version {VERSION}")
+    version = document.get("version")
+    if isinstance(version, bool) or version not in READABLE_VERSIONS:
+        readable = " and ".join(str(number) for number in sorted(READABLE_VERSIONS))
+        raise SettingsUnreadable(f"{path} is layout version {version!r}, and this Player reads versions {readable}")
     values = document.get("values", {})
     auth = document.get("auth", {})
     if not isinstance(values, dict) or not isinstance(auth, dict):

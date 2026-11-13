@@ -20,9 +20,13 @@ serves one thing, its own settings page (§ The settings page), and nothing else
 `settings_ui/server.py` is the only file in `src/` that opens a listening socket
 (searched 2026-11-10 for `Application(`, `start_server`, `TCPSite`,
 `HTTPServer`, `.bind(`, `listen(`; `settings_ui/server.py:address_to_visit`'s UDP
-`connect` only asks the kernel for a route and sends nothing). It makes outbound
-requests to two peers and draws on local hardware. The realistic attacker is
-something already on the LAN.
+`connect` only asks the kernel for a route and sends nothing). In Arrt mode it
+makes outbound requests to two peers, the server and the television. In
+slideshow mode it has no server: it calls `www.reddit.com` and `api.redgifs.com`
+and downloads media from whatever public host a post links (§ To Reddit: the
+session cookie, § Abuse Prevention). It draws on local hardware in both. The
+realistic attacker is something already on the LAN, and in slideshow mode also
+whoever writes a post in the listing.
 
 **What is Arrt's.** The server's side of the trust boundary (LAN-only, no login,
 the public-exposure cliff) is Arrt's `security-model.md` § Trust Boundary. The
@@ -37,7 +41,7 @@ No norm is ratified here, so there is no § Direction.
 
 ## Authentication
 
-The Player authenticates outward to two peers, the server and the television. One thing authenticates to it: its owner, at the settings page (§ To the Player: the settings page).
+The Player authenticates outward to two peers, the server and the television, or in slideshow mode to Reddit. One thing authenticates to it: its owner, at the settings page (§ To the Player: the settings page).
 
 ### To the server: the client token
 
@@ -167,6 +171,36 @@ sensitive as the token itself.
 - **It is not the pull's channel.** It takes only `aiohttp.web`, never a client,
   and only the entry point imports it (`tests/test_plane_isolation.py`).
 
+### To Reddit: the session cookie
+
+Slideshow mode reads a Reddit listing as the owner's account, with the
+`reddit_session` cookie copied from a logged-in browser (owner, 2026-11-10; the
+page says how). Reading Reddit this way is probably outside its terms for
+automated clients; the owner accepted that the risk is a rate limit or a revoked
+cookie.
+
+- **Where it goes.** Only to `www.reddit.com`, and only from
+  `sources/fetch.py:Fetcher.get_api`, which adds it for that host alone and
+  refuses a caller's own `Cookie` header. Media downloads and redgifs' API carry
+  none (`tests/test_fetch.py::test_the_cookie_goes_to_reddit_and_to_no_other_host`,
+  `::test_a_caller_cannot_send_a_cookie_header_of_its_own`).
+- **What it can do.** Whatever the account can on Reddit, for as long as Reddit
+  accepts it: about six months from issue (a JWT `exp`, measured 2026-11-10).
+  The Player only reads.
+- **Where it is kept.** In `REDDIT_SESSION`, in `.env` or the settings page's
+  file (0600, `store.FILE_MODE`), beside the client token.
+- **Where it never appears.** No `repr`, no startup line, no log record
+  (`tests/test_config.py::TestSlideshowMode::test_the_cookie_is_in_no_repr_and_no_startup_line`,
+  `tests/test_fetch.py::test_the_cookie_is_in_no_log_record`,
+  `tests/test_slideshow.py::test_a_whole_slideshow_run_logs_no_cookie`). The
+  page takes it and never shows it back, the environment's value included
+  (`config.UiSettings.pinned_values` holds no secret key;
+  `tests/test_settings_ui.py::TestTheSlideshowsSettings`).
+- **Its expiry.** The page reads the JWT's `exp`, unverified, and warns two
+  weeks ahead (`settings_ui/server.py:EXPIRY_WARNING_S`). Nothing else is
+  decided on the claim: whether Reddit still accepts the cookie is told by
+  asking it (`sources/reddit.py:RedditSource._why_refused`).
+
 ## Authorization
 
 The Player holds no authority of its own to grant. What it may do is decided by
@@ -193,11 +227,16 @@ and `arrt-contract` are dev-only (`pyproject.toml` `[dependency-groups] dev`).
 The hand-written readers above are held to the contract's fixtures by
 `tests/test_player_contract.py`. Unknown keys are accepted, as the schemas allow.
 
-**The requests the Player makes are the contract's.** Only `pull.py` opens an
-HTTP client, and it requests only the routes `arrt_contract.routes()` names
+**The requests the Player makes to its server are the contract's.** Only
+`pull.py` opens an HTTP client to the server, and it requests only the routes `arrt_contract.routes()` names
 (`tests/test_plane_isolation.py`). The one exception by design is a master's
 URL, which the feed names and `urljoin` resolves against the manifest URL; it
 may be any host, gets no token, and must match its hash.
+
+The slideshow, which has no server, makes its requests through
+`sources/fetch.py`: listing and API calls to a fixed host set, the Reddit
+cookie to `www.reddit.com` only, and media downloads from public addresses only,
+every redirect hop included (its docstring, and `tests/test_fetch.py`).
 
 ### What it does to the television
 
@@ -237,12 +276,19 @@ may be any host, gets no token, and must match its hash.
 
 - **No personal data.** The Player stores artworks' ids, images and label text,
   its own settings, and per-set content ids (`data-model.md`).
-- **What leaves the device**, all to the server: the client heartbeat (outputs,
+- **What leaves the device in Arrt mode**, all to the server: the client heartbeat (outputs,
   their screen sizes, and the Frame's `device.duid`;
   `client.py:client_heartbeat`, `FrameIdentity`) and each wall's heartbeat
   (`heartbeat.py:Health.document`, including `last_error` as free text from the
   journal). Nothing goes to any third party.
-- **Secrets at rest.** `CLIENT_TOKEN` in `.env`; the deploy runbook installs it
+- **What leaves the device in slideshow mode**: the listing request and the
+  cookie, to Reddit; a request for a temporary token, then a lookup per redgifs
+  post, to redgifs (whose token is bound to the caller's address and user
+  agent, measured 2026-11-10); and a GET per media file, to whatever host the
+  post links. Each request carries `fetch.USER_AGENT`, which names the program
+  and no person. No heartbeat: there is no server.
+- **Secrets at rest.** `CLIENT_TOKEN` and `REDDIT_SESSION` in `.env` or the
+  page's file (0600); the deploy runbook installs it
   `0640`, owner `tvpi` (`deploy/README.md`), and nothing in the code checks the
   mode. The TV token in `TV_TOKEN_FILE`, 0600 (above). Both are
   gitignored (`.gitignore`) and refused if tracked
@@ -278,11 +324,17 @@ a hostile or broken peer on the LAN can do, and what bounds it:
 | Anything on the LAN | Guess the page's password | Length floor; a throttle doubling to a minute per attempt |
 | A page elsewhere in the owner's browser | Post a form to the settings page | `Origin` check on every POST; `SameSite=Strict` cookie |
 | Anything on the LAN that sees the owner's traffic | Read the password or the cookie off the wire | Not bounded: plain HTTP, as for the server (Arrt § Trust Boundary) |
+| Whoever posts in the slideshow's listing | Make the Player fetch a LAN address (SSRF through a listing) | Every host, and every redirect hop, resolved and refused unless public, in the resolver aiohttp connects through so a name cannot change between check and connect; at most 5 redirects (`fetch.PublicOnlyResolver`, `_check_target`; `tests/test_fetch.py`) |
+| Whoever posts in the slideshow's listing | Send something huge or something that is not media | 200 MB a file, the cache capped at 2 GB, and the bytes, not the header, decide whether it is a picture or a clip (`fetch.MAX_FILE_BYTES`, `cache.CAP_BYTES`, `fetch.sniff`) |
+| Whoever posts in the slideshow's listing | Hand mpv a URL, so the renderer becomes a second network client | mpv is given only regular files under the media cache (`mpv.MpvOutput._refusal`; `tests/test_mpv.py`) |
+| Whoever posts in the slideshow's listing | Put anything at all on the screen | Not bounded, by the owner's choice: there is no content filter, and what the listing names is the owner's to choose (build plan, 2026-11-10) |
 
 ### The deploy unit (`deploy/display.service`)
 
 Runs as the unprivileged `tvpi` user and group, with `spi gpio video` added for
-the e-paper panel and `/dev/dri`. It refuses to start if `.env` is missing
+the e-paper panel and `/dev/dri`, `render` for the GPU's render node that mpv
+draws through in slideshow mode, and `i2c` for a screen's DDC/CI bus
+(`tests/test_deploy_unit.py` checks them). It refuses to start if `.env` is missing
 (un-prefixed `EnvironmentFile=`). It sets `UMask=0077` (2026-11-11), so every
 file the Player creates is `tvpi`'s alone. Otherwise it names no systemd
 sandboxing: no `NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`,

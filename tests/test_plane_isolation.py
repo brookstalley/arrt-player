@@ -1,4 +1,4 @@
-"""Arrt Player imports no Arrt module, and opens an HTTP client in one module only.
+"""Arrt Player imports no Arrt module, and opens an HTTP client only in the two modules named here.
 
 **In the Player's own suite since wave 5**, when the repository split put the
 server out of reach: everything this guard reads is the Player's, and the one
@@ -54,7 +54,20 @@ by attribute; it may never name a client class; and only the entry point may
 import it, so nothing reaches aiohttp through it by re-export. Every other module
 is held as before.
 
-Both halves are proven able to fail below, against planted violations, because a
+**Narrowed again 2026-11-10, for the slideshow, at the owner's request (#27).**
+A slideshow plays a Reddit listing with no Arrt server at all, so it needs a
+client of its own, and a post may link media on any host, so no list of hosts
+can bound it. One module, `src/arrt_player/sources/fetch.py`, may open an HTTP
+client. It is bounded by what it can reach rather than by a list: its listing
+and API calls go only to the hosts in its `API_HOSTS`, which this guard holds to
+`SLIDESHOW_API_HOSTS` and holds the module to spelling no other; its media
+downloads reach public addresses only, which its own tests hold
+(`tests/test_fetch.py`). It imports nothing of the server's configuration, the
+contract or the pull, so it cannot learn the server's address or token. Only
+modules in its own package, the slideshow programme and the entry point may
+import it. Every other module is held as before.
+
+Every exception is proven able to fail below, against planted violations, because a
 guard nobody has watched go red is a guard nobody knows is wired up.
 """
 
@@ -64,7 +77,7 @@ import re
 
 import arrt_contract
 import pytest
-from import_graph import imported_names, resolve
+from import_graph import imported_names, package_of, resolve
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DISPLAY_PACKAGE = PROJECT_ROOT / "src" / "arrt_player"
@@ -72,6 +85,25 @@ DISPLAY_PACKAGE = PROJECT_ROOT / "src" / "arrt_player"
 #: The one module that may open an HTTP client: HTTP mode's pull of the manifest,
 #: its renders and the heartbeat.
 PULL_MODULE = DISPLAY_PACKAGE / "pull.py"
+
+#: The slideshow's one client: listing and API calls to `SLIDESHOW_API_HOSTS`,
+#: media from public addresses.
+FETCH_MODULE = DISPLAY_PACKAGE / "sources" / "fetch.py"
+
+#: The only hosts the slideshow's client may call, other than to download media.
+SLIDESHOW_API_HOSTS: frozenset[str] = frozenset({"www.reddit.com", "api.redgifs.com"})
+
+#: Who may import the slideshow's client: its own package, the slideshow
+#: programme, and the entry point that composes the slideshow.
+FETCH_IMPORTERS_PACKAGE = DISPLAY_PACKAGE / "sources"
+FETCH_IMPORTERS: frozenset[pathlib.Path] = frozenset(
+    {DISPLAY_PACKAGE / "programmes" / "slideshow.py", DISPLAY_PACKAGE / "__main__.py"}
+)
+
+#: What the slideshow's client must never import: the server's configuration,
+#: the contract, and the pull. Any of them could hand it the server's address
+#: or token.
+FETCH_FORBIDDEN_IMPORTS: tuple[str, ...] = ("arrt_player.config", "arrt_player.pull", "arrt_player.client", "arrt_contract")
 
 #: The one module that may listen: the settings page. It may take `aiohttp.web`
 #: and nothing else from aiohttp.
@@ -138,7 +170,7 @@ def test_no_display_module_reaches_the_curation_plane():
     assert offences == [], "\n".join(str(offence) for offence in offences)
 
 
-def test_no_display_module_but_the_pull_opens_an_http_client():
+def test_no_display_module_but_the_pull_and_the_slideshow_fetch_opens_an_http_client():
     offences = [offence for offence in _audit(display_modules()) if offence.kind == "http" and not _exempt(offence)]
 
     assert offences == [], "\n".join(str(offence) for offence in offences)
@@ -148,6 +180,31 @@ def test_the_pull_is_where_the_http_client_is():
     """The exemption names a real module that really opens a client, or it exempts nothing."""
     assert PULL_MODULE.is_file(), f"{PULL_MODULE} does not exist; the exemption names nothing"
     assert any(offence.kind == "http" and _exempt(offence) for offence in _audit(display_modules()))
+
+
+def test_the_slideshow_fetch_is_where_its_client_is():
+    assert FETCH_MODULE.is_file(), f"{FETCH_MODULE} does not exist; the exemption names nothing"
+    assert any(
+        offence.kind == "http" and _exempt(offence) and offence.chain[-1] == FETCH_MODULE for offence in _audit(display_modules())
+    )
+
+
+def test_only_the_slideshow_imports_its_fetch():
+    """As with the pull: the exemption is for the file, not for whatever imports it from elsewhere."""
+    assert _fetch_importers_outside(display_modules()) == []
+
+
+def test_the_slideshow_fetch_calls_only_its_api_hosts():
+    """Its host set is the one this guard names, and it spells no other host."""
+    from arrt_player.sources import fetch
+
+    assert fetch.API_HOSTS == SLIDESHOW_API_HOSTS
+    assert _hosts_spelled(FETCH_MODULE) <= SLIDESHOW_API_HOSTS, _hosts_spelled(FETCH_MODULE) - SLIDESHOW_API_HOSTS
+    assert _hosts_spelled(FETCH_MODULE), "the fetch spells no host, so this checks nothing"
+
+
+def test_the_slideshow_fetch_cannot_learn_the_server():
+    assert _forbidden_fetch_imports(FETCH_MODULE) == []
 
 
 def test_the_settings_page_is_where_the_web_server_is():
@@ -220,12 +277,69 @@ def test_the_pull_requests_only_the_routes_the_contract_names():
     assert spelled <= contract_paths, f"paths the contract does not name: {spelled - contract_paths}"
 
 
-def _exempt(offence: "Offence", pull: pathlib.Path = PULL_MODULE, page: pathlib.Path = SETTINGS_PAGE_MODULE) -> bool:
-    """Whether the file that imports it is allowed to: the pull any client, the page only the server half."""
+def _exempt(
+    offence: "Offence",
+    pull: pathlib.Path = PULL_MODULE,
+    page: pathlib.Path = SETTINGS_PAGE_MODULE,
+    fetch: pathlib.Path = FETCH_MODULE,
+) -> bool:
+    """Whether the file that imports it is allowed to: the pull and the fetch any client, the page only the server half."""
     importer = offence.chain[-1]
-    if importer == pull:
+    if importer in (pull, fetch):
         return True
     return importer == page and (offence.name == WEB_SERVER or offence.name.startswith(f"{WEB_SERVER}."))
+
+
+def _fetch_importers_outside(
+    modules: list[pathlib.Path],
+    fetch: pathlib.Path = FETCH_MODULE,
+    package: pathlib.Path = FETCH_IMPORTERS_PACKAGE,
+    allowed: frozenset[pathlib.Path] = FETCH_IMPORTERS,
+) -> list[str]:
+    """Every module that imports the fetch and is neither in its package nor one of `allowed`."""
+    name = ".".join(package_of(fetch))
+    return sorted(
+        _relative(path)
+        for path in modules
+        if path != fetch
+        and package not in path.parents
+        and path not in allowed
+        and any(imported == name or imported.startswith(f"{name}.") for imported in imported_names(path))
+    )
+
+
+#: What a host looks like when spelled as a string: dotted labels, or a URL's authority.
+_HOST = re.compile(r"\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b", re.IGNORECASE)
+
+
+def _hosts_spelled(path: pathlib.Path) -> set[str]:
+    """Every host a module spells in a string other than a docstring."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+    }
+    hosts: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            for match in _HOST.finditer(node.value):
+                host = match.group(1).lower()
+                # A module's own file name ("connector.py") is not a host.
+                if not host.endswith(".py"):
+                    hosts.add(host)
+    return hosts
+
+
+def _forbidden_fetch_imports(path: pathlib.Path) -> list[str]:
+    return sorted(
+        name
+        for name in set(imported_names(path))
+        if any(name == forbidden or name.startswith(f"{forbidden}.") for forbidden in FETCH_FORBIDDEN_IMPORTS)
+    )
 
 
 def _aiohttp_spellings(path: pathlib.Path) -> list[str]:
@@ -263,6 +377,51 @@ class TestTheGuardCanFail:
         offences = [offence for offence in _audit([pull, second], roots=(tmp_path,)) if not _exempt(offence, pull)]
 
         assert [offence.chain[-1].name for offence in offences] == ["second.py"]
+
+    def test_the_exemption_covers_the_fetch_and_nothing_beside_it(self, tmp_path: pathlib.Path):
+        fetch = _plant(tmp_path, "fetch.py", "import aiohttp\n")
+        second = _plant(tmp_path, "slideshow.py", "import aiohttp\n")
+
+        offences = [offence for offence in _audit([fetch, second], roots=(tmp_path,)) if not _exempt(offence, fetch=fetch)]
+
+        assert [offence.chain[-1].name for offence in offences] == ["slideshow.py"]
+
+    def test_it_catches_an_import_of_the_fetch_from_outside_the_slideshow(self, tmp_path: pathlib.Path):
+        sources = tmp_path / "sources"
+        sources.mkdir()
+        (tmp_path / "__init__.py").write_text("")
+        (sources / "__init__.py").write_text("")
+        fetch = _plant(sources, "fetch.py", "import aiohttp\n")
+        sibling = _plant(sources, "reddit.py", "from .fetch import Fetcher\n")
+        allowed = _plant(tmp_path, "composition.py", f"from {tmp_path.name}.sources.fetch import Fetcher\n")
+        stray = _plant(tmp_path, "label.py", f"from {tmp_path.name}.sources import fetch\n")
+        relative = _plant(tmp_path, "wall.py", "from .sources.fetch import Fetcher\n")
+
+        found = _fetch_importers_outside(
+            [fetch, sibling, allowed, stray, relative], fetch=fetch, package=sources, allowed=frozenset({allowed})
+        )
+
+        assert [pathlib.Path(name).name for name in found] == ["label.py", "wall.py"]
+
+    def test_it_catches_a_host_outside_the_set(self, tmp_path: pathlib.Path):
+        fetch = _plant(
+            tmp_path,
+            "fetch.py",
+            '"""Docstrings may name https://www.example.com/ and www.example.org."""\n'
+            'API_HOSTS = frozenset({"www.reddit.com"})\n'
+            'LABELS = "https://arrt.local:8000/labels"\n'
+            'NOTE = "or fall back to cdn.example.net."\n'
+            "def f(host):\n"
+            '    """Nor does a function\'s: api.example.com."""\n'
+            '    return f"https://api.imgur.com/3/{host}"\n',
+        )
+
+        assert _hosts_spelled(fetch) == {"www.reddit.com", "arrt.local", "api.imgur.com", "cdn.example.net"}
+
+    def test_it_catches_the_fetch_reading_the_server_configuration(self, tmp_path: pathlib.Path):
+        fetch = _plant(tmp_path, "fetch.py", "from arrt_player.config import ClientSettings\nimport arrt_contract\n")
+
+        assert _forbidden_fetch_imports(fetch) == ["arrt_contract", "arrt_player.config", "arrt_player.config.ClientSettings"]
 
     def test_the_settings_page_may_take_the_server_half_and_nothing_else(self, tmp_path: pathlib.Path):
         """The page's clause, planted: `from aiohttp.web import …` passes; every road to the client does not."""
