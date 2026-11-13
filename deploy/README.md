@@ -326,6 +326,38 @@ once. If it cannot set the mode, the journal says `tv.token_file_open`.
 **The way back** is the previous revision. The tighter modes stay on files
 already created, which an older Player reads as `tvpi` all the same.
 
+## An HDMI screen's brightness follows the sun (2026-11-13, #34)
+
+A screen that answers DDC/CI now has its brightness set from the sun, as the
+Frame's has been, between `SCREEN_MIN_BRIGHTNESS` and `SCREEN_MAX_BRIGHTNESS`
+(default 5 and 50). It is on whenever `LATITUDE`, `LONGITUDE` and
+`LOCATION_NAME` are set, with or without a Frame. With none of them set it is
+off, and the start line says so. The Player writes only when the sun moves the
+value, so a brightness set with the monitor's own buttons stays until then.
+
+**What the Pi needs**, as `tvpi`'s administrator:
+
+    sudo cp deploy/modules-load.d/arrt-player.conf /etc/modules-load.d/
+    sudo modprobe i2c-dev                   # now, rather than at the next boot
+    sudo cp deploy/display.service /etc/systemd/system/ && sudo systemctl daemon-reload
+
+The unit adds group `i2c` (`/dev/i2c-*` is `root:i2c 0660`). `i2c-dev` was
+already loaded on the reference Pi, but only through ddcutil's own
+`/usr/lib/modules-load.d/ddcutil.conf`, which removing ddcutil would take away.
+The Player does not use ddcutil, which stays useful for looking by hand.
+
+**Check it worked:** the client's start line carries `screen_brightness`
+(`5 to 50 with the sun at <place>, every 300 s`), and the journal shows
+`screen.brightness_set` with `brightness` and `read_back` equal, once the wall
+is showing art. A monitor with no DDC/CI logs `screen.brightness_unsupported`
+once and is left alone. `screen.brightness_failed` naming `Permission denied`
+means the unit is not the one above (no `i2c` group). Naming `No such file`
+means `i2c-dev` is not loaded.
+
+**The way back** is the previous revision, or `SCREEN_MAX_BRIGHTNESS` and
+`SCREEN_MIN_BRIGHTNESS` both set to the level wanted, which holds the screen
+there. The group and the module file are harmless to leave.
+
 ## The two new units, and where everything they name now lives
 
 `display.service` and `curation.service` are the planes this product is being
