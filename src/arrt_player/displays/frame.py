@@ -722,15 +722,12 @@ class FrameDisplay:
             return
         self._brightness_at = elapsed
 
-        state = brightness_module.sun_state(
+        value, state = brightness_module.level_at(
             self._clock.now(),
             latitude=self._settings.latitude,
             longitude=self._settings.longitude,
             location_name=self._settings.location_name,
             location_region=self._settings.location_region,
-        )
-        value = brightness_module.television_brightness(
-            state.relative_brightness,
             minimum=self._settings.tv_min_brightness,
             maximum=self._settings.tv_max_brightness,
         )

@@ -179,11 +179,16 @@ and misses those 13.
 | `tv.token_file_open` | WARNING | `SamsungTv._keep_the_token_private` | The token file could not be set to 0600 (`tv_token_file`, never its content); anyone who can read it can drive the art channel |
 | `tv.close_failed` | WARNING | `SamsungTv._quietly_close` | Closing the connection raised; the set may hold the abandoned channel and refuse the next connection for minutes |
 | `brightness.set` | INFO | `FrameDisplay._apply_brightness` | Brightness set from the sun's angle |
-| **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`) | | | |
+| **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`) | | | |
 | `screen.absent` / `screen.returned` | WARNING / INFO | `KmsOutput._gone`, `_draw` | No screen on the connector, then one (drawn at once) |
 | `screen.draw_failed` / `screen.draw_recovered` | WARNING / INFO | `ScreenDisplay.show` | The output refused a picture |
 | `screen.refresh_failed` / `screen.refresh_recovered` | WARNING / INFO | `ScreenDisplay._refresh` | The per-poll redraw failed |
 | `rotation.selected` | INFO | `ScreenDisplay.show` | A work drawn (`picture_path`) |
+| `screen.brightness_set` | INFO, or WARNING when `read_back` differs | `ScreenBrightness._said_set` | The screen's brightness set from the sun (`output`, `brightness`, `read_back`, `solar_angle`); written only when the value changes |
+| `screen.brightness_unsupported` | INFO | `ScreenBrightness._said_unsupported` | A screen with no brightness control, or a scale of 0 (`reason`); said once, and the screen left alone until it is replaced |
+| `screen.brightness_no_answer` / `screen.brightness_answering` | INFO / INFO | `ScreenBrightness._no_answer`, `_answered` | Nothing acknowledged the DDC/CI address (no DDC/CI, or asleep); said once, asked again each interval, and said again when it answers |
+| `screen.bus_close_failed` | WARNING | `ScreenBrightness._drop_the_bus` | The DDC/CI device would not close; a descriptor may be leaking |
+| `screen.brightness_failed` / `screen.brightness_recovered` | WARNING / INFO | `ScreenBrightness._failed`, `_answered` | This host could not reach the bus (`error`: a missing `i2c` group, no `i2c-dev`, a garbled reply); said once per episode, retried each interval |
 | **The label** (`__main__`, `label_renderer.py`, `pull.LabelPull`, `panel/epaper.py`) | | | |
 | `panel.type_scale` | INFO | `__main__.label_surface` | The derived type size, floor and border, once at start |
 | `panel.unavailable` | WARNING | `__main__.label_panel` | A configured panel will not open, has no text stack, or has no viewing distance; walls unaffected |
