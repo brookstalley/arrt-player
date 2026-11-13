@@ -35,7 +35,14 @@ governed_by:
       - "§ Start-up (no server keys means setup mode) → amendment proposed: a Player whose mode is slideshow needs no server keys. It needs a listing URL and a cookie, and lacking either it serves only the page."
 partition: serial — 03 extends 02's source, 04 composes 01–03, and 05 deploys all of it; 01 and 02 are independent, but 01 needs the owner at the Pi, and one builder keeps the plane-isolation guard's two amendments coherent
 last_validated: 2026-11-10
+lifecycle: completed
+archived: 2026-11-13
+released_in: v0.8.0
+unbuilt_at_archive: 1 of 5 chunks not done (Chunk 05) — the scope shipped, but this plan did not finish with it
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 # Build plan: the serverless slideshow (#27)
 
@@ -52,9 +59,9 @@ last_validated: 2026-11-10
 - **Images, video and GIFs, all of them. No NSFW filter:** what the URL points at is the owner's choice.
 - **From any host a post can link, not just Reddit's own.** The owner named imgur, redgifs and "imglr", a new imgur clone named as an example of "any host" (owner, 2026-11-10). So the requirement is the generic tier, with per-host resolvers only where they beat it.
 - **imgur albums show their cover image** (owner, 2026-11-10, accepting the recommendation).
-- **Video pages such as YouTube are played too** (owner, 2026-11-10: "yes to video pages"). *Inferred* reading of that answer: the question offered skipping them, and "yes" was read as wanting them. **Built in a follow-on plan (wave 2b), not this one.** See Decisions.
+- **Video pages such as YouTube are played too** (owner, 2026-11-10: "yes to video pages"). *Inferred* reading of that answer: the question offered skipping them, and "yes" was read as wanting them. **Built in a follow-on plan (wave 2b), not this one** (confirmed by the owner, 2026-11-13). See Decisions.
 - **Listing order**, looped.
-- **A min and max dwell time.** A still shows for min. *Inferred:* the owner did not answer for stills, and min was the recommendation. A clip of length D plays n = ceil(min / D) times, and the total, n·D, is cut at max. The owner's examples, kept as test cases: D = 120, min 30, max 60 → 60 s; D = 18 → two plays, 36 s.
+- **A min and max dwell time.** A still shows for min (confirmed by the owner, 2026-11-13; it was *Inferred*, with min the recommendation). A clip of length D plays n = ceil(min / D) times, and the total, n·D, is cut at max. The owner's examples, kept as test cases: D = 120, min 30, max 60 → 60 s; D = 18 → two plays, 36 s.
 - **Muted.**
 - **The label** shows the post title, r/subreddit, u/author and the upvotes.
 - **Sources sit behind an interface**, so another source can replace Reddit.
@@ -100,7 +107,7 @@ last_validated: 2026-11-10
 - **Mode** is a key in the settings store (`PLAYER_MODE`: `arrt` or `slideshow`). Saving it restarts the Player, as every save does.
 
 **Constraints:**
-- **One HDMI output in slideshow mode.** Both Pi 4 HDMI connectors are on one DRM card, and only one process can be its master (`kms.py` docstring). So one mpv can drive only one connector. The page lists the connected HDMI outputs and the owner picks one. *Inferred* from the measured architecture; the owner's "one or more" is narrowed by it, and only one screen is connected today.
+- **One HDMI output in slideshow mode.** Both Pi 4 HDMI connectors are on one DRM card, and only one process can be its master (`kms.py` docstring). So one mpv can drive only one connector. The page lists the connected HDMI outputs and the owner picks one. Derived from the measured architecture: the owner's "one or more" is narrowed by it (confirmed by the owner, 2026-11-13), and only one screen is connected today.
 - **What mpv reports is not evidence of what is on screen.** mpv reported 0 drops while every commit failed. So `MpvOutput` treats mpv's own failure lines (`Failed to commit atomic request`, a VO that fails to start) as "not shown", logs them by name and restarts mpv. It never trusts the drop counter alone. (Learning: confirm a boundary library's success against the remote system's own state.)
 - **The cookie goes only to `www.reddit.com`.** Media are fetched without it. The cookie is write-only on the page and never logged or put in a repr.
 - **A post can name any URL, so a download must not be able to reach the LAN.** A post linking `http://192.168.1.1/…` would otherwise make the Player, which sits on the home LAN, fetch from the router. That is SSRF through a listing. So the downloader:
@@ -354,6 +361,7 @@ last_validated: 2026-11-10
 - **Acceptance criteria:**
   - On the Pi: switch to slideshow from the page; the owner's listing plays on the LG at 4K with captions on the panel; switch back to Arrt from the page and the wall returns.
   - The cookie's renewal is checked: is the `exp` on the Pi's copy later than when it was pasted?
+- **Met 2026-11-13** on the Pi at v0.8.0, with the owner at the set: `hdmi-output-findings.md` § The slideshow on the Pi: its acceptance. Two things were owed by it and stay open there: the cookie's renewal, readable only once its `exp` moves, and redgifs HD against SD, because the acceptance listing had no redgifs posts. The archive stamp's `unbuilt_at_archive` reads chunk state, which counts only review facts that name a chunk; it does not mean the acceptance is missing.
 - **Type:** cumulative-final
 - **Done when:**
   1. Acceptance criteria met and the suite passes

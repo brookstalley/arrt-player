@@ -4,6 +4,14 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-13, at the set.** "yep looks great", on the slideshow playing on the LG at 4K
+with captions on the panel, then "all good" after switching back to Arrt from the page.
+That answer also confirmed the three readings put to the owner with it: a still shows
+for the minimum dwell; video pages wait for their own plan (wave 2b); and the
+slideshow drives one output. Landed in `hdmi-output-findings.md` § The slideshow on
+the Pi: its acceptance, and in `build-plan-slideshow.md` § Goals (no longer
+*Inferred*).
+
 **2026-11-13, later.** "yes prawduct should pull from testament", on whether the
 declared `test_command` should run on the testament pool. Landed as `test_command`
 in `.prawduct/project-state.yaml`.
