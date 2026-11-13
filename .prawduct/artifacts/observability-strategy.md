@@ -188,7 +188,7 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | `tv.token_file_open` | WARNING | `SamsungTv._keep_the_token_private` | The token file could not be set to 0600 (`tv_token_file`, never its content); anyone who can read it can drive the art channel |
 | `tv.close_failed` | WARNING | `SamsungTv._quietly_close` | Closing the connection raised; the set may hold the abandoned channel and refuse the next connection for minutes |
 | `brightness.set` | INFO | `FrameDisplay._apply_brightness` | Brightness set from the sun's angle |
-| **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`) | | | |
+| **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`; in slideshow mode the `screen.brightness_*` events come from the slideshow's screen, with `wall_id` `slideshow`) | | | |
 | `screen.absent` / `screen.returned` | WARNING / INFO | `KmsOutput._gone`, `_draw` | No screen on the connector, then one (drawn at once) |
 | `screen.draw_failed` / `screen.draw_recovered` | WARNING / INFO | `ScreenDisplay.show` | The output refused a picture |
 | `screen.refresh_failed` / `screen.refresh_recovered` | WARNING / INFO | `ScreenDisplay._refresh` | The per-poll redraw failed |

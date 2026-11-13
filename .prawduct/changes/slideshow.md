@@ -43,6 +43,9 @@ never both (backlog #27).
   check something is absent from the log now read the formatted journal line,
   fields included, through `conftest.journal`, so a secret in a field cannot
   slip past them.
+- **The slideshow's screen follows the sun**, as an Arrt-mode screen does
+  (`SCREEN_*` and the location keys). It is written only while an item is up,
+  and its journal lines carry `wall_id` `slideshow`.
 - **Deploy:** the unit gains group `render`. `deploy/README.md` § The slideshow
   covers installing mpv, switching modes and rolling back.
 

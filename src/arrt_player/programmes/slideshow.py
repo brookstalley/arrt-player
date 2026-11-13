@@ -24,6 +24,12 @@ backoff for the screen.
 **The label says the post, not the work.** A post's caption is set through the
 same `LabelText` and layout as a work's label (`label_for` says which field
 carries what), so it gets the same type scale and floors.
+
+**The screen's brightness follows the sun while an item is up**, as an Arrt-mode
+screen's does (`displays/screen_brightness.py`), and is never written while
+nothing is shown, so a brightness write cannot be what wakes the screen. mpv
+reports no hot-plug, so the screen is taken to be present throughout. A
+monitor swapped while the Player runs is not probed again until it restarts.
 """
 
 import asyncio
@@ -81,6 +87,14 @@ class Screen(Protocol):
     def load(self, path: Path) -> Loaded | NotShown: ...
 
     def check(self) -> NotShown | None: ...
+
+    def close(self) -> None: ...
+
+
+class Brightness(Protocol):
+    """The screen's brightness: `displays.screen_brightness.ScreenBrightness`. Never raises on a monitor's fault."""
+
+    async def apply(self, *, present: bool, showing: bool) -> None: ...
 
     def close(self) -> None: ...
 
@@ -188,6 +202,7 @@ class Slideshow:
         screen: Screen,
         limits: DwellLimits,
         captioner: Captioner | None = None,
+        brightness: Brightness | None = None,
         listing_path: Path | None = None,
         status: SlideshowStatus | None = None,
         monotonic: Callable[[], float] = time.monotonic,
@@ -200,6 +215,7 @@ class Slideshow:
         self._screen = screen
         self._limits = limits
         self._captioner = captioner
+        self._brightness = brightness
         self._listing_path = listing_path
         self.status = status if status is not None else SlideshowStatus()
         self._monotonic = monotonic
@@ -263,8 +279,13 @@ class Slideshow:
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._drawing
         finally:
-            # On a thread: a load in flight holds the renderer's lock until it returns.
-            await asyncio.to_thread(self._screen.close)
+            try:
+                # On a thread: a load in flight holds the renderer's lock until it returns.
+                await asyncio.to_thread(self._screen.close)
+            finally:
+                if self._brightness is not None:
+                    # On a thread: closing waits for a DDC/CI exchange in flight.
+                    await asyncio.to_thread(self._brightness.close)
 
     # -- the listing -------------------------------------------------------------------------
 
@@ -410,6 +431,7 @@ class Slideshow:
             },
         )
         self._caption(item)
+        await self._follow_the_sun()
         await self._dwell(stop, item, dwell)
 
     async def _dwell(self, stop: asyncio.Event, item: Item, seconds: float) -> None:
@@ -424,6 +446,12 @@ class Slideshow:
             if failed is not None:
                 self._not_shown(item, failed.reason)
                 return
+            await self._follow_the_sun()
+
+    async def _follow_the_sun(self) -> None:
+        """Brightness while an item is up. The brightness keeps its own interval, so this is called freely."""
+        if self._brightness is not None:
+            await self._brightness.apply(present=True, showing=self._current is not None)
 
     def _not_shown(self, item: Item, reason: str) -> None:
         self._current = None

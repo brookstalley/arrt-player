@@ -757,6 +757,9 @@ class SlideshowSettings:
     output: str
     panel: PanelSettings
     player_name: str = ""
+    #: The slideshow screen's brightness, read from the keys an Arrt-mode screen
+    #: reads; off with no location.
+    screen_brightness: ScreenBrightnessSettings = field(default_factory=lambda: ScreenBrightnessSettings(location=None))
 
     @property
     def media_root(self) -> Path:
@@ -780,6 +783,7 @@ class SlideshowSettings:
             "listing": self.listing_url,
             "dwell": f"{self.limits.minimum:g}-{self.limits.maximum:g} s",
             "output": self.output,
+            "screen_brightness": self.screen_brightness.screen_brightness_line(),
             "player_name": self.player_name or "(none — PLAYER_NAME is not set)",
             "cache_dir": str(self.cache_dir),
             "panel": self.panel.panel_lines(),
@@ -871,6 +875,7 @@ def _slideshow(env: dict[str, str], cache_dir: Path) -> SlideshowSettings:
         output=output or DEFAULT_SLIDESHOW_OUTPUT,
         panel=_panel(env),
         player_name=name,
+        screen_brightness=_screen_brightness(env),
     )
 
 

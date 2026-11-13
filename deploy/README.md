@@ -399,6 +399,11 @@ only the current listing's), the last listing in `.slideshow-listing.json`,
 and mpv's socket and pid in `.mpv/`. The cookie is in `.settings.json` (0600) or
 `.env`.
 
+**The screen's brightness follows the sun** in slideshow mode too, from the
+same `.env` keys and with the same `i2c` group as § An HDMI screen's brightness
+follows the sun, above. The `slideshow.starting` line carries `screen_brightness`,
+and the `screen.brightness_*` events carry `wall_id` `slideshow`.
+
 **Check it worked:** the journal's `slideshow.starting`, then `slideshow.listed`
 and `slideshow.shown` events, and the page's Slideshow section says what Reddit
 last answered. A `slideshow.renderer_unavailable` error at start names what

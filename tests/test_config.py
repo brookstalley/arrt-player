@@ -636,6 +636,25 @@ class TestSlideshowMode:
         assert "REDDIT_SESSION" not in ui.pinned_values
         assert ui.pinned_session_expiry == 1_810_000_000.0
 
+    def test_a_slideshow_with_a_location_follows_the_sun_on_its_screen(self, cache_dir: Path):
+        location = {name: FRAME[name] for name in ("LATITUDE", "LONGITUDE", "LOCATION_NAME")}
+        settings = load(a_slideshow(cache_dir, SCREEN_MIN_BRIGHTNESS="12", SCREEN_MAX_BRIGHTNESS="71", **location))
+
+        brightness = settings.screen_brightness
+        assert brightness.active
+        assert (brightness.minimum, brightness.maximum) == (12, 71)
+        assert settings.startup_lines()["screen_brightness"] == "12 to 71 with the sun at Bozeman, every 300 s"
+
+    def test_a_slideshow_with_no_location_leaves_its_screen_alone_and_says_why(self, cache_dir: Path):
+        settings = load(a_slideshow(cache_dir))
+
+        assert not settings.screen_brightness.active
+        assert "LATITUDE, LONGITUDE and LOCATION_NAME are not set" in settings.startup_lines()["screen_brightness"]
+
+    def test_a_slideshow_refuses_half_a_location_by_name(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="LONGITUDE"):
+            load(a_slideshow(cache_dir, LATITUDE="45.68", LOCATION_NAME="Bozeman"))
+
     def test_a_layout_1_settings_file_still_reads(self, cache_dir: Path):
         cache_dir.mkdir(parents=True, exist_ok=True)
         store.path_in(cache_dir).write_text('{"version": 1, "values": {"PLAYER_NAME": "Hall"}}', encoding="utf-8")

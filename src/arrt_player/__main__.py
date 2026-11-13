@@ -61,6 +61,7 @@ from arrt_player.client import FRAME_KIND, FrameIdentity, LabelAssignment, Outpu
 from arrt_player.config import (
     ARRT_MODE,
     PANEL_OUTPUT,
+    SLIDESHOW_MODE,
     ClientSettings,
     ConfigError,
     FrameSettings,
@@ -339,13 +340,28 @@ def screen_brightness(
     clock: Clock,
 ) -> ScreenBrightness | None:
     """The screen's brightness on the sun over its connector's DDC/CI bus, or None with no location to follow."""
+    return _brightness_on(output, settings, clock, wall_id=wall.wall_id)
+
+
+def slideshow_brightness(settings: SlideshowSettings, clock: Clock) -> ScreenBrightness | None:
+    """The slideshow screen's brightness, as a wall's screen has it. Its journal lines carry `wall_id` "slideshow"."""
+    return _brightness_on(settings.output, settings.screen_brightness, clock, wall_id=SLIDESHOW_MODE)
+
+
+def _brightness_on(
+    output: str,
+    settings: ScreenBrightnessSettings | None,
+    clock: Clock,
+    *,
+    wall_id: str,
+) -> ScreenBrightness | None:
     if settings is None or not settings.active or settings.location is None:
         return None
     return ScreenBrightness(
         settings=settings,
         location=settings.location,
         output=output,
-        wall_id=wall.wall_id,
+        wall_id=wall_id,
         bus=lambda: screen_ddc(output),
         clock=clock,
     )
@@ -459,6 +475,7 @@ async def run_slideshow(
     fetcher: Fetcher | None = None,
     screen: Callable[[SlideshowSettings], Screen] = slideshow_screen,
     problems: Callable[[], list[str]] = renderer_problems,
+    clock: Clock | None = None,
 ) -> int:
     """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped."""
     log.info("starting a slideshow", extra={"event": "slideshow.starting", **settings.startup_lines()})
@@ -482,6 +499,7 @@ async def run_slideshow(
                 screen=screen(settings),
                 limits=settings.limits,
                 captioner=panel,
+                brightness=slideshow_brightness(settings, clock if clock is not None else Clock.system()),
                 listing_path=settings.listing_path,
                 status=status,
             )

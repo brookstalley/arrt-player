@@ -19,14 +19,16 @@ import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Self
 
 import pytest
+from fakes import FakeMonitor
 from test_mpv import Bench, alive, wait_until
 
 from arrt_player import __main__ as entry
-from arrt_player.config import PanelSettings, SlideshowSettings, UiSettings
+from arrt_player.config import Location, PanelSettings, ScreenBrightnessSettings, SlideshowSettings, UiSettings
 from arrt_player.dwell import DwellLimits
 from arrt_player.label_rule import Drawing
 from arrt_player.label_rule import Outcome as LabelOutcome
@@ -55,6 +57,8 @@ GIF = json.loads((FIXTURES / "redgifs" / "gif.json").read_text())
 AUTH = json.loads((FIXTURES / "redgifs" / "auth.json").read_text())
 
 LIMITS = DwellLimits(30.0, 60.0)
+#: On the equator at the prime meridian, so the test clock's noon UTC is the sun's noon.
+EQUATOR = Location(latitude=0.0, longitude=0.0, name="Null Island", region="")
 COOKIE = "eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE4MTAwMDAwMDB9.the-secret-part"
 
 
@@ -663,6 +667,133 @@ async def test_what_would_stop_mpv_is_said_once_at_start_and_the_slideshow_plays
     assert [r.reason for r in said] == ["mpv is not installed"]
     assert statuses[0].renderer_problems == ("mpv is not installed",)
     assert any(getattr(r, "event", None) == "slideshow.shown" for r in caplog.records), "it stopped rather than playing on"
+
+
+# -- the screen's brightness -------------------------------------------------------------
+
+
+class Brightness:
+    """The brightness's interface: records each `apply`, and when it was closed."""
+
+    def __init__(self, time: Time) -> None:
+        self.time = time
+        self.applied: list[tuple[float, bool, bool]] = []
+        self.closed = 0
+
+    async def apply(self, *, present: bool, showing: bool) -> None:
+        self.applied.append((self.time.now, present, showing))
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+async def test_the_brightness_is_followed_while_an_item_is_up_and_closed_at_the_end(tmp_path):
+    rig = Rig(tmp_path, Source(listed(item("a"), item("b"))))
+    brightness = Brightness(rig.time)
+
+    await rig.run_for(3, brightness=brightness)
+
+    first_shown = rig.screen.shown[0][1]
+    assert brightness.applied[0] == (first_shown, True, True), "not applied as the first item went up"
+    # And through the dwell, so the sun is followed on a screen that shows one long clip.
+    assert len([a for a in brightness.applied if first_shown < a[0] < rig.screen.shown[1][1]]) >= 2
+    assert all(showing for _, _, showing in brightness.applied)
+    assert brightness.closed == 1
+
+
+async def test_nothing_shown_means_no_brightness_asked_for(tmp_path):
+    """A brightness write must never be what wakes a screen with nothing on it."""
+    rig = Rig(tmp_path, Source(listed(item("a"))), failing={"https://i.redd.it/a.jpg"})
+    brightness = Brightness(rig.time)
+
+    await rig.run_until(lambda: rig.time.now > 1100, brightness=brightness)
+
+    assert rig.screen.shown == []
+    assert brightness.applied == []
+    assert brightness.closed == 1
+
+
+async def test_the_brightness_is_closed_even_when_the_screen_fails_to_close(tmp_path):
+    rig = Rig(tmp_path, Source(listed(item("a"))))
+    brightness = Brightness(rig.time)
+
+    def broken_close() -> None:
+        raise RuntimeError("mpv would not stop")
+
+    rig.screen.close = broken_close  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="mpv would not stop"):
+        await rig.run_for(1, brightness=brightness)
+
+    assert brightness.closed == 1
+
+
+async def test_a_slideshow_run_sets_its_own_screens_brightness_from_its_settings(tmp_path, monkeypatch, clock):
+    """Through `run_slideshow`, with a connector and levels no default has, so an unwired setting cannot pass.
+
+    The clock is at noon on the equator at the prime meridian, so the curve's value is its day level.
+    """
+    stop = asyncio.Event()
+    opened: list[tuple[str, FakeMonitor]] = []
+
+    def bus(output: str) -> FakeMonitor:
+        monitor = FakeMonitor(current=10, maximum=100)
+        opened.append((output, monitor))
+        return monitor
+
+    class Fetcher(Reddit):
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class StoppingScreen(Screen):
+        def check(self) -> NotShown | None:
+            # Past the first item's going up, when the brightness is first applied.
+            loop.call_soon_threadsafe(stop.set)
+            return super().check()
+
+    async def no_page(*_args: object, **_kwargs: object) -> bool:
+        await stop.wait()
+        return True
+
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(entry, "run_settings_page", no_page)
+    monkeypatch.setattr(entry, "screen_ddc", bus)
+    monkeypatch.setattr("arrt_player.programmes.slideshow.CHECK_EVERY_S", 0.01)
+    settings = replace(
+        slideshow_settings(tmp_path),
+        output="hdmi-a-2",
+        screen_brightness=ScreenBrightnessSettings(location=EQUATOR, minimum=17, maximum=23, interval_seconds=91.0),
+    )
+    ui = UiSettings(cache_dir=tmp_path, bind="127.0.0.1", port=0, pinned=frozenset())
+    await asyncio.wait_for(
+        entry.run_slideshow(
+            settings,
+            ui,
+            stop,
+            fetcher=Fetcher(),
+            screen=lambda _: StoppingScreen(Time()),
+            problems=list,
+            clock=clock.as_clock(),
+        ),
+        timeout=20,
+    )
+
+    [(output, monitor)] = opened
+    assert output == "hdmi-a-2"
+    assert monitor.writes == [23]
+    assert monitor.closed == 1
+
+
+def test_a_slideshow_with_no_location_or_the_switch_off_has_no_brightness(tmp_path, clock):
+    no_location = slideshow_settings(tmp_path)
+    switched_off = replace(no_location, screen_brightness=ScreenBrightnessSettings(location=EQUATOR, enabled=False))
+    located = replace(no_location, screen_brightness=ScreenBrightnessSettings(location=EQUATOR))
+
+    assert entry.slideshow_brightness(no_location, clock.as_clock()) is None
+    assert entry.slideshow_brightness(switched_off, clock.as_clock()) is None
+    assert entry.slideshow_brightness(located, clock.as_clock()) is not None
 
 
 # -- the renderer's life ----------------------------------------------------------------

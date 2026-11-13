@@ -344,6 +344,7 @@ last_validated: 2026-11-10
   - `.prawduct/artifacts/observability-strategy.md` (the `slideshow.*` and renderer events);
     - the change fragment.
   - The deploy on the Pi, by the runbook, with the owner watching.
+  - The slideshow's screen follows the sun (`ScreenBrightness`, wired by `run_slideshow`), which `build-plan-hdmi-brightness.md` left to whichever branch landed second.
 - **Depends on:** Chunk 04
 - **Artifacts consumed:** `deploy/README.md`, `.prawduct/runbooks/moving-the-pi-player-to-a-new-revision.md`, `.prawduct/artifacts/architecture.md`
 - **Deliverables:** the records above, current with the code.
