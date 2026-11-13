@@ -306,6 +306,26 @@ without the page.
 **The way back** is the previous revision. `.settings.json` is ignored by a
 Player from before this, so it can stay where it is.
 
+## The television's token is private to `tvpi` (2026-11-11, #3)
+
+The unit now sets `UMask=0077`, so every file the Player creates is readable
+by `tvpi` alone. Before this, the token file the television library writes
+took the default umask, and any account on the Pi could read it and drive the
+set's art channel with it. The runbook's unit diff shows the new line, and
+installing the unit as it says is the whole change.
+
+**An existing token file is tightened too**: the Player sets it to 0600 after
+every connection to the set, so the first connection after the deploy fixes
+the file an older Player left. Nothing is re-paired, and nothing appears on
+the set.
+
+**Check it worked:** `stat -c %a "$TV_TOKEN_FILE"` (default
+`$CACHE_DIR/token_file`) prints `600` once the Player has connected to the set
+once. If it cannot set the mode, the journal says `tv.token_file_open`.
+
+**The way back** is the previous revision. The tighter modes stay on files
+already created, which an older Player reads as `tvpi` all the same.
+
 ## The two new units, and where everything they name now lives
 
 `display.service` and `curation.service` are the planes this product is being

@@ -36,6 +36,14 @@ Group=tvpi
 # display card (`/dev/dri/card*`, group `video`).
 SupplementaryGroups=spi gpio video
 
+# **Everything the Player writes is tvpi's alone.** The television library
+# writes the pairing token with a plain open(), so without this the token file
+# takes the default umask and any account on the Pi can read it, and with it
+# drive the set's art channel. The cache, the settings file and a venv that
+# `uv run` syncs at start are created owner-only too; the runbook already does
+# all its work as tvpi.
+UMask=0077
+
 WorkingDirectory=/opt/arrt-player
 
 # **Un-prefixed on purpose.** systemd treats a missing un-prefixed
