@@ -28,7 +28,13 @@ governed_by:
       - "'The Player serves nothing' → amendment proposed: it serves one authenticated settings page. A new section records its boundary."
 partition: serial — 02 builds its form on 01's store, server and login, and 03 documents and deploys both
 last_validated: 2026-11-10
+lifecycle: completed
+archived: 2026-11-13
+released_in: v0.7.0
+maintained: false
 ---
+
+> **Archived — no longer maintained.** This plan records what was built, not what will be. Do not edit it to reflect later changes; write those where they are true.
 
 ## Goals
 
