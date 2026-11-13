@@ -4,6 +4,10 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-13, later.** "yes prawduct should pull from testament", on whether the
+declared `test_command` should run on the testament pool. Landed as `test_command`
+in `.prawduct/project-state.yaml`.
+
 **2026-11-13.** "let's push and deploy to the pi", then "yeah we need to get
 everything pushed to develop, released to main, then to the pi". The slideshow
 branch merges into develop, develop is released to main as v0.8.0, and the Pi is

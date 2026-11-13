@@ -366,12 +366,15 @@ distribution: plugin
 # `/prawduct:backlog` routes on this scalar.
 backlog_service_repo: brookstalley/arrt-player
 
-# `--group raster` because the typesetter is the Player's most important
-# accessibility surface and the group is what makes it runnable. Without it
-# `tests/raster` skips itself and the recorded evidence covers every tier of the
-# label except the one that puts ink on the panel. CI's separate `typesetting`
-# job holds the same claim on a runner.
-test_command: uv run --group raster pytest --junit-xml={junit_xml} -q
+# The suite runs on the testament pool, as `AGENTS.md` § Running tests says, and
+# its merged report is what prawduct records, so evidence costs one run rather
+# than a pool run and then a local one. `.testament.toml` carries the command,
+# with `--group raster`: the typesetter is the Player's most important
+# accessibility surface, and without the group `tests/raster` skips itself and
+# the evidence covers every tier of the label except the one that puts ink on
+# the panel. With no coordinator answering, testament runs that same command
+# here. CI's separate `typesetting` job holds the same claim on a runner.
+test_command: testament run --junit-xml {junit_xml}
 
 tests_dirs: tests
 
