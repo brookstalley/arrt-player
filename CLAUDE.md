@@ -33,7 +33,8 @@ cites and that is not under `.prawduct/artifacts/` here (`player-contract.md`,
 `accessibility-spec.md`, `labels-and-surfaces.md` and the rest) is Arrt's, in its
 `.prawduct/artifacts/`.
 
-Every name under `.prawduct/artifacts/` here also exists in Arrt: the findings
+Every name under `.prawduct/artifacts/` here also exists in Arrt (build plans
+excepted): the findings
 and the preferences came across with the move, and the strategy artifacts were
 written here after it. Arrt's hold the norms (each `§ Direction`, and § The
 television belongs to whoever is using it); the ones here describe what the

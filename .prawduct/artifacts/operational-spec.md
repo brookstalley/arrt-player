@@ -94,12 +94,22 @@ is set in `nonfunctional-requirements.md`.
 `.github/workflows/suites.yml`, on every pull request, on pushes to `main`, and by
 hand. Three jobs, each with a 15-minute limit:
 
-- **The suite**: `uv run pytest tests --ignore=tests/raster`, then
+- **The suite**: `uv run --locked pytest tests --ignore=tests/raster`, then
   `.github/scripts/assert_tests_ran.py` fails the job if nothing ran.
 - **The typesetting**: installs cairo, Pango, girepository headers and a font, then
-  `uv run --group raster pytest tests/raster`, with the same guard.
+  `uv run --locked --group raster pytest tests/raster`, with the same guard.
   `tests/test_ci_scope.py` holds the two jobs to covering every test directory.
-- **Lint and format**: `ruff check` and `black --check`.
+- **Lint and format**: `uv run --locked ruff check .` and `uv run --locked black --check .`.
+
+**Everything in CI is pinned.** Each `uses:` names a commit, with its tag in a
+comment; `setup-uv` names the uv, the one the server's CI runs, and the Python the
+Pi runs, set in the workflow and not by a `.python-version` file, which would move
+the Pi's interpreter too; and every `uv run` and `uv sync` is `--locked`, so a
+lockfile out of step with `pyproject.toml` fails the job rather than being rewritten
+(`tests/test_ci_scope.py` reads all three from the workflow). The pins have not
+been run on GitHub's runners until a pull request's own run does. The Waveshare
+driver is pinned by an override at the commit the lock records
+(`pyproject.toml`, `override-dependencies`).
 
 Nothing in CI reaches a television or a panel. The suite drives a double behind
 the TV interface (`tests/fakes.py`) and a stand-in server (`tests/server_double.py`).
