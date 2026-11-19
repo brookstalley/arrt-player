@@ -33,16 +33,24 @@ for a release.
 | Unit | `deploy/display.service`, installed to `/etc/systemd/system/display.service` |
 | Checkout | `/opt/arrt-player` (the unit's `WorkingDirectory=`; confirmed by the owner 2026-10-26, runbook § The first time) |
 | Settings | `/opt/arrt-player/.env`, un-prefixed `EnvironmentFile=`, so a missing file stops the unit before the process exists |
-| Interpreter | `/usr/local/bin/uv run python -m arrt_player`, named absolutely |
+| Interpreter | `/usr/local/bin/uv run --frozen --no-dev --group raster --group epaper python -m arrt_player`, named absolutely: a start takes the lockfile as it is and never resolves over the network |
 | Account | A system account named by the unit's `User=`, with `SupplementaryGroups=spi gpio video` |
-| Dependency groups | `uv sync --group raster --group epaper` on the Pi. A bare `uv sync` removes both, and the label stops (CLAUDE.md, runbook step 8) |
-| Inbound | None. The Player serves nothing; it makes outbound HTTP to `SERVER_URL` and talks to the Frame on its LAN address |
+| Dependency groups | `uv sync --frozen --no-dev --group raster --group epaper` on the Pi. A bare `uv sync` removes both, and the label stops (CLAUDE.md, runbook step 8) |
+| Bounds and sandbox | `MemoryHigh=60%`, `MemoryMax=75%`; `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome=yes`, `RestrictAddressFamilies` (`security-model.md` § The deploy unit) |
+| Inbound | The settings page on `UI_BIND`:`UI_PORT` (default 8771), which answers only to its own names (`UI_ALLOWED_HOSTS` adds more) and nothing else. Otherwise it makes outbound HTTP to `SERVER_URL` and talks to the Frame on its LAN address |
 
 **Guarded properties of the unit**, each held by `tests/test_deploy_unit.py`: the
 `EnvironmentFile=` is declared and is the one at the checkout's root; there is no
 start rate limit (`StartLimitIntervalSec=0`) and `RestartSec=` is at least 5; no
-path is under a home directory; the interpreter is absolute; `TimeoutStopSec` is at
-least 45 and `KillSignal=SIGTERM`.
+path is under a home directory; the interpreter is absolute and frozen, without the
+dev group; `MemoryHigh` sits below `MemoryMax`, both a share of RAM; the sandbox
+directives are set and the devices the walls draw through stay reachable;
+`TimeoutStopSec` is at least 45 and `KillSignal=SIGTERM`.
+
+**Nothing of the hardened unit has run under systemd.** Whether the kernel enforces
+the memory bound, whether the sandboxed Player starts and draws on the screen, the
+label and the DDC bus, and whether mpv draws with its reduced environment are the
+operator's checks on the Pi (runbook steps 9a and 14a).
 
 **A release** is `.prawduct/runbooks/moving-the-pi-player-to-a-new-revision.md`:
 § The first time moves a Pi off the shared monorepo checkout once, and § Steps
@@ -60,7 +68,7 @@ its dated sections were written against the monorepo checkout and stay as writte
 Several undated or procedural sections still read as current and are not:
 § The two new units, and where everything they name now lives (its table names
 the old checkout and `ART_ROOT`); § Moving a running deployment onto a newer
-revision (`WALL_ID`, the curation plane); § Looking at the label without the
+revision (`WALL_ID`, the old server); § Looking at the label without the
 daemon and § Measuring what the power keys do (the old checkout path); and § How
 to tell your own install worked (reads files under the old art root, names
 `curation.service` and `WALL_ID`, and carries a 2026-09-30 note saying to rewrite
@@ -134,9 +142,9 @@ Player rebuilds by pulling again. What each loss costs:
 **One state change is one-way.** `display-state.sqlite` carries a schema version
 (`state/store.SCHEMA_VERSION`, 2 today). A Player older than the store refuses it
 and parks that wall (`StateSchemaTooNew`). So rolling back across a release that
-bumps it needs the store removed, at the cost of a re-upload. The runbook's
-§ Going back says "Nothing on the Pi migrates", which holds only while no release
-between the two revisions bumps the version.
+bumps it needs the store removed, at the cost of a re-upload. The settings file's
+layout is versioned too: from v0.8.0 it is layout 2, which an older Player refuses
+by name (exit 2). The runbook's § Going back says what migrates and what to undo.
 
 ## Monitoring
 
@@ -180,14 +188,14 @@ do not. The runbook's § If this doesn't work covers a release that will not sta
 | Symptom | First check | Action |
 |---|---|---|
 | Unit not running after a reboot or a release | `systemctl status display.service`, not the journal | A missing `.env` or `/usr/local/bin/uv` is refused by systemd before the process exists and is named there. `systemctl is-enabled` if it did not start at boot |
-| Unit restarting every 5 s | `journalctl -u display.service` for `daemon.misconfigured`, or stderr `display plane cannot start: …` | The message names the variable. Fix `.env` (runbook step 7) and start it |
+| Unit restarting every 5 s | `journalctl -u display.service` for `daemon.misconfigured`, or stderr `Arrt Player cannot start: …` | The message names the variable. Fix `.env` (runbook step 7) and start it |
 | Wall frozen on one picture | Server: heartbeat age for the wall | Stale: `systemctl status`, then the journal. Fresh with `display_state` `in_use` or `dark`: somebody has the set, and that is correct |
 | Server down or restarting | `pull.unreachable` in the journal | Nothing. The wall rotates its cache; the pull backs off to 60 s and resumes on its own |
 | `pull.refused` or `client.refused` with 401 | The client token | Re-issue on the server, update `CLIENT_TOKEN`, restart |
 | `pull.refused` with 403 or 404 | The wall's assignment on the server | Assign the wall to this client and output, or hang a theme on it |
 | A wall worker crashing repeatedly | `client.worker_crashed` tracebacks | The other walls keep running; the worker retries at up to 300 s. Fix the cause; a restart of the unit is not needed |
 | `daemon.state_too_new` | The revision on the Pi | Roll forward. Or remove that wall's `display-state.sqlite` and accept a re-upload |
-| Label blank or stale, wall fine | `panel.unavailable` at start, `label.failed` later | The message names the cause: unstated viewing conditions, missing text stack (`uv sync --group raster --group epaper`), or a panel that will not open. The walls are unaffected by design |
+| Label blank or stale, wall fine | `panel.unavailable` at start, `label.failed` later | The message names the cause: unstated viewing conditions, missing text stack (`uv sync --frozen --no-dev --group raster --group epaper`), or a panel that will not open. The walls are unaffected by design |
 | Art channel refused for minutes | `tv.unavailable` repeating | Wait. The set holds abandoned clients for minutes (`samsung-tv-state-findings.md` § The art channel can refuse to open). Do not SIGKILL or restart in a loop, which makes it worse |
 | Pairing prompt on the television | The token file | The token file was empty or lost. Accept the prompt at the set |
 | HDMI wall shows the text console | `systemctl is-active display.service` | Expected while the Player is stopped (`deploy/README.md` § The Player as a client of the NAS). `screen.absent` while running means no screen seen on the connector (`hdmi-output-findings.md`) |
@@ -206,7 +214,7 @@ None is fixed here; each is a change on Arrt.
    The split has happened. A release is a detached checkout of a commit in
    `/opt/arrt-player`, and the procedure is this repository's runbook.
 2. **Start-up failure.** Arrt § Failure Recovery, "Both planes start, then exit at
-   import", describes `ART_ROOT` resolution in `config.py` at import. The Player has
+   import" (Arrt's wording), describes `ART_ROOT` resolution in `config.py` at import. The Player has
    no `ART_ROOT`. It resolves `.env` in `config.load`, called from `__main__._run`,
    and exits 2 naming `SERVER_URL`, `CLIENT_TOKEN`, `CACHE_DIR` or a retired setting.
 3. **Re-pairing.** Arrt § Routine Operations, "Re-pair the TV", says the token
