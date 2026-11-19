@@ -325,6 +325,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
     A crash used to write `daemon.stopped` at INFO — the identical line a clean
     shutdown writes — so an operator reading the log could not tell a wall
     somebody switched off from one falling over in a `Restart=always` loop.
+    The Frame wall's lines are `frame.crashed` and `frame.stopped` since wave 2's
+    Chunk 03 (`FrameDisplay.journal_name`).
     """
     import logging
 
@@ -343,8 +345,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
         await daemon.run(asyncio.Event())
 
     events = [r.__dict__.get("event") for r in caplog.records]
-    assert "daemon.crashed" in events, "a crash left no ERROR behind"
-    assert "daemon.stopped" not in events, "a crash reported itself as a clean shutdown"
+    assert "frame.crashed" in events, "a crash left no ERROR behind"
+    assert "frame.stopped" not in events, "a crash reported itself as a clean shutdown"
     assert any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
