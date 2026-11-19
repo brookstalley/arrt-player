@@ -11,10 +11,22 @@ Two things live here:
 
 * **`tv_binding`** — the work-to-content-id map, modelled in Arrt's `data-model.md`
   because it is the entity that carries the norm across the boundary between the Player and the server.
-* **`daemon_state`** — which work the wall last showed, and whether the set's
-  own slideshow has been switched off. Display-internal, never read by anything
-  else. A key is read only by name, so a key no code reads any more (a store
-  written by an older Player) is left in place and costs nothing.
+* **`daemon_state`** — which work the wall last showed, whether the set's own
+  slideshow has been switched off, and how long the wall has run with a feed
+  (`feed_seconds`, below). Display-internal, never read by anything else. A key
+  is read only by name, so a key no code reads any more (a store written by an
+  older Player) is left in place and costs nothing.
+
+**When a work was last named is measured in the wall's own running time, not
+the calendar.** A binding is retired once no feed this wall adopted has named
+its work for long enough (`displays/frame.py`), and "long enough" has to mean
+time the household could have hung it and did not: not a month the Player was
+switched off, and not an NTP step on a Pi with no clock of its own, which moves
+wall time by years. So `feed_seconds` counts the seconds this wall has run with
+a feed adopted, from the elapsed clock and only while the Player runs, and a
+binding's `last_named_feed_seconds` is that count when a feed last named its
+work. `last_named_at` is the wall time of the same moment, for whoever reads the
+file; nothing compares it.
 
 **`upload_status` is explicit, and the table refuses the 2024 defect
 structurally.** That version's `upload_file` caught every exception, logged, and
@@ -38,7 +50,7 @@ import contextlib
 import logging
 import sqlite3
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -53,7 +65,10 @@ log = logging.getLogger(__name__)
 #:
 #: 2 (2026-08-06) added `render_fingerprint`, without which a re-rendered work
 #: kept showing its old image on the television for ever.
-SCHEMA_VERSION: Final[int] = 2
+#:
+#: 3 (2026-11-19) added `last_named_feed_seconds` and `last_named_at`, without
+#: which an image whose work no feed names any more stayed on the set for good.
+SCHEMA_VERSION: Final[int] = 3
 
 
 class UploadStatus(StrEnum):
@@ -134,6 +149,13 @@ class Binding:
     #: before this column existed, and on one that never got as far as a file.
     render_fingerprint: str | None = None
     tv_thumb_md5: str | None = None
+    #: The wall's `feed_seconds` when a feed it adopted last named this work.
+    #: Null only on a row an older Player wrote since the store last migrated,
+    #: which the next migration names at that moment; a row with none is never
+    #: retired (`displays/frame.py`).
+    last_named_feed_seconds: float | None = None
+    #: The wall time of the same moment, for a reader of the file. Never compared.
+    last_named_at: datetime | None = None
 
     @property
     def is_on_the_television(self) -> bool:
@@ -154,6 +176,11 @@ CREATE TABLE IF NOT EXISTS tv_binding (
     -- composition until somebody notices by eye.
     render_fingerprint TEXT,
     uploaded_at    TEXT NOT NULL,
+    -- When a feed this wall adopted last named the work, in the wall's running
+    -- time with a feed (`daemon_state.feed_seconds`), and the wall time of the
+    -- same moment for a reader. What retires a binding is the first.
+    last_named_feed_seconds REAL,
+    last_named_at  TEXT,
     upload_status  TEXT NOT NULL
         CHECK (upload_status IN ('uploaded', 'failed', 'orphaned')),
     -- The 2024 defect, made unwritable: a row may not claim the image is on the
@@ -171,7 +198,8 @@ CREATE TABLE IF NOT EXISTS daemon_state (
 #: and a list that drifts between them is a `KeyError` at the row factory rather
 #: than anything a reader would spot.
 _BINDING_COLUMNS: Final[str] = (
-    "SELECT artwork_id, tv_content_id, tv_thumb_md5, render_fingerprint, uploaded_at, upload_status FROM tv_binding"
+    "SELECT artwork_id, tv_content_id, tv_thumb_md5, render_fingerprint, uploaded_at, upload_status, "
+    "last_named_feed_seconds, last_named_at FROM tv_binding"
 )
 
 #: Keys in `daemon_state`. Named rather than spelled at each call site, because a
@@ -179,6 +207,8 @@ _BINDING_COLUMNS: Final[str] = (
 #: means a restart that cannot tell which picture is already up.
 _LAST_SELECTED_WORK_ID: Final[str] = "last_selected_work_id"
 _SLIDESHOW_DISABLED: Final[str] = "native_slideshow_disabled"
+#: How long this wall has run with a feed adopted, in seconds, as last saved.
+_FEED_SECONDS: Final[str] = "feed_seconds"
 
 
 class DisplayState:
@@ -207,6 +237,10 @@ class DisplayState:
         #: is the file's sole writer, so the copy is the file's value; it moves
         #: only after a commit.
         self._last_selected: str | None = self._get(_LAST_SELECTED_WORK_ID)
+        #: The wall's running time with a feed: counted here as the wall runs
+        #: (`count_feed_time`) and written only by `save_feed_time`, so a pass
+        #: costs the card no write for it.
+        self._feed_seconds: float = self._saved_feed_seconds()
 
     def _prepare(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
@@ -243,6 +277,21 @@ class DisplayState:
             # since a version that never looked, which is the defect this column
             # exists to close.
             self._connection.execute("ALTER TABLE tv_binding ADD COLUMN render_fingerprint TEXT")
+        if "last_named_feed_seconds" not in columns:
+            self._connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_feed_seconds REAL")
+        if "last_named_at" not in columns:
+            self._connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_at TEXT")
+        # **Every row this version has not written is named now**, never read as
+        # "never named": that reading would retire the household's whole library
+        # from the set on the first day after the upgrade. So each binding gets
+        # the full wait from the upgrade. Keyed on the null, so a migration cut
+        # short after its columns were added finishes on the next open, and so a
+        # row an older Player wrote after a roll back is named when the store is
+        # rolled forward again.
+        self._connection.execute(
+            "UPDATE tv_binding SET last_named_feed_seconds = ?, last_named_at = ? WHERE last_named_feed_seconds IS NULL",
+            (self._saved_feed_seconds(), self._now().isoformat()),
+        )
 
     def close(self) -> None:
         self._connection.close()
@@ -274,6 +323,60 @@ class DisplayState:
         with self._operation("bindings", "read the bindings"):
             rows = self._connection.execute(_BINDING_COLUMNS).fetchall()
         return tuple(_binding(row) for row in rows)
+
+    @property
+    def feed_seconds(self) -> float:
+        """How long this wall has run with a feed adopted, as counted so far. Answered from memory."""
+        return self._feed_seconds
+
+    def count_feed_time(self, seconds: float) -> None:
+        """Count `seconds` more of the wall running with a feed. Memory only, until `save_feed_time`."""
+        self._feed_seconds += seconds
+
+    def save_feed_time(self, *, named: Iterable[str], left: Mapping[str, float]) -> None:
+        """Write the count, and when each work was last named, in one transaction.
+
+        `named` are the works the adopted feed names now, so each was last named
+        at the count. `left` are works that stopped being named, each with the
+        count when it did; **a time is never moved earlier**, so a stale one can
+        never make a work look longer unnamed than it is.
+        """
+        named = tuple(named)
+        now = self._now().isoformat()
+        with self._operation("save_feed_time", "record how long the wall has had a feed"):
+            self._connection.execute(
+                "INSERT INTO daemon_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_FEED_SECONDS, repr(self._feed_seconds)),
+            )
+            if named:
+                self._connection.execute(
+                    f"UPDATE tv_binding SET last_named_feed_seconds = ?, last_named_at = ? "  # noqa: S608 -- placeholders only
+                    f"WHERE artwork_id IN ({', '.join('?' * len(named))})",
+                    (self._feed_seconds, now, *named),
+                )
+            for artwork_id, at in left.items():
+                self._connection.execute(
+                    "UPDATE tv_binding SET last_named_feed_seconds = ?, last_named_at = ? "
+                    "WHERE artwork_id = ? AND (last_named_feed_seconds IS NULL OR last_named_feed_seconds < ?)",
+                    (at, now, artwork_id, at),
+                )
+            self._connection.commit()
+
+    def retire(self, artwork_id: str, tv_content_id: str | None) -> bool:
+        """Drop a work's binding, but only while it still names `tv_content_id`, and say whether it went.
+
+        The image it named is already off the set, or never was there. Keyed on
+        the id as well as the work, so a row that was rewritten since it was
+        judged (a new upload under a new id) is never dropped with the image it
+        did not name.
+        """
+        with self._operation("retire", f"drop the binding of {artwork_id}"):
+            cursor = self._connection.execute(
+                "DELETE FROM tv_binding WHERE artwork_id = ? AND tv_content_id IS ?",
+                (artwork_id, tv_content_id),
+            )
+            self._connection.commit()
+        return cursor.rowcount > 0
 
     def accounted_content_ids(self) -> frozenset[str]:
         """Every content id this device believes it put on the television.
@@ -329,18 +432,34 @@ class DisplayState:
         status: UploadStatus,
         render_fingerprint: str | None,
     ) -> Binding:
+        # **Every write names the work now**: the wall writes a binding only for
+        # a picture it was handed, which the adopted feed names.
         uploaded_at = self._now()
         self._connection.execute(
             """
-            INSERT INTO tv_binding (id, artwork_id, tv_content_id, render_fingerprint, uploaded_at, upload_status)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO tv_binding (
+                id, artwork_id, tv_content_id, render_fingerprint, uploaded_at, upload_status,
+                last_named_feed_seconds, last_named_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(artwork_id) DO UPDATE SET
-                tv_content_id      = excluded.tv_content_id,
-                render_fingerprint = excluded.render_fingerprint,
-                uploaded_at        = excluded.uploaded_at,
-                upload_status      = excluded.upload_status
+                tv_content_id           = excluded.tv_content_id,
+                render_fingerprint      = excluded.render_fingerprint,
+                uploaded_at             = excluded.uploaded_at,
+                upload_status           = excluded.upload_status,
+                last_named_feed_seconds = excluded.last_named_feed_seconds,
+                last_named_at           = excluded.last_named_at
             """,
-            (str(uuid.uuid4()), artwork_id, tv_content_id, render_fingerprint, uploaded_at.isoformat(), str(status)),
+            (
+                str(uuid.uuid4()),
+                artwork_id,
+                tv_content_id,
+                render_fingerprint,
+                uploaded_at.isoformat(),
+                str(status),
+                self._feed_seconds,
+                uploaded_at.isoformat(),
+            ),
         )
         self._connection.commit()
         return Binding(
@@ -349,6 +468,8 @@ class DisplayState:
             upload_status=status,
             uploaded_at=uploaded_at,
             render_fingerprint=render_fingerprint,
+            last_named_feed_seconds=self._feed_seconds,
+            last_named_at=uploaded_at,
         )
 
     # -- where the wall got to --------------------------------------------
@@ -406,6 +527,24 @@ class DisplayState:
             fault = getattr(exc, "sqlite_errorname", None) or f"SQLite result code {code}"
             raise StoreFault(operation, doing, exc, fault=fault, may_clear=may_clear) from exc
 
+    def _saved_feed_seconds(self) -> float:
+        """The count as last saved; nought for a store that never saved one.
+
+        **A value that does not read as a number reads as nought**, which can
+        only make a work look named more recently than it was: it delays a
+        retirement, and never brings one forward.
+        """
+        saved = self._get(_FEED_SECONDS)
+        try:
+            return float(saved) if saved is not None else 0.0
+        except ValueError:
+            log.warning(
+                "the display store's feed time %r is not a number; counting from nought",
+                saved,
+                extra={"event": "store.feed_time_unreadable"},
+            )
+            return 0.0
+
     def _get(self, key: str) -> str | None:
         row = self._connection.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()
         return row["value"] if row is not None else None
@@ -426,4 +565,6 @@ def _binding(row: sqlite3.Row) -> Binding:
         uploaded_at=datetime.fromisoformat(row["uploaded_at"]),
         render_fingerprint=row["render_fingerprint"],
         tv_thumb_md5=row["tv_thumb_md5"],
+        last_named_feed_seconds=row["last_named_feed_seconds"],
+        last_named_at=datetime.fromisoformat(row["last_named_at"]) if row["last_named_at"] is not None else None,
     )

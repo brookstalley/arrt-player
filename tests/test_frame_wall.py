@@ -859,6 +859,8 @@ async def test_held_writes_do_not_ask_the_set_once_a_second(daemon: Wall, tv: Fa
 # alike, in order. A write the seam held shows as the reads that held it, with
 # no send after them. Measured on f0138b0; a change to any of them is a change
 # to what the household's television is sent, and is made here on purpose.
+# The scenarios after the first ten add the removal of a work nobody hangs any
+# more (`RETIRED_AFTER_SECONDS`), measured when it was built.
 
 
 class _TracingTv(FakeTv):
@@ -966,6 +968,13 @@ _A_FRESH_WALL_IN_ART_MODE = [
     "get_artmode",
     "upload",
 ]
+
+#: A theme of w3 alone adopted while w1 is up: the reconciliation, then w3's
+#: upload and selection, each behind its read.
+_W3_REPLACES_W1 = ["list", "get_artmode", "get_artmode", "upload", "get_artmode", "select"]
+
+_THIRTEEN_DAYS = 13 * 86400
+_FIFTEEN_DAYS = 15 * 86400
 
 _WHAT_REACHES_THE_SET = {
     "art mode, and nothing due": (
@@ -1084,6 +1093,56 @@ _WHAT_REACHES_THE_SET = {
             _the_set(art_mode="on", art_mode_announced=True),
         ),
         [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "PowerState"], [], ["get_artmode", "get_artmode", "upload"]],
+    ),
+    # w1 and w2 leave with a theme of w3 alone; fifteen days on, the pass that
+    # writes the count finds them due, and the next removes both in one request
+    # behind one gate read. No upload, no selection.
+    "a work no feed has named for fourteen days": (
+        _passes(_feed("w1", "w2"), _feed("w3"), _later(_FIFTEEN_DAYS), _later(1)),
+        [
+            _A_FRESH_WALL_IN_ART_MODE,
+            _W3_REPLACES_W1,
+            ["get_artmode", "brightness"],
+            ["list", "get_artmode", "remove"],
+        ],
+    ),
+    # Back within thirteen days: the reconciliation and the selection, and
+    # nothing uploaded again.
+    "a theme away and back within thirteen days": (
+        _passes(_feed("w1", "w2"), _feed("w3"), _later(_THIRTEEN_DAYS), _feed("w1", "w2")),
+        [
+            _A_FRESH_WALL_IN_ART_MODE,
+            _W3_REPLACES_W1,
+            ["get_artmode", "brightness"],
+            ["list", "get_artmode", "get_artmode", "select"],
+        ],
+    ),
+    # Due while a programme shows: the removal's gate reads the set and sends
+    # nothing; the writes' wait holds the next pass; the set's announcement of
+    # art mode ends the wait, and the removal is made.
+    "a retirement held for a programme, then made": (
+        _passes(
+            _feed("w1", "w2"),
+            _feed("w3"),
+            _later(_FIFTEEN_DAYS),
+            _the_set(art_mode="off"),
+            _later(1),
+            _then(_the_set(art_mode="on", art_mode_announced=True), _later(1)),
+        ),
+        [
+            _A_FRESH_WALL_IN_ART_MODE,
+            _W3_REPLACES_W1,
+            ["get_artmode", "brightness"],
+            ["list", "get_artmode", "PowerState"],
+            [],
+            ["get_artmode", "list", "get_artmode", "remove"],
+        ],
+    ),
+    # Two passes an hour apart, each writing the count and finding nothing due:
+    # the write and the look over the bindings reach only the store.
+    "an hour of a feed with nothing due": (
+        _passes(_feed("w1", "w2", seconds=43200), _later(3600), _later(3600)),
+        [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "brightness"], ["get_artmode", "brightness"]],
     ),
 }
 
