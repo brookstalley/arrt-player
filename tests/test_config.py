@@ -174,7 +174,7 @@ class TestWhereThePageListens:
     @pytest.mark.parametrize(
         ("retired", "replaced_by"),
         [
-            ("WALL_ID", "Settings › Clients"),
+            ("WALL_ID", "Settings › Players"),
             ("WALL_TOKEN", "CLIENT_TOKEN"),
             ("MANIFEST_SOURCE", "SERVER_URL"),
         ],

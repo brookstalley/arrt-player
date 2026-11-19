@@ -141,7 +141,7 @@ DEFAULT_CLIENT_POLL_SECONDS: Final[float] = 30.0
 #: and never consulted again.
 RETIRED_SETTINGS: Final[dict[str, str]] = {
     "WALL_ID": (
-        "a client learns its walls from the server: assign the wall to this client on Settings › Clients "
+        "a client learns its walls from the server: assign the wall to this Player on Settings › Players "
         "and remove WALL_ID from .env"
     ),
     "WALL_TOKEN": "the per-wall token is replaced by this client's token: set CLIENT_TOKEN and remove WALL_TOKEN",
