@@ -7,14 +7,17 @@ composition together, as the process runs them. `clients.md` § The Player and
 `player-contract.md` § Transport are the specification.
 """
 
+import ast
 import asyncio
+import io
 import json
 import logging
 import os
+import re
 import signal
 import socket
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 
@@ -25,6 +28,8 @@ from fakes import FakeTv, RecordingOutput, drm_tree
 from server_double import CLIENT_ID, ServerDouble
 
 from arrt_player import __main__ as entry
+from arrt_player import client as client_module
+from arrt_player import logs
 from arrt_player.client import (
     Assignment,
     ClientDocument,
@@ -1218,3 +1223,894 @@ async def test_the_entry_point_draws_a_mapped_label_on_its_panel(monkeypatch, cl
     assert all(output["kind"] != "frame" for output in server.client_heartbeats[0]["outputs"]), "a panel needs no Frame"
     assert server.client_heartbeats[0]["label_outputs"][0]["name"] == "epd-0"
     assert surface.closed == 1, "the panel was not powered down on the way out"
+
+
+# -- every line a worker logs names its wall --------------------------------------------------
+
+SOURCE = Path(entry.__file__).parent
+RECORD = SOURCE.parents[1] / ".prawduct" / "artifacts" / "observability-strategy.md"
+
+#: Emitted inside a wall's worker: its pull, its loop, its display and whatever
+#: they start, its tasks and its threads. Each carries the wall's `wall_id`,
+#: bound by the supervisor around everything the worker runs.
+WALL_EVENTS = frozenset(
+    {
+        "client.worker_crashed",
+        "client.worker_ended",
+        "client.worker_retire_failed",
+        "pull.started",
+        "pull.unreachable",
+        "pull.reachable",
+        "pull.refused",
+        "pull.accepted",
+        "pull.manifest_refused",
+        "pull.manifest_readable",
+        "pull.media_failing",
+        "pull.media_ok",
+        "pull.hold_ended",
+        "pull.work_skipped",
+        "pull.adopted",
+        "pull.cache_unwritable",
+        "pull.cache_writable",
+        "pull.heartbeat_refused",
+        "pull.heartbeat_ok",
+        "pull.heartbeat_failed",
+        "pull.crashed",
+        "frame.started",
+        "frame.stopped",
+        "frame.crashed",
+        # The Frame's loop events by the name the record still gives them.
+        "daemon.started",
+        "daemon.stopped",
+        "daemon.crashed",
+        "daemon.state_too_new",
+        "screen.started",
+        "screen.stopped",
+        "screen.crashed",
+        "display.state",
+        "heartbeat.failed",
+        "heartbeat.recovered",
+        "manifest.adopted",
+        "manifest.absent",
+        "manifest.statable",
+        "manifest.unstatable",
+        "manifest.unreadable",
+        "manifest.not_text",
+        "manifest.refused",
+        "manifest.version_refused",
+        "schedule.media_missing",
+        "schedule.uncomposable",
+        "schedule.compose_read_failed",
+        "schedule.compose_write_failed",
+        "schedule.compose_failed",
+        "schedule.composed_damaged",
+        "schedule.composed_removed",
+        "schedule.tidy_failed",
+        "schedule.tidy_recovered",
+        "compose.done",
+        "tv.unavailable",
+        "tv.recovered",
+        "store.recovered",
+        "store.busy",
+        "store.failed",
+        "rotation.wall_not_ours",
+        "rotation.wall_returned",
+        "tv.writes_held",
+        "tv.writes_resumed",
+        "display.power_unreadable",
+        "display.power_readable",
+        "rotation.selected",
+        "rotation.wall_unchanged",
+        "rotation.wall_recovered",
+        "binding.uploaded",
+        "binding.upload_failed",
+        "binding.orphaned",
+        "tv.orphans_removed",
+        "tv.orphan_removal_unconfirmed",
+        "tv.removal_incomplete",
+        "tv.upload_misreported",
+        "tv.selection_unreadable",
+        "tv.selection_observer_failed",
+        "tv.native_slideshow_disabled",
+        "tv.token_file_open",
+        "tv.close_failed",
+        "brightness.set",
+        "screen.absent",
+        "screen.returned",
+        "screen.draw_failed",
+        "screen.draw_recovered",
+        "screen.blanked",
+        "screen.blank_failed",
+        "screen.refresh_failed",
+        "screen.refresh_recovered",
+        "screen.brightness_set",
+        "screen.brightness_unsupported",
+        "screen.brightness_no_answer",
+        "screen.brightness_answering",
+        "screen.bus_close_failed",
+        "screen.brightness_failed",
+        "screen.brightness_recovered",
+    }
+)
+
+#: Emitted inside a label's renderer: its pull, its panel's drawing and its
+#: thread. Each carries the label's `label_id` and the `wall_id` it captions.
+LABEL_EVENTS = frozenset(
+    {
+        "client.label_crashed",
+        "client.label_ended",
+        "client.label_retire_failed",
+        "label.no_panel",
+        "label.renderer_started",
+        "label.renderer_retired",
+        "label.server_unreachable",
+        "label.server_reachable",
+        "label.id_unusable",
+        "label.cache_unreadable",
+        "label.cache_unwritable",
+        "label.cache_writable",
+        "label.cache_seeded",
+        "label.cache_other_wall",
+        "label.refused",
+        "label.accepted",
+        "label.document_refused",
+        "label.document_readable",
+        "label.drawn",
+        "label.blanked",
+        "label.card",
+        "label.absent",
+        "label.failed",
+        "label.recovered",
+        "label.unusable",
+        "label.shrunk",
+        "label.name_wrapped",
+        "label.truncated",
+    }
+)
+
+#: Emitted by the supervisor about one wall or label, outside any worker. No
+#: context names the wall there, so each call site passes `wall_id` itself.
+NAMES_ITS_WALL = frozenset(
+    {
+        "client.wall_started",
+        "client.wall_stopped",
+        "client.wall_unplaceable",
+        "client.label_started",
+        "client.label_stopped",
+        "client.label_unplaceable",
+        "client.wall_cache_stamped",
+        "client.wall_cache_returned",
+        "client.wall_cache_removed",
+    }
+)
+
+#: About the process, or the client as a whole, or slideshow mode (one
+#: programme and no walls): no wall to name, and none named.
+PROCESS_EVENTS = frozenset(
+    {
+        "daemon.misconfigured",
+        "daemon.setup_mode",
+        "client.started",
+        "client.stopped",
+        "client.identity_unreadable",
+        "client.identity_read",
+        "client.unreachable",
+        "client.reachable",
+        "client.refused",
+        "client.accepted",
+        "client.document_refused",
+        "client.document_readable",
+        "client.cache_unwritable",
+        "client.cache_writable",
+        "client.cache_unreadable",
+        "client.heartbeat_refused",
+        "client.heartbeat_ok",
+        "client.cache_entry_unknown",
+        "client.wall_cache_unsweepable",
+        "client.wall_cache_sweepable",
+        "panel.type_scale",
+        "panel.unavailable",
+        "panel.size_disagrees",
+        "panel.close_failed",
+        "label.close_abandoned",
+        "label.cache_forgotten",
+        "label.cache_unsweepable",
+        "label.cache_sweepable",
+        "settings_page.listening",
+        "settings_page.unavailable",
+        "settings_page.password_set",
+        "settings_page.password_changed",
+        "settings_page.login_refused",
+        "settings_page.password_refused",
+        "settings_page.host_refused",
+        "settings_page.saved",
+        "settings_page.write_failed",
+        "slideshow.starting",
+        "slideshow.renderer_unavailable",
+        "slideshow.saved_listing",
+        "slideshow.saved_unreadable",
+        "slideshow.listed",
+        "slideshow.listed_nothing",
+        "slideshow.refresh_failed",
+        "slideshow.save_failed",
+        "slideshow.filled",
+        "slideshow.nothing_ready",
+        "slideshow.shown",
+        "slideshow.not_shown",
+        "slideshow.reddit.listed",
+        "slideshow.reddit.not_listed",
+        "slideshow.reddit.post_unreadable",
+        "slideshow.resolver.fallback",
+        "slideshow.resolver.redgifs.token",
+        "slideshow.resolver.redgifs.token_refused",
+        "slideshow.resolver.redgifs.gone",
+        "slideshow.resolver.redgifs.lookup_failed",
+        "slideshow.cache.downloaded",
+        "slideshow.cache.fell_back",
+        "slideshow.cache.download_failed",
+        "slideshow.cache.cap_reached",
+        "slideshow.cache.network_down",
+        "slideshow.cache.evicted",
+        "slideshow.cache.partial_cleared",
+        "mpv.started",
+        "mpv.stale",
+        "mpv.refused",
+        "mpv.file_failed",
+        "mpv.not_shown",
+        "mpv.recovered",
+    }
+)
+
+_SCOPES = {"wall": WALL_EVENTS, "label": LABEL_EVENTS, "names its wall": NAMES_ITS_WALL, "process": PROCESS_EVENTS}
+_LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+_EVENT_NAME = re.compile(r"[a-z_]+(\.[a-z_]+)+")
+
+
+def _log_calls() -> list[tuple[Path, str, ast.Call]]:
+    """Every `log.<level>(…)` call in the source, with its module and enclosing function."""
+    # A call inside a nested function is found from both functions; the innermost, walked last, names it.
+    unique: dict[int, tuple[Path, str, ast.Call]] = {}
+    for module in sorted(SOURCE.rglob("*.py")):
+        for function in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+            if not isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _LOG_METHODS
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "log"
+                ):
+                    unique[id(node)] = (module, function.name, node)
+    return list(unique.values())
+
+
+def _extra(call: ast.Call) -> ast.Dict | None:
+    return next((k.value for k in call.keywords if k.arg == "extra" and isinstance(k.value, ast.Dict)), None)
+
+
+def _event_of(call: ast.Call) -> ast.expr | None:
+    extra = _extra(call)
+    if extra is None:
+        return None
+    return next(
+        (v for k, v in zip(extra.keys, extra.values, strict=True) if isinstance(k, ast.Constant) and k.value == "event"), None
+    )
+
+
+def _built_names() -> dict[tuple[str, str], set[str]]:
+    """The events whose names are built rather than written, by (module, function), derived where the code allows."""
+    from arrt_player.displays.frame import FrameDisplay
+    from arrt_player.displays.screen import ScreenDisplay
+
+    schedule = ast.parse((SOURCE / "programmes" / "schedule.py").read_text(encoding="utf-8"))
+    collect = next(n for n in ast.walk(schedule) if isinstance(n, ast.FunctionDef) and n.name == "_collect")
+    collected = {
+        n.value
+        for n in ast.walk(collect)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.startswith("schedule.")
+    }
+    supervised = {f"client.{kind}_{end}" for kind in ("worker", "label") for end in ("crashed", "ended", "retire_failed")}
+    walls = {
+        f"{display.journal_name}.{end}" for display in (FrameDisplay, ScreenDisplay) for end in ("started", "stopped", "crashed")
+    }
+    return {
+        ("client.py", "_keep_running"): supervised,
+        ("client.py", "_restart_until_stopped"): supervised,
+        ("wall.py", "run"): walls,
+        ("programmes/schedule.py", "_collect"): collected,
+    }
+
+
+def code_events() -> set[str]:
+    """Every event name the source logs: each literal, and each built name by the site that builds it."""
+    built = _built_names()
+    names: set[str] = set()
+    for module, function, call in _log_calls():
+        event = _event_of(call)
+        if isinstance(event, ast.Constant):
+            names.add(event.value)
+            continue
+        site = (str(module.relative_to(SOURCE)), function)
+        assert site in built, f"{site[0]}:{call.lineno} in {function} builds its event name; list the names it builds here"
+        names |= built[site]
+    return names
+
+
+def record_events() -> set[str]:
+    """Every event name the observability record's inventory lists (`…name` is the name before it, last part replaced)."""
+    text = RECORD.read_text(encoding="utf-8")
+    inventory = text[text.index("**The event inventory.**") : text.index("**Destinations and retention.**")]
+    names: set[str] = set()
+    for line in inventory.splitlines():
+        if not line.startswith("| ") or line.startswith(("| **", "|---")):
+            continue
+        previous = None
+        for written in re.findall(r"`([^`]+)`", line.split("|")[1]):
+            name = previous.rsplit(".", 1)[0] + "." + written[1:] if written.startswith("…") and previous else written
+            if _EVENT_NAME.fullmatch(name):
+                names.add(name)
+                previous = name
+    return names
+
+
+INVENTORY = sorted(code_events() | record_events())
+
+
+def test_the_inventory_reaches_the_source_and_the_record():
+    """Both walks pass vacuously over nothing, so each is seen reaching what it reads."""
+    code, record = code_events(), record_events()
+    assert {"pull.unreachable", "compose.done", "screen.brightness_set", "client.worker_crashed"} <= code
+    assert {"pull.unreachable", "label.drawn", "slideshow.resolver.redgifs.token_refused"} <= record
+
+
+@pytest.mark.parametrize("event", INVENTORY)
+def test_every_event_is_declared_as_a_walls_a_labels_or_the_processs(event):
+    """**An event added without saying whose it is fails here, by name.** A wall's
+    or a label's carries its wall by the context its worker runs in; one the
+    supervisor logs about a wall passes it itself; a process-level one has none."""
+    scopes = [scope for scope, events in _SCOPES.items() if event in events]
+
+    assert len(scopes) == 1, f"{event} is declared in {scopes or 'no list'}: declare it in exactly one of {list(_SCOPES)}"
+
+
+def test_every_declared_event_is_one_the_code_or_the_record_names():
+    """So the lists cannot keep a name nothing logs any more."""
+    named = code_events() | record_events()
+
+    assert sorted(set().union(*_SCOPES.values()) - named) == []
+
+
+def test_every_line_the_supervisor_logs_about_a_wall_passes_the_wall_itself():
+    """No worker's context surrounds these, so the call site is the only way the wall gets on the line."""
+    sites = [
+        (module, call)
+        for module, _f, call in _log_calls()
+        if isinstance(e := _event_of(call), ast.Constant) and e.value in NAMES_ITS_WALL
+    ]
+    missing = [
+        f"{module.relative_to(SOURCE)}:{call.lineno} ({_event_of(call).value})"
+        for module, call in sites
+        if not any(isinstance(key, ast.Constant) and key.value == "wall_id" for key in _extra(call).keys)
+    ]
+
+    assert {_event_of(call).value for _m, call in sites} == NAMES_ITS_WALL, "a declared event has no call site"
+    assert missing == []
+
+
+class Journal:
+    """What `logs.configure` writes, captured as the parsed lines, from every task and thread."""
+
+    def __init__(self) -> None:
+        logs.configure()
+        self._stream = io.StringIO()
+        installed = [handler for handler in logging.getLogger().handlers if getattr(handler, "_display_log_handler", False)]
+        assert len(installed) == 1
+        installed[0].setStream(self._stream)
+
+    def lines(self) -> list[dict]:
+        return [json.loads(line) for line in self._stream.getvalue().splitlines() if line]
+
+    def events(self, event: str) -> list[dict]:
+        return [line for line in self.lines() if line.get("event") == event]
+
+
+def _faults(line: dict, walls: set[str], cache_dir: Path) -> list[tuple]:
+    """What is wrong with one journal line of the drive below: its wall, its label, or its list."""
+    event = line.get("event")
+    faults: list[tuple] = []
+    if event in WALL_EVENTS | NAMES_ITS_WALL:
+        if line.get("wall_id") not in walls:
+            faults.append((event, "no wall", line.get("wall_id")))
+    elif event in LABEL_EVENTS:
+        if (line.get("label_id"), line.get("wall_id")) != ("label-1", "hall"):
+            faults.append((event, "not its label and wall", line.get("label_id"), line.get("wall_id")))
+    elif event in PROCESS_EVENTS:
+        if "wall_id" in line or "label_id" in line:
+            faults.append((event, "a process line naming a wall or label", line.get("wall_id"), line.get("label_id")))
+    else:
+        faults.append((event, "in no list"))
+    root = str(cache_dir) + os.sep
+    for value in line.values():
+        if isinstance(value, str) and value.startswith(root):
+            directory = value[len(root) :].split(os.sep, 1)[0]
+            if directory in walls and line.get("wall_id") != directory:
+                faults.append((event, f"names {directory}'s path", line.get("wall_id")))
+    return faults
+
+
+async def test_every_line_a_worker_logs_names_its_wall(monkeypatch, client, server, drm, television, connectors):
+    """**Each kind of worker, through the suite's doubles, as the process runs them.**
+
+    A Frame wall (living-room), a screen wall (hall, on hdmi-a-1), a screen wall
+    the server has published nothing for (porch, on hdmi-a-2, so its pull is
+    refused), and a label renderer captioning hall. Every line logged inside a
+    wall's worker must carry that wall, every line inside the label's renderer
+    the label and its wall, and none of the process's lines a wall; a line whose
+    event is in no list fails too. Where a line names a path in a wall's
+    directory, the wall it carries must be that directory's, which is what
+    tells "the right wall" from "a wall".
+    """
+    from fakes import FakeSurface
+
+    surface = FakeSurface()
+    monkeypatch.setattr(entry, "label_surface", lambda _settings: surface)
+    settings = replace(client, panel=replace(client.panel, epd_device="omni_epd.mock"), label_poll_seconds=0.02)
+    panels = entry.label_panels(settings.panel)
+    server.publish("w1", "w2", wall_id="living-room")
+    server.assign("hall", "hdmi-a-1")
+    server.publish("h1", "h2", wall_id="hall")
+    server.assign("porch", "hdmi-a-2")
+    server.map_label("label-1", "epd-0", "hall", {**LABEL_DOCUMENT, "wall_id": "hall"})
+    journal = Journal()
+
+    supervisor = supervisor_for(
+        settings,
+        drm,
+        label_worker=partial(entry.run_label, settings, panels, clock=Clock.system()),
+        label_outputs=lambda: [panel.report() for panel in panels.values()],
+        forget_labels=entry.LabelCacheSweep(settings),
+    )
+    try:
+        async with Running(supervisor):
+            # Waited for by what the doubles saw, never by the field under test.
+            await eventually(lambda: journal.events("pull.refused"), what="porch's refusal")
+            await eventually(lambda: television.on_the_wall is not None, what="the Frame to show living-room")
+            await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="hall to be drawn")
+            await eventually(lambda: journal.events("label.drawn"), what="the label to be drawn")
+    finally:
+        surface.release.set()
+
+    # The Player's own lines: the double's access log goes through the same root handler.
+    lines = [line for line in journal.lines() if line["logger"].startswith("arrt_player")]
+    wrong = [fault for line in lines for fault in _faults(line, {"living-room", "hall", "porch"}, settings.cache_dir)]
+
+    assert wrong == [], "\n".join(sorted({" ".join(map(str, fault)) for fault in wrong}))
+    # What makes the check above more than vacuous: each kind of worker logged,
+    # and from more than the call sites that already passed their wall.
+    seen = {(line.get("event"), line.get("wall_id")) for line in lines}
+    assert {
+        ("pull.refused", "porch"),
+        ("pull.adopted", "living-room"),
+        ("pull.adopted", "hall"),
+        ("compose.done", "hall"),
+        ("screen.started", "hall"),
+        ("frame.started", "living-room"),
+        ("label.drawn", "hall"),
+        ("client.started", None),
+    } <= seen
+
+
+# -- a wall's directory goes a week after the wall does ------------------------------------------
+
+DAY = 24 * 60 * 60
+#: What one poll's sweep is credited with at most; the tests step by it.
+STEP = 10 * 60
+
+
+class Days:
+    """The wall clock and the monotonic clock, moved by hand; `jump` moves the wall clock alone."""
+
+    def __init__(self) -> None:
+        self.wall = datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+        self.mono = 5000.0
+
+    def now(self) -> datetime:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def jump(self, seconds: float) -> None:
+        self.wall += timedelta(seconds=seconds)
+
+
+class Documents:
+    """A client link whose answers the test sets: the cached document at start, and what each poll fetches."""
+
+    def __init__(self, cached: ClientDocument | None = None) -> None:
+        self.at_start = cached
+        #: What every fetch answers until changed: a document, or None (304, unreachable, refused, unreadable).
+        self.answer: ClientDocument | None = None
+
+    def cached(self) -> ClientDocument | None:
+        return self.at_start
+
+    async def fetch(self) -> ClientDocument | None:
+        return self.answer
+
+    async def report(self, heartbeat) -> bool:
+        return True
+
+    async def close(self) -> None:
+        return None
+
+
+HDMI = [OutputReport(name=f"hdmi-a-{n}", kind="framebuffer", connected=True, screen=(1920, 1080)) for n in (1, 2, 3, 4)]
+
+
+def placing(*walls: str, on: dict[str, str] | None = None) -> ClientDocument:
+    """A document placing each wall here, on an HDMI connector of its own unless `on` says otherwise."""
+    outputs = on or {}
+    return ClientDocument(
+        client_id=CLIENT_ID,
+        name="The Pi in the hall",
+        walls=tuple(
+            Assignment(wall_id=wall, name=wall, output=outputs.get(wall, f"hdmi-a-{n}")) for n, wall in enumerate(walls, 1)
+        ),
+    )
+
+
+def a_wall_directory(cache_dir: Path, wall_id: str, *, master: bytes = b"a master") -> Path:
+    """A wall's directory as its worker and pull leave it: a feed, a master, a composition, a heartbeat."""
+    root = cache_dir / wall_id
+    (root / "media").mkdir(parents=True)
+    (root / "media" / "sha256-feed").write_bytes(master)
+    (root / COMPOSED_DIRNAME).mkdir()
+    (root / COMPOSED_DIRNAME / "picture.jpg").write_bytes(b"composed")
+    (root / "manifest.json").write_text("{}", encoding="utf-8")
+    (root / f"display-heartbeat-{wall_id}.json").write_text("{}", encoding="utf-8")
+    return root
+
+
+def snapshot(root: Path) -> dict[str, bytes | str]:
+    """Every path under `root`, without following a link, with a file's bytes or a link's target."""
+    found: dict[str, bytes | str] = {}
+    for path in sorted(root.rglob("*")):
+        key = str(path.relative_to(root))
+        if path.is_symlink():
+            found[key] = f"-> {path.readlink()}"
+        elif path.is_file():
+            found[key] = path.read_bytes()
+        else:
+            found[key] = "dir"
+    return found
+
+
+class Player:
+    """A supervisor polled by hand on `Days`, as one process: `restart` is a new one on the same disk."""
+
+    def __init__(self, client_settings: ClientSettings, days: Days, link: Documents) -> None:
+        self.settings, self.days, self.link = client_settings, days, link
+        self.supervisor = self._new()
+
+    def _new(self) -> Supervisor:
+        return Supervisor(
+            settings=self.settings,
+            link=self.link,
+            worker=_idle,
+            outputs=lambda: HDMI,
+            now=self.days.now,
+            monotonic=self.days.monotonic,
+        )
+
+    async def start(self) -> None:
+        cached = self.link.cached()
+        if cached is not None:
+            self.supervisor.reconcile(cached)
+        await self.supervisor.cycle()
+
+    async def run_for(self, seconds: float) -> None:
+        """Poll through `seconds` of both clocks, a sweep every `STEP`."""
+        for _ in range(round(seconds / STEP)):
+            self.days.wall += timedelta(seconds=STEP)
+            self.days.mono += STEP
+            await self.supervisor.cycle()
+            # The poll's waits, which let the workers run: a fetch and a report that answer at once never yield.
+            await asyncio.sleep(0)
+
+    async def restart(self, link: Documents) -> None:
+        await self.supervisor.stop_all()
+        self.link = link
+        self.supervisor = self._new()
+        await self.start()
+
+    async def stop(self) -> None:
+        await self.supervisor.stop_all()
+
+
+def stamped(directory: Path) -> bool:
+    return (directory / client_module.LEFT_STAMP_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("walls", "leaving"),
+    [(("east", "west"), {"west"}), (("x1", "x2", "x3"), {"x1", "x3"})],
+    ids=["one of two leaves", "two of three leave"],
+)
+async def test_a_wall_that_left_keeps_its_directory_for_six_days_and_loses_it_by_the_eighth(
+    client_settings, caplog, walls, leaving
+):
+    caplog.set_level(logging.INFO)
+    cache = client_settings.cache_dir
+    for wall in walls:
+        a_wall_directory(cache, wall)
+    link = Documents(cached=placing(*walls))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    staying = [wall for wall in walls if wall not in leaving]
+    link.answer = placing(*staying)
+
+    await player.run_for(6 * DAY)
+    assert all((cache / wall).is_dir() for wall in walls), "a directory went before its week"
+    assert {wall for wall in walls if stamped(cache / wall)} == leaving
+
+    await player.run_for(2 * DAY)
+    await player.stop()
+
+    assert sorted(path.name for path in cache.iterdir() if not path.name.startswith(".")) == sorted(staying)
+    assert not any(path.name.startswith(".removing-") for path in cache.iterdir()), "a deletion was left half done"
+    removed = [record for record in caplog.records if getattr(record, "event", None) == "client.wall_cache_removed"]
+    assert sorted(record.wall_id for record in removed) == sorted(leaving)
+    said = [record for record in caplog.records if getattr(record, "event", None) == "client.wall_cache_stamped"]
+    assert sorted(record.wall_id for record in said) == sorted(leaving), "a stamp was said other than once per wall"
+
+
+async def test_a_wall_that_comes_back_is_unstamped_and_loses_nothing(client_settings):
+    """Gone three days and back: nothing removed, the stamp gone, and a later leaving counts its week from then."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    before = snapshot(cache / "west")
+    link = Documents(cached=placing("east", "west"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+
+    link.answer = placing("east")
+    await player.run_for(3 * DAY)
+    assert stamped(cache / "west")
+    link.answer = placing("east", "west")
+    await player.run_for(STEP)
+    assert not stamped(cache / "west")
+    await player.run_for(8 * DAY)
+    assert snapshot(cache / "west") == before, "a wall that came back lost something"
+
+    link.answer = placing("east")
+    await player.run_for(6 * DAY)
+    assert (cache / "west").is_dir(), "the three days before it came back were counted again"
+    await player.run_for(1 * DAY + 60 * 60)
+    await player.stop()
+    assert not (cache / "west").exists()
+
+
+async def test_nothing_is_removed_or_stamped_while_no_client_document_can_be_read(client_settings):
+    """**The server down at boot, and no cached document that can be read.** This
+    client does not know which walls it drives, and "none" would be every wall's
+    directory. A stamp an earlier process left a minute short of its week is not
+    pushed over it either."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west", "north"):
+        a_wall_directory(cache, wall)
+    (cache / "north" / client_module.LEFT_STAMP_FILENAME).write_text(
+        json.dumps({"left_at": "2026-10-01T00:00:00+00:00", "absent_seconds": 7 * DAY - 60}), encoding="utf-8"
+    )
+    before = snapshot(cache)
+    player = Player(client_settings, Days(), Documents(cached=None))
+    await player.start()
+
+    await player.run_for(30 * DAY)
+    await player.stop()
+
+    assert snapshot(cache) == before
+
+
+async def test_a_document_unreadable_on_day_three_adds_nothing_to_the_week(client_settings):
+    """Three days gone, then a restart with the server down and the cached document
+    spoiled, for two days; then the server answers. The two days count for nothing,
+    and the three before the restart are kept by the stamp."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    link = Documents(cached=placing("east", "west"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    link.answer = placing("east")
+    await player.run_for(3 * DAY)
+
+    await player.restart(Documents(cached=None))
+    await player.run_for(2 * DAY)
+    assert stamped(cache / "west")
+    back = Documents(cached=None)
+    player.link = back
+    player.supervisor._link = back
+    back.answer = placing("east")
+    await player.run_for(3 * DAY + 12 * 60 * 60)
+    assert (cache / "west").is_dir(), "the days with no document were counted"
+    await player.run_for(1 * DAY)
+    await player.stop()
+
+    assert not (cache / "west").exists()
+    assert (cache / "east").is_dir()
+
+
+async def test_the_week_survives_a_restart(client_settings):
+    """Four days, a restart that reads its cached document, three days more: gone, losing at most a rewrite's worth."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    link = Documents(cached=placing("east", "west"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    link.answer = placing("east")
+    await player.run_for(4 * DAY)
+
+    restarted = Documents(cached=placing("east"))
+    await player.restart(restarted)
+    await player.run_for(2 * DAY + 12 * 60 * 60)
+    assert (cache / "west").is_dir()
+    await player.run_for(12 * 60 * 60 + client_module.LEFT_STAMP_REWRITE_SECONDS + 60 * 60)
+    await player.stop()
+
+    assert not (cache / "west").exists(), "the four days before the restart were lost"
+
+
+async def test_a_clock_that_jumps_forward_expires_no_stamp_early(client_settings):
+    """The wall clock a month ahead in one step, then the monotonic clock eight days in one: neither is a week of polls."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    link = Documents(cached=placing("east", "west"))
+    days = Days()
+    player = Player(client_settings, days, link)
+    await player.start()
+    link.answer = placing("east")
+    await player.run_for(DAY)
+
+    days.jump(30 * DAY)
+    await player.run_for(STEP)
+    assert (cache / "west").is_dir(), "a wall clock a month ahead expired the stamp"
+    days.mono += 8 * DAY
+    await player.supervisor.cycle()
+    assert (cache / "west").is_dir(), "one sweep after a leap was credited with the whole leap"
+    await player.run_for(6 * DAY)
+    await player.stop()
+
+    assert not (cache / "west").exists(), "the week of polls did not end in removal"
+
+
+async def test_a_master_a_driven_wall_also_holds_is_never_removed(client_settings):
+    """The same work on two walls: each wall's master is its own file, and the one still shown keeps its copy."""
+    cache = client_settings.cache_dir
+    a_wall_directory(cache, "east", master=b"the same work")
+    a_wall_directory(cache, "west", master=b"the same work")
+    kept = snapshot(cache / "east")
+    link = Documents(cached=placing("east", "west"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    link.answer = placing("east")
+
+    await player.run_for(8 * DAY)
+    await player.stop()
+
+    assert not (cache / "west").exists()
+    assert snapshot(cache / "east") == kept
+
+
+async def test_nothing_but_a_departed_walls_own_directory_is_ever_removed(client_settings, tmp_path, caplog):
+    """**Everything else the cache root can hold is left as it is**: the Player's
+    own dotted files and directories, the television's token, a plain name that
+    is not a wall's directory, a plain file, a symlink to a wall-shaped directory
+    outside, and a directory differing only in case from a wall still placed.
+    Inside the removed directory, a link out is removed and what it points at is
+    not. Each unknown entry is said once."""
+    caplog.set_level(logging.INFO)
+    cache = client_settings.cache_dir
+    a_wall_directory(cache, "east")
+    gone = a_wall_directory(cache, "west")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious").write_bytes(b"not the Player's")
+    (gone / "link-out").symlink_to(outside / "precious")
+    (cache / ".labels").mkdir()
+    (cache / ".labels" / "label-1.json").write_text("{}", encoding="utf-8")
+    for name in (".client.json", ".client.etag", ".settings.json", ".slideshow-listing.json", "token_file", "readme"):
+        (cache / name).write_text(name, encoding="utf-8")
+    (cache / ".slideshow").mkdir()
+    (cache / ".slideshow" / "clip.mp4").write_bytes(b"clip")
+    (cache / ".mpv").mkdir()
+    (cache / "notes").mkdir()
+    (cache / "notes" / "todo.txt").write_text("keep", encoding="utf-8")
+    a_wall_directory(outside, "elsewhere")
+    (cache / "linked").symlink_to(outside / "elsewhere")
+    a_wall_directory(cache, "Hall")
+    outside_before = snapshot(outside)
+    before = {key: value for key, value in snapshot(cache).items() if not key.startswith("west")}
+    link = Documents(cached=placing("east", "west", "hall"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    link.answer = placing("east", "hall")
+
+    await player.run_for(8 * DAY)
+    await player.stop()
+
+    after = snapshot(cache)
+    assert not (cache / "west").exists()
+    assert after == before
+    assert snapshot(outside) == outside_before
+    unknown = sorted(
+        Path(record.path).name for record in caplog.records if getattr(record, "event", None) == "client.cache_entry_unknown"
+    )
+    assert unknown == ["linked", "notes", "readme"]
+
+
+async def test_a_name_a_wall_may_not_take_is_never_removed_even_dressed_as_a_wall(client_settings):
+    """`token_file` in another case, holding a wall's files: reserved without case, as a wall id is refused."""
+    cache = client_settings.cache_dir
+    a_wall_directory(cache, "Token_File")
+    before = snapshot(cache)
+    link = Documents(cached=placing())
+    player = Player(client_settings, Days(), link)
+    await player.start()
+
+    await player.run_for(8 * DAY)
+    await player.stop()
+
+    assert snapshot(cache) == before
+
+
+async def test_a_wall_moved_between_this_clients_outputs_has_not_left(client_settings):
+    cache = client_settings.cache_dir
+    a_wall_directory(cache, "east")
+    link = Documents(cached=placing("east", on={"east": "hdmi-a-1"}))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+
+    link.answer = placing("east", on={"east": "hdmi-a-2"})
+    await player.run_for(8 * DAY)
+    await player.stop()
+
+    assert player.supervisor.running == {}
+    assert (cache / "east").is_dir()
+    assert not stamped(cache / "east")
+
+
+async def test_a_wall_placed_on_an_output_this_client_lacks_has_not_left(client_settings):
+    """Placed here and not drawable is still this client's wall: its screen may be plugged in tomorrow."""
+    cache = client_settings.cache_dir
+    a_wall_directory(cache, "east")
+    link = Documents(cached=placing("east", on={"east": "hdmi-a-9"}))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+
+    await player.run_for(8 * DAY)
+    await player.stop()
+
+    assert (cache / "east").is_dir()
+    assert not stamped(cache / "east")
+
+
+async def test_stopping_the_client_stamps_nothing(client_settings):
+    """A Player going down has not seen any wall leave."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    before = snapshot(cache)
+    player = Player(client_settings, Days(), Documents(cached=placing("east", "west")))
+    await player.start()
+    assert set(player.supervisor.running) == {"east", "west"}
+
+    await player.stop()
+
+    assert player.supervisor.running == {}
+    assert snapshot(cache) == before
