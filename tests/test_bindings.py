@@ -1534,6 +1534,42 @@ class TestASetThatWillNotSayWhichItIs:
         assert publish.work_of(tv.on_the_wall) == "w9", "a set that would not say was shown no art"
         assert len(_store_events(caplog, "tv.unidentified_going_on")) == 1
 
+    async def test_a_schema_2_store_opens_through_both_migrations_and_sends_no_removal_until_the_set_says(
+        self, settings, clock, publish
+    ):
+        """Two releases back, one file: 2 to 3 names every row at the upgrade (chunk 06), 3 to 4 records no set
+        (this chunk). So the rows are kept and none is due, the store knows no set, and on a set that will not say,
+        through its patience and twenty days beyond, nothing is removed."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+        from arrt_player.state.store import SCHEMA_VERSION
+
+        rows = [(f"{n}", f"w{n}", f"MY-F000{n}", "1:1", "2026-01-01T00:00:00+00:00", "uploaded") for n in range(1, 4)]
+        _a_schema_2_store(settings.state_path, rows)
+        upgraded_at = clock.as_clock().now()
+        tv = _a_set(None, **{f"MY-F000{n}": Path(f"/somebodys/{n}.jpg") for n in range(1, 4)})
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            opened = {binding.artwork_id: binding for binding in store.bindings()}
+            assert store.tv_identity is None, "a store from two releases back was given a set"
+            assert store.feed_seconds == 0.0
+            assert sorted(opened) == ["w1", "w2", "w3"], "a binding was lost by the migrations"
+            assert all(
+                (binding.last_named_feed_seconds, binding.last_named_at) == (0.0, upgraded_at) for binding in opened.values()
+            ), "a binding from schema 2 was not named at the upgrade"
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w9"], interval_seconds=3600)  # none of the store's works
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS)
+            for _ in range(20):
+                await wall.tick()
+                clock.advance(DAY)
+            assert [binding.artwork_id for binding in store.bindings()] == ["w1", "w2", "w3"], "a row was dropped"
+            assert store.tv_identity is None
+        with sqlite3.connect(settings.state_path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+
+        assert tv.removed == [], "a removal was sent from a store that does not know which set it is on"
+
     async def test_a_set_back_from_an_outage_that_will_not_say_gets_the_slots_work_from_the_store_in_memory(
         self, settings, clock, publish
     ):
