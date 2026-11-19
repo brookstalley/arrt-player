@@ -44,14 +44,14 @@ from `CACHE_DIR` and a wall id, never configured
 | Path | Written by | What it holds |
 |---|---|---|
 | `.client.json` | `pull.py:ClientPull.fetch` | The last `GET /client` answer that `client.py:parse_client_document` accepted, as the server's text. Read at start by `ClientPull.cached`, so a restart with the server down starts the walls it last knew (`client.py:Supervisor.run`). |
-| `.client.etag` | `pull.py:ClientPull.fetch` | The ETag served with it. Removed before a new document is written, and written again only if the server served one, so it never sits beside a document it does not describe, even after a crash between the writes. Sent only while `.client.json` exists (`ClientPull._cached_etag`). |
+| `.client.etag` | `pull.py:ClientPull.fetch` | The ETag served with it. Removed before a new document is written, and written again only if the server served one, so it never sits beside a document it does not describe, even after a crash between the writes. **Sent only while `.client.json` exists and `parse_client_document` still accepts it** (`ClientPull._cached_etag`), so a torn or hand-edited document is replaced rather than vouched for with a 304, as the feed's ETag is. |
 | `token_file` | the `samsungtvws` library, not the Player | The Frame's pairing token, at this path only when `TV_ADDRESS` is set and `TV_TOKEN_FILE` is not (`config.py:_frame`). See `security-model.md` § To the television: the pairing token. |
-| `<wall id>/` | `__main__.py:run_frame_wall`, `run_screen_wall` (mkdir) | One wall. `config.py:ClientSettings.wall` refuses an id that is not one plain path component (`PLAIN_COMPONENT`, `WallIdUnusable`). A leading dot is refused, which keeps the two `.client.*` files apart from every wall directory; so is any other name the cache directory reserves, derived from the constants that name those files. |
+| `<wall id>/` | `__main__.py:run_frame_wall`, `run_screen_wall` (mkdir) | One wall. `config.py:ClientSettings.wall` refuses an id that is not one plain path component (`PLAIN_COMPONENT`, `WallIdUnusable`). A leading dot is refused, which keeps the two `.client.*` files apart from every wall directory; so is any other name the cache directory reserves, derived from the constants that name those files. A wall the client document stops placing here is stamped `<wall id>/.left.json` and its directory is removed a week later (below). |
 | `<wall id>/manifest.json` | `pull.py:Pull._cache_feed` | The last feed that `manifest.py:parse` accepted, re-serialised (`json.dumps(document, indent=2)`), not the server's bytes. Written only after every work's media is cached or answered for, or after a master that keeps failing has been waited for `MEDIA_HOLD_SECONDS`, when it is written without that master (`Pull._hold_or_adopt`). Read by `manifest.py:Watcher`. |
 | `<wall id>/manifest.etag` | `pull.py:Pull._cache_feed` | The ETag served with the feed. Removed before a new feed is written, and written again only if the server served one and every master is in hand: a feed cached after the hold ran out has none, so the next poll is answered whole and asks for the missing masters again. Sent only while `manifest.json` exists **and the watcher's own parser reads it** (`Pull._cached_etag`), so a torn or hand-edited manifest is replaced rather than vouched for with a 304. |
 | `<wall id>/media/sha256-<hex>` | `pull.py:Pull._cache_media` | One presentation master, named by the SHA-256 of its bytes (`manifest.py:media_name`). Streamed to a temporary file beside it and renamed only when the SHA-256 of what was written equals the feed's `media.sha256` and the body did not run past the bytes the feed declares. After each adoption, `Pull._evict` removes every file that neither the new feed nor the one it replaced names. |
 | `<wall id>/composed/<key>.jpg` | `compose.py:compose`, driven by `programmes/schedule.py:Schedule` | Each work drawn for this wall's display geometry and mat, named by `compose.py:composition_key`, flushed to disk before it takes its name. One found on disk that is not a whole JPEG (empty, cut short, zero-filled) is removed and composed again, each file read once per size and time (`Schedule._intact`, `compose.is_intact`). Pruned by `Schedule._tidy`. Never leaves the device (Arrt's `data-model.md` § Direction, "Derived artifacts are regenerated, never transported"). |
-| `.labels/<label id>.json` | `pull.py:LabelPull` | The last label document the server sent for each label this client renders and this reader accepted. Its modification time is the instant the server last answered for it, moved forward at most once a minute (`LABEL_ANSWER_STAMP_SECONDS`). The ETag is not kept, so a restart asks for the whole document. Read at start by `LabelPull.cached`; one that cannot be read is treated as absent. A leading dot keeps it apart from every wall directory. |
+| `.labels/<label id>.json` | `pull.py:LabelPull` | The last label document the server sent for each label this client renders and this reader accepted. Its modification time is the instant the server last answered for it, moved forward at most once a minute (`LABEL_ANSWER_STAMP_SECONDS`). The ETag is not kept on disk, so a restart asks for the whole document, and **in memory it is held only for a document the cache took** (`LabelPull._keep`): asked with the ETag of a document it never cached, the server answers 304 and the document would never be cached. Read at start by `LabelPull.cached`; one that cannot be read is treated as absent. A file no mapped label would read (a retired label's, one moved to another Player's panel, an atomic write's leftover) is removed each time the client document is matched, and never before one has been read (`__main__.LabelCacheSweep`; `label.cache_forgotten`). A leading dot keeps it apart from every wall directory. |
 | `<wall id>/display-heartbeat-<wall id>.json` | `heartbeat.py:write`, called from the wall loop | The wall's heartbeat (`heartbeat.py:Health.document`), rewritten about every 60 s (`heartbeat.py:INTERVAL_SECONDS`) and sooner on a display-state change (`wall.py:DisplayRecord`). `pull.py:Pull._heartbeats` POSTs it (`_forward_heartbeat`) when it changes. |
 | `<wall id>/display-state.sqlite` (+ `-wal`, `-shm`) | `state/store.py:DisplayState` | Frame walls only (`config.py:WallSettings.state_path`, opened in `__main__.py:run_frame_wall`). See `DisplayState` below. |
 
@@ -59,11 +59,25 @@ from `CACHE_DIR` and a wall id, never configured
 (`.<name>.tmp` beside the target) and `heartbeat.py:write` (`<name>.tmp`). A
 reader therefore sees the old file or the new one, never part of one.
 
-**Nothing removes a wall's directory.** No code in `src/` calls `rmtree` or
-`rmdir` (searched 2026-10-27). A wall taken away from this client keeps its
-directory, its media and, on the Frame, its store, until somebody deletes them.
-Pruning happens only inside a wall that is still running: `Pull._evict` for
-`media/`, `Schedule._tidy` for `composed/`.
+**A wall's directory goes a week after the wall left this Player.** The client
+document is read at every poll; a directory that is a wall's (one holding a file
+only a wall's directory holds, under a name a wall id may take) and that no
+document read places here is stamped `.left.json` (`left_at`, and `absent_seconds`
+as this Player has seen it gone) and removed once `absent_seconds` reaches
+`client.WALL_CACHE_KEPT_SECONDS` (7 days), its media, compositions and Frame
+store with it. **The week is counted on the monotonic clock and only while
+documents are being read**, at most ten minutes per sweep, so time the Player is
+off or cannot read its document counts for nothing, a wall clock that jumps
+expires nothing, and a restart loses at most the 15 minutes since the count was
+last written (`tests/test_client.py::test_the_week_survives_a_restart`); a wall
+placed here again first loses its stamp and nothing else.
+Nothing is swept while no document has been read and parsed, because a Player
+that cannot read it does not know which walls it has (`client.WallCaches`,
+`Supervisor._read_document`). It removes only a real directory directly under
+`CACHE_DIR`; a symlink, a dotted name, a plain file or an unknown directory is
+never removed (`client.cache_entry_unknown` says the last once). Inside a wall
+that is still running, pruning is `Pull._evict` for `media/` and
+`Schedule._tidy` for `composed/`.
 
 ### DisplayState (`display-state.sqlite`)
 
@@ -74,8 +88,29 @@ other module opens the path (`config.py:STATE_FILENAME` is referenced only by
 `WallSettings.state_path`). Losing it costs a re-upload of every work, not a
 record (`state/store.py` module docstring).
 
-Schema version is SQLite's `PRAGMA user_version`, currently 2
+Schema version is SQLite's `PRAGMA user_version`, currently 4
 (`state/store.py:SCHEMA_VERSION`). Journal mode is WAL (`DisplayState.__init__`).
+
+**The chain of migrations is one function, `DisplayState._widen`, run once on
+opening a store below the current version, additive and idempotent** (so a start
+cut short finishes on the next open): version 2 added `render_fingerprint`
+(2026-08-06); 3 (2026-11-19) added `last_named_feed_seconds` and `last_named_at`,
+and names every existing row as named at the upgrade, so nothing retires for 14
+days; 4 (2026-11-19) added the table `tv_binding_aside` and the key `tv_identity`.
+A store from any version opens through every step it lacks (held by
+`tests/test_bindings.py::TestTheStoreKeepsEachSetsBindingsApart::test_a_schema_3_store_opens_with_every_binding_and_no_set`
+and `::TestASetThatWillNotSayWhichItIs::test_a_schema_2_store_opens_through_both_migrations_and_sends_no_removal_until_the_set_says`).
+**Opening a store below 4 forgets any `tv_identity` it holds**, because a Player
+older than 4 may have written bindings to it on another set since (a rollback and
+a roll forward again), so it is met as a store from before the identity and takes
+the first identity read. A store above the code's version is refused
+(`StateSchemaTooNew`); the way back across 3 and 4 is the runbook's § Going back.
+
+**The store holds the bindings of one television at a time, and the bindings of
+every other this wall has met, set aside.** A binding is a content id, which is
+the set's own; used on another set it names another picture or none
+(`state/store.py` module docstring). So the store records which set the rows were
+made on, and on meeting another it moves them aside (below).
 
 #### `tv_binding` — one work's image on this television
 
@@ -87,7 +122,9 @@ Schema version is SQLite's `PRAGMA user_version`, currently 2
 | `artwork_id` | TEXT | NOT NULL, UNIQUE | The work id from the feed. **At most one row per work in this file**, and because the file is per wall, at most one per (wall, work). |
 | `tv_content_id` | TEXT | nullable; CHECK `upload_status <> 'uploaded' OR tv_content_id IS NOT NULL` | The set's own id for the uploaded picture. A cache key, meaningless off this set. Cleared to null by `record_upload_failure` and `mark_orphaned`. |
 | `tv_thumb_md5` | TEXT | nullable | **Nothing writes it** (`DisplayState.record_upload` docstring). Null on every row. |
-| `render_fingerprint` | TEXT | nullable | `"<st_mtime_ns>:<st_size>"` of the composed file when it was sent (`displays/frame.py:_fingerprint`). A mismatch, or null, counts as changed (`_render_changed`) and forces a re-upload. Added at schema 2 by `DisplayState._widen`. |
+| `render_fingerprint` | TEXT | nullable | `"sha256:<hex>"` of the composed file's bytes when it was sent (`displays/frame.py:_fingerprint`; hashed once per change of the file's stamp). A mismatch, or null, counts as changed (`_render_changed`) and forces a re-upload; **the same pixels composed again are not a change**, which is what keeps a work that left the feed and came back from being uploaded twice. A row an earlier Player wrote holds `"<st_mtime_ns>:<st_size>"`, which is still accepted while the file has that stamp (`_stamp`), so the upgrade uploads nothing. Added at schema 2 by `DisplayState._widen`. |
+| `last_named_feed_seconds` | REAL | nullable | The wall's `daemon_state.feed_seconds` when an adopted feed last named this work. **What retires a binding** (`displays/frame.py:_retirements`): 14 days (`RETIRED_AFTER_SECONDS`) of the wall running with a feed since. Null only on a row an older Player wrote after a rollback; the next migration names it, and a row with none is never retired. Added at schema 3. |
+| `last_named_at` | TEXT | nullable | The wall time of the same moment, for a reader of the file. Nothing compares it. Added at schema 3. |
 | `uploaded_at` | TEXT | NOT NULL | ISO 8601 from the injected clock (`DisplayState._now`), on every write including failures. A `failed` row's retry wait is measured from it (`displays/frame.py:FrameDisplay._too_soon_to_retry`). |
 | `upload_status` | TEXT | NOT NULL; CHECK in (`uploaded`, `failed`, `orphaned`) | `state/store.py:UploadStatus`. No row means "never tried". |
 
@@ -103,8 +140,37 @@ name.
 |---|---|---|
 | `last_selected_work_id` | `DisplayState.last_selected_work_id` | The work last put on the wall, so a restart resumes instead of re-selecting. The Frame's implementation of `programmes/schedule.py:Memory`. A screen wall uses `schedule.py:InMemory` instead and remembers nothing across a restart (`displays/screen.py:screen_wall`). |
 | `native_slideshow_disabled` | `DisplayState.native_slideshow_disabled` | `"1"` once the set's own slideshow has been switched off. Written by `displays/frame.py:FrameDisplay._connected`, which calls `disable_native_slideshow` only while it is unset. |
+| `tv_identity` | `DisplayState.tv_identity`, `belongs_to` | The `device.duid` of the set `tv_binding`'s rows were made on. **Absent from a store written before schema 4, and from one held in memory** (`FrameDisplay._scratch`); a store without it sends no removal (`security-model.md` § What it does to the television). |
+| `feed_seconds` | `DisplayState.feed_seconds`, `save_feed_time` | How long this wall has run with a feed adopted, counted from the elapsed clock while the Player runs and written at most hourly (`FEED_TIME_SAVED_EVERY_SECONDS`). Never the calendar, so a month powered off or a clock step retires nothing. A value that is not a number reads as nought, which delays a retirement and never brings one forward (`store.feed_time_unreadable`). |
 
 A key no code reads is left in place (`state/store.py` module docstring).
+
+#### `tv_binding_aside` — the bindings of a set the wall has been moved away from
+
+`state/store.py:_SCHEMA`. Every column of `tv_binding`, as it was, plus
+`tv_identity` (the set they were made on), with `PRIMARY KEY (tv_identity, artwork_id)`.
+Read only when that set is met again; never selected from, removed from or
+accounted for meanwhile.
+
+**What is and is not carried across a change of set** (`DisplayState.belongs_to`,
+`_move_to`, one transaction, so a fault or a power cut leaves the rows under the
+set they were made on; held by
+`TestTheStoreKeepsEachSetsBindingsApart::test_a_fault_while_the_bindings_move_leaves_them_under_their_set`):
+
+| | On meeting another set |
+|---|---|
+| `tv_binding` rows | Set aside under the old identity. The new set gets its own back if it was met before, **each named now**, so none retires for a full wait and nothing is uploaded again; else it starts with none, as a first run |
+| `last_selected_work_id`, `native_slideshow_disabled` | Set aside with them, **not carried**: which work is on the wall, and whether its own slideshow is off, are facts about a set |
+| `feed_seconds` | **Survives.** It counts the wall's running time with a feed, not a set's |
+| `tv_identity` | Becomes the new set's |
+
+A store with no identity recorded takes the first one read and keeps everything
+(`SetChange.ADOPTED`; for a Player whose set has not changed that is true, and
+the alternative re-uploads every wall's whole library on the first start after the
+upgrade). **If a Frame's address was moved to a different television before this
+upgrade, nothing on the Pi records which set the old rows were made on**, so such
+a store takes the new set's identity for the old set's: the runbook has the
+operator delete that wall's `display-state.sqlite` first.
 
 ### Settings
 
@@ -118,9 +184,10 @@ exported variable). `.env.example` documents every key. The unit loads
 | Client | `SERVER_URL`, `CLIENT_TOKEN`, `CACHE_DIR` | `ClientSettings` | All three required (`_require`). `CACHE_DIR` must be absolute after `~` expansion (`_absolute`). `SERVER_URL` loses a trailing slash and is otherwise unchecked. |
 | Polling | `MANIFEST_POLL_SECONDS` | `ClientSettings.poll_interval_seconds` | Default 1.0. The client poll (30 s) and label poll (1 s) are constants (`DEFAULT_CLIENT_POLL_SECONDS`, `DEFAULT_LABEL_POLL_SECONDS`), not settings. |
 | Mat | `MAT_WIDTH_INCHES`, `MAT_BOTTOM_WEIGHT` | `ClientSettings` → `WallSettings` | Must be above zero (`_positive_float`). |
-| Frame | `TV_ADDRESS` and, only when it is set, `TV_PORT`, `TV_TOKEN_FILE`, `TV_CLIENT_NAME`, `LATITUDE`, `LONGITUDE`, `LOCATION_NAME`, `LOCATION_REGION`, `TV_MIN/MAX_BRIGHTNESS`, `BRIGHTNESS_INTERVAL_SECONDS`, `TV_UPLOAD_TIMEOUT_SECONDS`, `TV_UPLOAD_RETRY_SECONDS`, `TV_SELECT_CONFIRM_SECONDS`, `TV_CONNECT_TIMEOUT_SECONDS`, `TV_RETRY_MIN/MAX_SECONDS`, `TV_PANEL_WIDTH_PX`, `TV_PANEL_HEIGHT_PX`, `TV_PANEL_DIAGONAL_INCHES` | `FrameSettings`, or None (`_frame`) | `LATITUDE`, `LONGITUDE`, `LOCATION_NAME` required once `TV_ADDRESS` is set. `TV_TOKEN_FILE` defaults to `CACHE_DIR/token_file` and must be absolute when set. `TV_CLIENT_NAME` defaults to `tvpi` (`DEFAULT_TV_CLIENT_NAME`); changing it costs a new pairing. Panel sizes must be above zero. |
+| Frame | `TV_ADDRESS` (also the settings page's: `.env` wins, an empty value there pins nothing; an IPv4 address or a host name, no scheme and no port, `config.tv_address_problem`) and, only when it is set, `TV_PORT`, `TV_TOKEN_FILE`, `TV_CLIENT_NAME`, `LATITUDE`, `LONGITUDE`, `LOCATION_NAME`, `LOCATION_REGION`, `TV_MIN/MAX_BRIGHTNESS`, `BRIGHTNESS_INTERVAL_SECONDS`, `TV_UPLOAD_TIMEOUT_SECONDS`, `TV_UPLOAD_RETRY_SECONDS`, `TV_SELECT_CONFIRM_SECONDS`, `TV_CONNECT_TIMEOUT_SECONDS`, `TV_RETRY_MIN/MAX_SECONDS`, `TV_PANEL_WIDTH_PX`, `TV_PANEL_HEIGHT_PX`, `TV_PANEL_DIAGONAL_INCHES` | `FrameSettings`, or None (`_frame`) | `LATITUDE`, `LONGITUDE`, `LOCATION_NAME` required once `TV_ADDRESS` is set. `TV_TOKEN_FILE` defaults to `CACHE_DIR/token_file` and must be absolute when set. `TV_CLIENT_NAME` defaults to `tvpi` (`DEFAULT_TV_CLIENT_NAME`); changing it costs a new pairing. Panel sizes must be above zero. |
 | Screen brightness | `SCREEN_BRIGHTNESS` (`on`/`off`, default on), `LATITUDE`, `LONGITUDE`, `LOCATION_NAME`, `LOCATION_REGION` (shared with the Frame, one parser), `SCREEN_MIN_BRIGHTNESS`, `SCREEN_MAX_BRIGHTNESS`, `BRIGHTNESS_INTERVAL_SECONDS` (the Frame's key, read the same way) | `ScreenBrightnessSettings` on `ClientSettings` (`_screen_brightness`, `_location`) | Off (`location` None) when none of the three location keys is set; any one set requires all three. Off too with `SCREEN_BRIGHTNESS=off`. Levels default 5 and 50 (owner, 2026-11-13), on the monitor's own scale. Checked only when on, and then refused unless 0 ≤ min ≤ max. |
-| Label panel | `EPD_DEVICE`, `EPD_PANEL_WIDTH_PX`, `EPD_PANEL_HEIGHT_PX`, `EPD_PANEL_DIAGONAL_INCHES`, `EPD_VIEWING_DISTANCE_INCHES`, `EPD_MARGIN_PX`, `EPD_ROTATE_DEGREES` | `PanelSettings` (`_panel`) | Read whether or not `TV_ADDRESS` is set. Empty `EPD_DEVICE` is a client with no panel. Diagonal and distance have no default; unset, the panel draws nothing and says why (`__main__.py:label_surface`). Rotation 0 or 180 is enforced in `panel/epaper.py`, not here. |
+| Label panel | `EPD_DEVICE`, `EPD_PANEL_WIDTH_PX`, `EPD_PANEL_HEIGHT_PX`, `EPD_PANEL_DIAGONAL_INCHES`, `EPD_VIEWING_DISTANCE_INCHES`, `EPD_MARGIN_PX`, `EPD_ROTATE_DEGREES` | `PanelSettings` (`_panel`) | Read whether or not `TV_ADDRESS` is set. Empty `EPD_DEVICE` is a client with no panel. **One panel is this configuration's limit by the owner's ruling of 2026-11-19, not the design's**: a value naming more than one is refused at start naming each (`config._panel`, `EPD_DEVICE_LIMIT`), and everything past `config` holds panels by output name (`__main__.label_panels`), so a Player with several, or with labels and no display, stays describable. Diagonal and distance have no default; unset, the panel draws nothing and says why (`__main__.py:label_surface`). Rotation 0 or 180 is enforced in `panel/epaper.py`, not here. |
+| Drawing to files | `FILE_OUTPUT_DIR`, `FILE_OUTPUT_SCREEN`, `FILE_OUTPUT_LABEL` | `FileOutputSettings` on `ClientSettings.files` (`config._files`) | Off unless `FILE_OUTPUT_DIR` is set; the other two are refused without it. A Player that draws to files drives no hardware: `TV_ADDRESS` or `EPD_DEVICE` beside it, a directory in or around `CACHE_DIR`, and slideshow mode are each refused by name. Reports one screen output, `file-screen-0`, and with the label switch one label output, `file-label-0` (`displays/file_output.py`). |
 | Retired | `WALL_ID`, `WALL_TOKEN`, `MANIFEST_SOURCE` | `RETIRED_SETTINGS` | Any of them set stops the start with a `ConfigError` naming its replacement. |
 
 A typed value that does not parse is refused, never defaulted (`_int`, `_float`).
@@ -141,11 +208,12 @@ Lost on restart by design; each is rebuilt from the cache or the server.
 | Holder | What | Source |
 |---|---|---|
 | `client.py:Supervisor` | Running wall workers keyed by wall id (`_running`), label renderers keyed by label output name (`_labels`), workers still stopping (`_stopping`), the last client document and the outputs the walls were matched against (`_document`, `_reconciled_outputs`) | `client.py:Supervisor.reconcile`, `_reconcile_labels` |
-| `client.py:FrameIdentity` | The Frame's `device.duid`, once read; never read again after | `tv/samsung.py:SamsungTv.read_identity` |
+| `client.py:FrameIdentity` | The Frame's `device.duid` for the client heartbeat, once read; **never read again after**, while the wall's worker reads it on every new connection (`FrameDisplay._know_the_set`). A different set answering at the same address without a restart is therefore followed by the wall's store and not by this: the heartbeat goes on reporting the first set's identity until the Player restarts. A known limit, not fixed | `tv/samsung.py:SamsungTv.read_identity` |
 | `manifest.py:Watcher` | The last good `Feed` and the file stamp `(st_mtime_ns, st_size)` last read | `Watcher.poll` |
 | `pull.py:LabelPull` | The label document's ETag; not persisted, so a restarted renderer fetches the whole document. The document itself is cached (`.labels/`) | `LabelPull.fetch` |
 | `label_renderer.py:LabelRenderer` | The last accepted label document (the cached one until the server answers), the drawing on the panel, and the monotonic time of the server's last answer, which the offline hold runs from | `LabelRenderer.tick`, `_seed` |
-| `displays/frame.py:FrameDisplay` | `_showing_art`, `_wall_content_id`, the set's last announcement, retry ladders, whether reconciliation is owed | `FrameDisplay.__init__` |
+| `displays/frame.py:FrameDisplay` | `_showing_art`, `_wall_content_id`, the set's last announcement, retry ladders, whether reconciliation is owed, the identity of the set this connection reaches (`_on`, None again whenever the connection goes), and, while a set will not say who it is for 15 minutes, a store held in memory that starts empty (`_scratch`) | `FrameDisplay.__init__`, `_know_the_set` |
+| `client.py:WallCaches` | Each departed wall's stamp as counted since the Player started (written to the wall's `.left.json` at most every 15 minutes) | `WallCaches.sweep` |
 
 ## Relationships
 
@@ -154,19 +222,36 @@ Lost on restart by design; each is rebuilt from the cache or the server.
   per output, enforced by the `claimed` map in that method; a second wall on the
   same output is logged as unplaceable and not started.
 - **A client has at most one Frame** (`config.py:FRAME_OUTPUT`, one
-  `FrameSettings`) and **at most one label panel** (`config.py:PANEL_OUTPUT`,
-  `epd-0`). HDMI outputs are whatever `client.py:hdmi_outputs` finds under
-  `/sys/class/drm`.
+  `FrameSettings`), and **a label is an output a Player has zero or more of, as
+  a display is** (the owner's ruling of 2026-11-19). The configuration describes
+  at most one panel today (`config.py:PANEL_OUTPUT`, `epd-0`; a value naming
+  several is refused), and everything past it holds panels by output name
+  (`__main__.py:label_panels`, `Supervisor._labels`), so several, or labels and
+  no display, can be added without changing what holds, reports or draws on
+  them. HDMI outputs are whatever `client.py:hdmi_outputs` finds under
+  `/sys/class/drm`, or, with `FILE_OUTPUT_DIR`, the one file screen alone
+  (`__main__.py:player_outputs`).
 - **A label output has at most one renderer**, keyed on its name in
-  `Supervisor._labels`. The wall it captions need not be one this client shows.
+  `Supervisor._labels`, drawing only on the panel its label names
+  (`__main__.py:run_label`; a label naming an output with no panel is said once,
+  `label.no_panel`, and not drawn). The wall it captions need not be one this
+  client shows.
 - **A wall has one cache directory, one `Pull`, one `Watcher`, one heartbeat
   file**, and on the Frame **one `display-state.sqlite`**. All derived from the
   wall id by `WallSettings`; no wall reads another's directory.
 - **A `tv_binding` row references a feed work by `artwork_id`**, with no foreign
   key: the work exists only in the feed, which is a file. A binding for a work
-  the feed no longer names is kept, not deleted; its content id stays in
-  `accounted_content_ids` and is therefore not removed from the set as an
-  orphan.
+  the feed no longer names is kept, not deleted, for 14 days of the wall running
+  with a feed; its content id stays in `accounted_content_ids` and is therefore
+  not removed from the set as an orphan. After that the binding is **retired**:
+  its image is removed from the set through the gated removal, the set's own
+  list confirms it, and the row goes (`displays/frame.py:_retire`). Never retired:
+  a work the adopted feed names (its schedule's whole horizon, scene and
+  staging), the work last put up, the picture the set says is on the wall, a work
+  whose image the set kept when asked (not asked again until the next feed), and a
+  row whose last naming is unknown.
+- **A `tv_binding` row belongs to one television**, the one `daemon_state.tv_identity`
+  names; the rows of any other the wall has met are in `tv_binding_aside`.
 - **The Player's ids are the server's.** Wall id, client id, label id, work id
   and media hash all come from server documents. The Player mints only
   `tv_binding.id`.
@@ -188,8 +273,8 @@ Each machine below is one the code holds in a type or a field, not inferred.
 - **running** → **stopping** → *absent*: the wall left the document, or moved to
   another output (`Supervisor._stop`). A move is a stop and a fresh start. The stop
   is **retired** when the document no longer places the wall on the output its
-  worker runs on (`client.WallStop.retire`), and an HDMI wall then draws its
-  screen black on the way out (`displays/screen.go_dark`); it is merely **stopped**
+  worker runs on (`client.WorkerStop.retire`), and an HDMI wall then draws its
+  screen black on the way out (`displays/screen.go_dark`; a file screen records a blank); it is merely **stopped**
   when the Player is stopping, when the output has left this client, or when the
   document still places the wall there and another wall is drawn on it, and the
   screen is left as it is. A wall retired while its worker waits to restart is
@@ -207,24 +292,37 @@ A dead pull ends its wall's worker so the supervisor restarts both
 
 ### Label renderer lifecycle (`client.py:Supervisor._reconcile_labels`)
 
-Same as a wall worker, with one extra exit: **retired** when the label output is
-no longer mapped, which sets `retired` so the renderer blanks the panel
+Same as a wall worker, and told it is retired the same way (`client.WorkerStop`,
+set before the event, once true it stays true), with one extra exit: **retired**
+when the label output is no longer mapped, so the renderer blanks the panel
 (`_stop_label(retired=True)`). A change of mapping is stopped (not retired) and
-restarted. Shutdown stops without retiring, so e-paper keeps its last caption.
+restarted. Shutdown stops without retiring, so e-paper keeps its last caption. A
+renderer retired while it waits to restart is called once more, already stopped
+and retired, to blank the panel, and that call starts nothing and fetches nothing
+(`label.renderer_retired`). The label's cached document goes with its mapping: see
+`.labels/` above.
 
 ### Pull cycle (`pull.py:Pull.cycle`, `pull.py:_Poll`)
 
-One poll ends in one of three outcomes:
+One poll ends in one of four outcomes:
 
 | Outcome | When | Next |
 |---|---|---|
 | `ANSWERED` | 200 adopted or refused as unreadable, 304, or a 4xx refusal | Backoff reset to 2 s; wait `poll_interval_seconds`. |
 | `MEDIA_FAILING` | A master returned a non-200, non-404 status or a transport error | Manifest not written until `MEDIA_HOLD_SECONDS` have passed since the first failure of the episode, then written without the missing masters and with no ETag; backoff doubles. |
 | `UNREACHABLE` | Transport error, timeout or 5xx on the manifest | No heartbeat; backoff 2 s doubling to 60 s (`BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS`). |
+| `UNWRITABLE` | The route answered and the cache refused what it sent (a full or read-only disk: `ENOSPC`, `EROFS`) | The feed already cached stays where the watcher reads it, and **no ETag is stored for the feed that could not be written**, so the next poll is answered whole and tries again; backoff as for `UNREACHABLE`, but the server is heard, so the heartbeat still goes. Said once per episode, `pull.cache_unwritable`, then `pull.cache_writable` (`Pull._cache_feed`). |
+
+**The ETag is written last** (`Pull._cache_feed`): the old one is removed before the
+manifest it describes is replaced, and the new one goes in only after the
+manifest, the media directory and the eviction have all succeeded, so a crash or
+a refused write anywhere before the end leaves none, which costs one full
+download. The same order holds for the client document (`ClientPull.fetch`).
 
 The heartbeat is forwarded by a loop of its own (`Pull._heartbeats`) at the poll
 interval, whenever the last manifest poll was answered, whatever the manifest
-poll's backoff is doing.
+poll's backoff is doing. `Pull.run`'s two loops and `Pull.cycle` run the same two
+bodies, `_manifest_turn` and `_heartbeat_turn`.
 
 A master that answers 404, fails its hash, runs past the bytes the feed declares,
 or has no declared size is skipped, not retried this feed (`Pull._cache_media`,
@@ -257,8 +355,35 @@ Per work, on the Frame.
 - `orphaned` → `uploaded` | `failed`: the next upload of that work.
 - `uploaded` → `uploaded`: re-upload when the composed file's fingerprint
   changed (`_is_current`).
+- *any* → *no row*: **retirement**, the one transition that deletes a row.
+  Fourteen days of the wall running with a feed that does not name the work, the
+  image removed from the set and confirmed absent by its own list, then
+  `DisplayState.retire` (keyed on the content id too, so a row rewritten since is
+  never dropped with an image it did not name).
+- *any* → set aside: the wall met another set (below). The rows keep their
+  status; they are not read until that set is met again.
 
-No transition deletes a row.
+Nothing else deletes a row.
+
+### Which set the bindings belong to (`state/store.py:SetChange`, `displays/frame.py:_know_the_set`)
+
+Read on every new connection, before any binding is used; asked again on the
+wall's own ladder when the set will not say.
+
+- **same** → nothing is written.
+- **adopted**: the store recorded no set (written before schema 4, or its identity
+  forgotten on opening below 4), so it takes this one and keeps its rows
+  (`binding.set_adopted`). It removes nothing until it has one recorded.
+- **changed**: another set. Rows and the set's facts moved aside, the new set's
+  own brought back, one transaction (`binding.set_changed`, with how many of each);
+  the wall then forgets what it learned of the old set (the work on the wall, its
+  brightness, which works the set kept) and owes a reconciliation, as on a first
+  run.
+- **unidentified**: the read failed. The pass ends, said once (`tv.unidentified`),
+  and no binding is used. After `IDENTITY_PATIENCE_SECONDS` (15 minutes) the wall
+  shows art from a store held in memory that starts empty, removes nothing
+  (`tv.unidentified_going_on`), and leaves it for the device's store, forgetting
+  what the memory one put up, as soon as the set says (`tv.identified`).
 
 ### Display state (`heartbeat.py:ScreenState`, held in `wall.py:DisplayRecord`)
 
@@ -301,7 +426,10 @@ What the code enforces, and by what.
 | `.client.json` is always a document `parse_client_document` accepts | `pull.py:ClientPull.fetch` parses before writing |
 | A feed names no work missing from `works`; slots ordered, non-overlapping, inside a whole-day horizon; instants carry an offset | `manifest.py:_feed`, `_instant` (Arrt's `player-contract.md` § Rules a schema cannot state, § Time) |
 | An `uploaded` binding names a content id | SQLite CHECK in `state/store.py:_SCHEMA` |
-| At most one binding per work per Frame wall | `UNIQUE (artwork_id)` in a per-wall file |
+| At most one binding per work per Frame wall, **for the set it is on** | `UNIQUE (artwork_id)` in a per-wall file; the other sets' rows are in `tv_binding_aside`, `PRIMARY KEY (tv_identity, artwork_id)` |
+| A binding is used only on the set it was made on | `DisplayState.belongs_to`, called by `displays/frame.py:FrameDisplay._know_the_set` before anything reads a binding on a connection (`tests/test_bindings.py::TestABindingIsUsedOnlyOnTheSetItWasMadeOn`) |
+| A removal is sent only from a store whose recorded identity is the connected set's | `displays/frame.py:FrameDisplay._may_remove`, checked in `_remove_orphans` (`tests/test_bindings.py::TestASetThatWillNotSayWhichItIs`) |
+| A wall's directory is removed only a week after it left, only from a document that was read, and only if it is a wall's | `client.WallCaches` (`tests/test_client.py::test_a_wall_that_left_keeps_its_directory_for_six_days_and_loses_it_by_the_eighth`) |
 | A store newer than the code is not opened | `state/store.py:DisplayState._prepare` raises `StateSchemaTooNew`; `__main__.py:run_frame_wall` parks that wall only |
 | At most one worker per output, at most one renderer per label output | `client.py:Supervisor.reconcile`, `_reconcile_labels` |
 | A heartbeat never names a work outside `showing_art` | `heartbeat.py:DisplayReport.__post_init__` |
