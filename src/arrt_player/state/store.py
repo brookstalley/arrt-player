@@ -7,15 +7,39 @@ one device, and putting it in the catalogue is what made the 2024 tree's
 the process that norm lives in: display is its sole writer, curation never opens
 it, and losing it costs a re-upload rather than a curatorial record.
 
-Two things live here:
+Three things live here:
 
 * **`tv_binding`** — the work-to-content-id map, modelled in Arrt's `data-model.md`
   because it is the entity that carries the norm across the boundary between the Player and the server.
-* **`daemon_state`** — which work the wall last showed, whether the set's own
+* **`daemon_state`** — which television the bindings were made on
+  (`tv_identity`, below), which work the wall last showed, whether the set's own
   slideshow has been switched off, and how long the wall has run with a feed
   (`feed_seconds`, below). Display-internal, never read by anything else. A key
   is read only by name, so a key no code reads any more (a store written by an
   older Player) is left in place and costs nothing.
+* **`tv_binding_aside`** — the bindings of a television the wall was moved away
+  from, kept under that set's identity for its return.
+
+**A binding belongs to the set it was made on, and a different set starts with
+none.** A Samsung set's content ids are its own, small and sequential, so an id
+recorded on one set names some other picture on the next one, or nothing:
+selecting it shows somebody else's picture, and removing it deletes one. So the
+store records the set's identity (`device.duid`, read by the wall before it
+uses any binding) and `belongs_to` compares: the same set carries on; a
+different one has the bindings set aside under the old identity, gets back any
+set aside under its own, and starts with no work on the wall and its own
+slideshow not known to be off, which are facts about a set. One transaction, so
+a fault or a power cut leaves the bindings as they were, still under the
+identity they were made on.
+
+**A store with no identity recorded sends no removal.** One written before the
+identity existed (schema 3 and older), or one the Player holds in memory while
+the set will not say who it is, was made on *some* set and nothing says which;
+the wall reads the set before it uses one, and a removal is sent only from a
+store whose recorded identity is the set's (`displays/frame.py`). A store from
+before the identity takes the first one read as its own, because for a Player
+whose set has not changed that is true, and the alternative re-uploads every
+wall's whole library on the first start after the upgrade.
 
 **When a work was last named is measured in the wall's own running time, not
 the calendar.** A binding is retired once no feed this wall adopted has named
@@ -68,7 +92,13 @@ log = logging.getLogger(__name__)
 #:
 #: 3 (2026-11-19) added `last_named_feed_seconds` and `last_named_at`, without
 #: which an image whose work no feed names any more stayed on the set for good.
-SCHEMA_VERSION: Final[int] = 3
+#:
+#: 4 (2026-11-19) added `tv_identity` and `tv_binding_aside`, without which a
+#: wall pointed at another television selected and removed that set's pictures
+#: by the ids of the last one. Opening a store below 4 forgets any identity it
+#: holds (`_widen`), because a Player older than 4 may have written bindings to
+#: it on another set since.
+SCHEMA_VERSION: Final[int] = 4
 
 
 class UploadStatus(StrEnum):
@@ -163,6 +193,28 @@ class Binding:
         return self.upload_status is UploadStatus.UPLOADED and self.tv_content_id is not None
 
 
+class SetChange(StrEnum):
+    """What `belongs_to` found: the set the bindings were made on, or another."""
+
+    #: The bindings were made on this set.
+    SAME = "same"
+    #: The store recorded no set (written before the identity existed); it takes this one.
+    ADOPTED = "adopted"
+    #: Another set: its bindings are set aside, and this set's, if any were, are back.
+    CHANGED = "changed"
+
+
+@dataclass(frozen=True)
+class SetMet:
+    """The answer of `belongs_to`: what it found, the identity the bindings had before, and what moved."""
+
+    change: SetChange
+    previous: str | None = None
+    #: How many bindings were set aside under `previous`, and how many came back for this set.
+    set_aside: int = 0
+    restored: int = 0
+
+
 _SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS tv_binding (
     id             TEXT PRIMARY KEY,
@@ -192,7 +244,32 @@ CREATE TABLE IF NOT EXISTS daemon_state (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- The bindings of a set the wall has been moved away from, under that set's
+-- identity, every column of `tv_binding` as it was. Read only when that set is
+-- met again; never selected from, removed from or accounted for meanwhile.
+CREATE TABLE IF NOT EXISTS tv_binding_aside (
+    tv_identity    TEXT NOT NULL,
+    id             TEXT NOT NULL,
+    artwork_id     TEXT NOT NULL,
+    tv_content_id  TEXT,
+    tv_thumb_md5   TEXT,
+    render_fingerprint TEXT,
+    uploaded_at    TEXT NOT NULL,
+    last_named_feed_seconds REAL,
+    last_named_at  TEXT,
+    upload_status  TEXT NOT NULL,
+    PRIMARY KEY (tv_identity, artwork_id)
+);
 """
+
+#: The columns `tv_binding` and `tv_binding_aside` share, in one order, for the
+#: two copies between them. Spelled once, so a column added to the one is not
+#: silently dropped by the other.
+_SHARED_COLUMNS: Final[str] = (
+    "id, artwork_id, tv_content_id, tv_thumb_md5, render_fingerprint, uploaded_at, "
+    "last_named_feed_seconds, last_named_at, upload_status"
+)
 
 #: Every column `_binding` reads, spelled once. Two SELECTs want the same list,
 #: and a list that drifts between them is a `KeyError` at the row factory rather
@@ -209,6 +286,11 @@ _LAST_SELECTED_WORK_ID: Final[str] = "last_selected_work_id"
 _SLIDESHOW_DISABLED: Final[str] = "native_slideshow_disabled"
 #: How long this wall has run with a feed adopted, in seconds, as last saved.
 _FEED_SECONDS: Final[str] = "feed_seconds"
+#: The identity (`device.duid`) of the set `tv_binding`'s rows were made on.
+#: Absent from a store written before it existed, and from one held in memory.
+_TV_IDENTITY: Final[str] = "tv_identity"
+#: The keys that are facts about one set, not carried to another (`belongs_to`).
+_SET_FACTS: Final[tuple[str, ...]] = (_LAST_SELECTED_WORK_ID, _SLIDESHOW_DISABLED)
 
 
 class DisplayState:
@@ -241,6 +323,9 @@ class DisplayState:
         #: (`count_feed_time`) and written only by `save_feed_time`, so a pass
         #: costs the card no write for it.
         self._feed_seconds: float = self._saved_feed_seconds()
+        #: The set the bindings were made on, held as the work on the wall is
+        #: and for the same reason: it moves only after a commit.
+        self._identity: str | None = self._get(_TV_IDENTITY)
 
     def _prepare(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
@@ -281,6 +366,12 @@ class DisplayState:
             self._connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_feed_seconds REAL")
         if "last_named_at" not in columns:
             self._connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_at TEXT")
+        # **A store below 4 has no identity, even one that holds the key**: a
+        # store rolled back to an older Player and forward again may have had
+        # bindings written to it on another set meanwhile, by a Player that
+        # never looked. So it is met as a store from before the identity, and
+        # takes the first one read. Keyed on the version, so it runs once.
+        self._connection.execute("DELETE FROM daemon_state WHERE key = ?", (_TV_IDENTITY,))
         # **Every row this version has not written is named now**, never read as
         # "never named": that reading would retire the household's whole library
         # from the set on the first day after the upgrade. So each binding gets
@@ -377,6 +468,74 @@ class DisplayState:
             )
             self._connection.commit()
         return cursor.rowcount > 0
+
+    # -- the set the bindings were made on ----------------------------------
+
+    @property
+    def tv_identity(self) -> str | None:
+        """The set the bindings were made on; None for a store that has not recorded one. Answered from memory."""
+        return self._identity
+
+    def belongs_to(self, identity: str) -> SetMet:
+        """Make the bindings the set `identity`'s, in one transaction, and say what that took.
+
+        The same set: nothing is written. **A store that recorded no set takes
+        this one**, keeping its bindings and its facts. **Another set**: every
+        binding and the set's facts (`_SET_FACTS`) are set aside under the
+        identity they were made on, the bindings set aside under `identity`
+        come back, each named now so none is retired for a full wait, and
+        `identity` is recorded. A fault raises `StoreFault` with nothing
+        changed, so the bindings stay under the set they were made on.
+        """
+        previous = self._identity
+        if previous == identity:
+            return SetMet(SetChange.SAME, previous)
+        with self._operation("belongs_to", "record which television its bindings belong to"):
+            if previous is None:
+                # A copy of this set's own set aside earlier is older than the
+                # rows being taken, and must not come back over them later.
+                self._connection.execute("DELETE FROM tv_binding_aside WHERE tv_identity = ?", (identity,))
+                self._put(_TV_IDENTITY, identity)
+                self._connection.commit()
+                met = SetMet(SetChange.ADOPTED)
+            else:
+                met = self._move_to(previous, identity)
+        self._identity = identity
+        if met.change is SetChange.CHANGED:
+            self._last_selected = None
+        return met
+
+    def _move_to(self, previous: str, identity: str) -> SetMet:
+        """Set `previous`'s bindings aside and bring back `identity`'s. Inside `belongs_to`'s operation."""
+        execute = self._connection.execute
+        set_aside = execute("SELECT COUNT(*) FROM tv_binding").fetchone()[0]
+        execute("DELETE FROM tv_binding_aside WHERE tv_identity = ?", (previous,))
+        execute(
+            f"INSERT INTO tv_binding_aside (tv_identity, {_SHARED_COLUMNS}) "  # noqa: S608 -- column names only
+            f"SELECT ?, {_SHARED_COLUMNS} FROM tv_binding",
+            (previous,),
+        )
+        execute("DELETE FROM tv_binding")
+        execute(
+            f"INSERT INTO tv_binding ({_SHARED_COLUMNS}) "  # noqa: S608 -- column names only
+            f"SELECT {_SHARED_COLUMNS} FROM tv_binding_aside WHERE tv_identity = ?",
+            (identity,),
+        )
+        restored = execute("DELETE FROM tv_binding_aside WHERE tv_identity = ?", (identity,)).rowcount
+        # **Named now**, as the migration names every row it meets: the feeds
+        # this wall adopted while it was on the other set named their works on
+        # no row here, so the time a row last saw one says nothing.
+        execute(
+            "UPDATE tv_binding SET last_named_feed_seconds = ?, last_named_at = ?",
+            (self._feed_seconds, self._now().isoformat()),
+        )
+        execute(
+            f"DELETE FROM daemon_state WHERE key IN ({', '.join('?' * len(_SET_FACTS))})",  # noqa: S608 -- placeholders only
+            _SET_FACTS,
+        )
+        self._put(_TV_IDENTITY, identity)
+        self._connection.commit()
+        return SetMet(SetChange.CHANGED, previous, set_aside=set_aside, restored=restored)
 
     def accounted_content_ids(self) -> frozenset[str]:
         """Every content id this device believes it put on the television.
@@ -487,6 +646,13 @@ class DisplayState:
             self._set(_LAST_SELECTED_WORK_ID, work_id)
         self._last_selected = work_id
 
+    def forget_the_wall(self) -> None:
+        """Record that no work of these bindings is known to be on the wall, so the next pass puts one up."""
+        with self._operation("forget_the_wall", "forget which work is on the wall"):
+            self._connection.execute("DELETE FROM daemon_state WHERE key = ?", (_LAST_SELECTED_WORK_ID,))
+            self._connection.commit()
+        self._last_selected = None
+
     @property
     def native_slideshow_disabled(self) -> bool:
         """Whether this device has already been told to stop its own slideshow.
@@ -550,11 +716,15 @@ class DisplayState:
         return row["value"] if row is not None else None
 
     def _set(self, key: str, value: str) -> None:
+        self._put(key, value)
+        self._connection.commit()
+
+    def _put(self, key: str, value: str) -> None:
+        """Write one key inside the transaction a caller commits."""
         self._connection.execute(
             "INSERT INTO daemon_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
-        self._connection.commit()
 
 
 def _binding(row: sqlite3.Row) -> Binding:

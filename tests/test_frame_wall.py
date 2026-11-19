@@ -16,11 +16,13 @@ current slot names another work (`player-contract.md` § What happens to
 """
 
 import logging
+import sqlite3
+from pathlib import Path
 
 import pytest
 from fakes import FakeTv
 
-from arrt_player.displays.frame import frame_wall
+from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, frame_wall
 from arrt_player.manifest import Watcher
 from arrt_player.state import DisplayState
 from arrt_player.tv import WRITES, TvNotOurs
@@ -890,6 +892,10 @@ class _TracingTv(FakeTv):
         self.trace.append("PowerState")
         return await super().power_state()
 
+    async def read_identity(self) -> str:
+        self.trace.append("identity")
+        return await super().read_identity()
+
     async def listed_content_ids(self) -> frozenset[str]:
         self.trace.append("list")
         return await super().listed_content_ids()
@@ -954,6 +960,7 @@ def _the_remote_shows(content_id: str):
 #: upload and selection, and the next upload, each write behind its own read.
 _A_FRESH_WALL_IN_ART_MODE = [
     "connect",
+    "identity",
     "get_artmode",
     "get_artmode",
     "slideshow off",
@@ -976,6 +983,53 @@ _W3_REPLACES_W1 = ["list", "get_artmode", "get_artmode", "upload", "get_artmode"
 _THIRTEEN_DAYS = 13 * 86400
 _FIFTEEN_DAYS = 15 * 86400
 
+#: The set the fixture's wall knows, and another one.
+_THIS_SET = FakeTv().device_id
+_ANOTHER_SET = "uuid:frame-in-the-bedroom"
+
+
+def _a_life_on(*device_ids: str):
+    """The wall's earlier lives, one per set in turn, each showing w1 and uploading w2; then the set it meets now.
+
+    The set the scenario meets is the last one named: given that set's pictures
+    when it is one of the sets already lived on, and a picture of the household's
+    own under the id the first set gave w1 when it is new.
+    """
+
+    async def before(settings, clock, publish, tv: FakeTv) -> None:
+        sets: dict[str, FakeTv] = {}
+        for device_id in device_ids[:-1]:
+            earlier = sets.setdefault(device_id, FakeTv())
+            earlier.device_id = device_id
+            with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+                wall = _a_wall(settings, earlier, store, clock)
+                publish(["w1", "w2"], interval_seconds=3600)
+                await wall.tick()
+                await wall.tick()
+        tv.device_id = device_ids[-1]
+        met_before = sets.get(tv.device_id)
+        if met_before is not None:
+            tv.holding, tv._next_id, tv.displaying = dict(met_before.holding), met_before._next_id, met_before.displaying
+        else:
+            tv.holding["MY-F0001"] = Path("/the-households/own-picture.jpg")
+            tv._next_id = 1
+
+    return before
+
+
+def _from_before_the_set_was_recorded(before_it):
+    """The store an earlier life left, as the previous release would have: schema 3, no identity, nothing set aside."""
+
+    async def before(settings, clock, publish, tv: FakeTv) -> None:
+        await before_it(settings, clock, publish, tv)
+        with sqlite3.connect(settings.state_path) as connection:
+            connection.execute("DELETE FROM daemon_state WHERE key = 'tv_identity'")
+            connection.execute("DROP TABLE tv_binding_aside")
+            connection.execute("PRAGMA user_version = 3")
+
+    return before
+
+
 _WHAT_REACHES_THE_SET = {
     "art mode, and nothing due": (
         _passes(_feed("w1", "w2"), _later(1), _later(1)),
@@ -984,7 +1038,7 @@ _WHAT_REACHES_THE_SET = {
     "a programme on a fresh wall": (
         _passes(_then(_feed("w1", "w2"), _the_set(art_mode="off")), _later(1), _later(10)),
         [
-            ["connect", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
+            ["connect", "identity", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
             [],
             ["get_artmode", "PowerState", "get_artmode", "PowerState"],
         ],
@@ -994,6 +1048,7 @@ _WHAT_REACHES_THE_SET = {
         [
             [
                 "connect",
+                "identity",
                 "get_artmode",
                 "PowerState",
                 "get_artmode",
@@ -1016,7 +1071,7 @@ _WHAT_REACHES_THE_SET = {
     "a set whose power cannot be read": (
         _passes(_then(_feed("w1", "w2"), _the_set(art_mode="off", power_unreadable=True)), _later(1), _later(10)),
         [
-            ["connect", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
+            ["connect", "identity", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
             [],
             ["get_artmode", "PowerState", "get_artmode", "PowerState"],
         ],
@@ -1067,7 +1122,7 @@ _WHAT_REACHES_THE_SET = {
             _then(_the_set(art_mode="on", art_mode_announced=True), _later(1)),
         ),
         [
-            ["connect", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
+            ["connect", "identity", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
             ["get_artmode", "PowerState", "get_artmode", "PowerState"],
             [],
             [
@@ -1144,21 +1199,162 @@ _WHAT_REACHES_THE_SET = {
         _passes(_feed("w1", "w2", seconds=43200), _later(3600), _later(3600)),
         [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "brightness"], ["get_artmode", "brightness"]],
     ),
+    # The set the bindings were made on, at another address: its pictures are
+    # used as they are. Nothing uploaded, nothing removed, and the slideshow
+    # switch is not sent again; w1 is selected, as after any restart.
+    "the same set at a new address": (
+        _passes(_feed("w1", "w2")),
+        [["connect", "identity", "get_artmode", "list", "get_artmode", "brightness", "get_artmode", "get_artmode", "select"]],
+        _a_life_on(_THIS_SET, _THIS_SET),
+    ),
+    # Another set: none of the first set's ids is selected, and the wall starts
+    # as a fresh one does, slideshow switch included. The household's picture
+    # that has the id the first set gave w1 is unaccounted for on this set, and
+    # is removed, as a fresh install removes it.
+    "another set at the address": (
+        _passes(_feed("w1", "w2")),
+        [
+            [
+                "connect",
+                "identity",
+                "get_artmode",
+                "get_artmode",
+                "slideshow off",
+                "list",
+                "get_artmode",
+                "remove",
+                "get_artmode",
+                "brightness",
+                "get_artmode",
+                "get_artmode",
+                "upload",
+                "get_artmode",
+                "select",
+                "get_artmode",
+                "upload",
+            ]
+        ],
+        _a_life_on(_THIS_SET, _ANOTHER_SET),
+    ),
+    # Back to the first set after a life on another: its bindings come back,
+    # so nothing is uploaded again; its slideshow switch is sent again, because
+    # what was known of it was not carried.
+    "the first set again": (
+        _passes(_feed("w1", "w2")),
+        [
+            [
+                "connect",
+                "identity",
+                "get_artmode",
+                "get_artmode",
+                "slideshow off",
+                "list",
+                "get_artmode",
+                "brightness",
+                "get_artmode",
+                "get_artmode",
+                "select",
+            ]
+        ],
+        _a_life_on(_THIS_SET, _ANOTHER_SET, _THIS_SET),
+    ),
+    # A set that will not say: the pass ends at the identity read, asked again
+    # on the ladder and not on every pass; once the patience is out, the wall
+    # shows art from an empty store and removes nothing; when the set says, the
+    # wall goes back to its own store and puts that store's picture up.
+    "a set that will not say which it is": (
+        _passes(
+            _then(_feed("w1", "w2"), _the_set(device_id=None)),
+            _later(1),
+            _later(10),
+            _later(IDENTITY_PATIENCE_SECONDS),
+            _then(_the_set(device_id=_THIS_SET), _later(300)),
+        ),
+        [
+            ["connect", "identity"],
+            [],
+            ["identity"],
+            [
+                "identity",
+                "get_artmode",
+                "get_artmode",
+                "slideshow off",
+                "list",
+                "get_artmode",
+                "brightness",
+                "get_artmode",
+                "get_artmode",
+                "upload",
+                "get_artmode",
+                "select",
+                "get_artmode",
+                "upload",
+            ],
+            [
+                "identity",
+                "get_artmode",
+                "slideshow off",
+                "get_artmode",
+                "get_artmode",
+                "upload",
+                "get_artmode",
+                "select",
+                "get_artmode",
+                "upload",
+            ],
+        ],
+    ),
+    # A store the previous release wrote: the first identity read is taken as
+    # its set's, and the wall carries on with its pictures as they are.
+    "a store from before the set was recorded": (
+        _passes(_feed("w1", "w2")),
+        [["connect", "identity", "get_artmode", "list", "get_artmode", "brightness", "get_artmode", "get_artmode", "select"]],
+        _from_before_the_set_was_recorded(_a_life_on(_THIS_SET, _THIS_SET)),
+    ),
+    # The same store on a set that will not say: its pictures are used for
+    # nothing, and nothing is removed, though the set lists two images the
+    # store in memory cannot account for.
+    "a store from before the set was recorded, on a set that will not say": (
+        _passes(_the_set(device_id=None), _later(IDENTITY_PATIENCE_SECONDS)),
+        [
+            ["connect", "identity"],
+            [
+                "identity",
+                "get_artmode",
+                "get_artmode",
+                "slideshow off",
+                "list",
+                "get_artmode",
+                "brightness",
+                "get_artmode",
+                "get_artmode",
+                "upload",
+                "get_artmode",
+                "select",
+                "get_artmode",
+                "upload",
+            ],
+        ],
+        _from_before_the_set_was_recorded(_a_life_on(_THIS_SET, _THIS_SET)),
+    ),
 }
 
 
 @pytest.mark.parametrize("scenario", sorted(_WHAT_REACHES_THE_SET))
-async def test_what_reaches_the_set_in_each_pass_is_unchanged(scenario: str, settings, state: DisplayState, clock, publish):
-    passes, expected = _WHAT_REACHES_THE_SET[scenario]
+async def test_what_reaches_the_set_in_each_pass_is_unchanged(scenario: str, settings, clock, publish):
+    passes, expected, *earlier = _WHAT_REACHES_THE_SET[scenario]
     tv = _TracingTv()
-    wall = _a_wall(settings, tv, state, clock)
+    for life in earlier:
+        await life(settings, clock, publish, tv)
 
     sent = []
-    for before in passes:
-        before(tv, publish, clock)
-        start = len(tv.trace)
-        await wall.tick()
-        sent.append(tv.trace[start:])
+    with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as state:
+        wall = _a_wall(settings, tv, state, clock)
+        for before in passes:
+            before(tv, publish, clock)
+            start = len(tv.trace)
+            await wall.tick()
+            sent.append(tv.trace[start:])
 
     assert sent == expected
 
