@@ -730,6 +730,31 @@ async def test_held_writes_are_made_once_the_set_is_showing_art_again(
     assert len(tv.brightness) == 1, "the held brightness change was not retried at the next interval"
 
 
+async def test_an_upload_held_for_a_programme_is_not_recorded_as_failed(
+    daemon: Wall, tv: FakeTv, publish, state: DisplayState, caplog
+):
+    """The upload is the only write owed when the programme starts, so it is the
+    one the seam holds. Nothing was sent, so nothing failed: a `failed` row would
+    hold the work back for the upload retry wait after the set came back."""
+    publish(["w1", "w2", "w3"], interval_seconds=3600)
+    await daemon.tick()  # w1 up, w2 uploaded behind it; the slideshow, brightness and reconciliation done
+    tv.art_mode = "off"
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+
+    assert len(tv.uploaded) == 2, "w3 was uploaded to a set showing a programme"
+    assert state.binding_for("w3") is None, "a held upload was recorded as attempted"
+    assert not _events(caplog, "binding.upload_failed")
+    assert _events(caplog, "tv.writes_held")
+
+    tv.art_mode = "on"
+    tv.art_mode_announced = True
+    await daemon.tick()
+
+    assert len(tv.uploaded) == 3, "the held upload was not made once the set was showing art again"
+
+
 async def test_held_writes_do_not_ask_the_set_once_a_second(daemon: Wall, tv: FakeTv, publish, clock):
     """Each attempt at a held write is two reads of the set, and a pending upload
     is due on every pass. Thirty one-second passes of a programme with three
