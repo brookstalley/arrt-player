@@ -20,7 +20,8 @@ every master it names has been fetched and checked against its hash, or
 answered for, or once a master that keeps failing has been waited for as long
 as `MEDIA_HOLD_SECONDS` (`_adopt_feed`). So a server that goes away changes nothing about
 what is on the wall: the last good manifest stays, and so do its masters. The client document is kept the same way,
-so a client restarted while the server is down still knows its walls.
+so a client restarted while the server is down still knows its walls, and so is each label document, so a
+label restarted then still captions for what is left of the rule's hold (`LabelPull.cached`).
 
 **Every failure keeps the cache** (`player-contract.md` § Transport). A transport
 error, a timeout or a `5xx` means the server is unreachable: back off and try
@@ -51,6 +52,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from http import HTTPStatus
 from pathlib import Path
@@ -80,6 +82,19 @@ LABEL_ROUTE: Final[str] = "/labels/{label_id}"
 ETAG_FILENAME: Final[str] = "manifest.etag"
 #: Beside the cached client document, for the same reason.
 CLIENT_ETAG_FILENAME: Final[str] = ".client.etag"
+
+#: Directly under `CACHE_DIR`: one file per label this client renders, named by
+#: its id, holding the last label document accepted for it. **A leading dot**,
+#: as the client document has, so no wall's directory can take the name.
+LABEL_CACHE_DIRNAME: Final[str] = ".labels"
+
+#: How often a cached label document's file is stamped with the instant the
+#: server last answered for it, while the server goes on answering and sends
+#: nothing new. The stamp is the file's modification time, and it is what a
+#: restarted renderer runs the rule's hold from, so it is never later than the
+#: last answer and at most this much earlier: a hold after a restart ends up to
+#: a minute early, never late. Stamping every poll would be a write a second.
+LABEL_ANSWER_STAMP_SECONDS: Final[float] = 60.0
 
 
 #: How long to wait before asking again after the server could not be reached,
@@ -859,6 +874,16 @@ class ClientPull:
 
 
 @dataclass(frozen=True)
+class CachedLabel:
+    """The label document a client last accepted, as a restarted renderer starts from it."""
+
+    document: LabelDocument
+    #: When the server last answered for this label, by the wall clock: never
+    #: later than the last answer, and at most `LABEL_ANSWER_STAMP_SECONDS` earlier.
+    answered_at: datetime
+
+
+@dataclass(frozen=True)
 class LabelAnswer:
     """What one poll of a label document found."""
 
@@ -877,18 +902,40 @@ class LabelPull:
     document this reader cannot use keeps the last good one; transport errors,
     timeouts and `5xx` mean the server is unreachable, which the renderer answers
     by holding its caption for the rule's 30 minutes. Each is said once when it
-    starts and once when it ends. The ETag is held in memory beside the document
-    the renderer holds, so a restarted renderer asks for the whole document.
+    starts and once when it ends.
+
+    **Each accepted document is cached**, under `LABEL_CACHE_DIRNAME`, and the
+    file is stamped as the server goes on answering, so a renderer restarted
+    while the server is down starts from it (`cached`). The ETag is not: it is
+    held in memory only, so a restarted renderer asks for the whole document and
+    never sends an ETag for a document it does not hold.
     """
 
-    def __init__(self, settings: ClientSettings, label_id: str) -> None:
+    def __init__(
+        self,
+        settings: ClientSettings,
+        label_id: str,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._server = settings.server_url
         self._token = settings.client_token
         self._label_id = label_id
+        plain = PLAIN_COMPONENT.fullmatch(label_id) is not None
         #: None for an id that is not a plain path component: put into the
         #: route, "../x" would ask for another route of the server's, so it is
         #: never asked for at all.
-        self._url = self._server + LABEL_ROUTE.format(label_id=label_id) if PLAIN_COMPONENT.fullmatch(label_id) else None
+        self._url = self._server + LABEL_ROUTE.format(label_id=label_id) if plain else None
+        #: None for the same ids: put into a path, "../x" would name a file
+        #: outside the cache.
+        self._cache_path = settings.cache_dir / LABEL_CACHE_DIRNAME / f"{label_id}.json" if plain else None
+        #: The stamp's clock, which a restarted renderer compares with its own `now`.
+        self._now = now
+        #: The throttle's clock: when the file was last stamped.
+        self._monotonic = monotonic
+        self._stamped: float | None = None
+        self._uncacheable = ReportOnce()
         self._unusable = ReportOnce()
         self._etag: str | None = None
         self._session: aiohttp.ClientSession | None = None
@@ -908,7 +955,32 @@ class LabelPull:
             return LabelAnswer(reachable=True)
         return await self._ask(self._url)
 
-    async def _ask(self, url: str) -> LabelAnswer:  # noqa: C901 -- one branch per answer the server can give
+    def cached(self) -> CachedLabel | None:
+        """The last document accepted for this label and when the server last answered, or None if there is none it can read.
+
+        **Unreadable is absent**, as the client document's cache is: a file this
+        reader refuses is never a reason to stop, and never one to draw from.
+        """
+        if self._cache_path is None:
+            return None
+        try:
+            text = self._cache_path.read_text(encoding="utf-8")
+            answered_at = datetime.fromtimestamp(self._cache_path.stat().st_mtime, UTC)
+            return CachedLabel(document=parse_label_document(text), answered_at=answered_at)
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError, ValueError, LabelDocumentUnreadable) as exc:
+            # `ValueError` is a modification time `fromtimestamp` cannot place.
+            log.warning(
+                "the cached document for label %s at %s cannot be read (%s); the label starts blank until the server answers",
+                self._label_id,
+                self._cache_path,
+                exc,
+                extra={"event": "label.cache_unreadable", "label_id": self._label_id},
+            )
+            return None
+
+    async def _ask(self, url: str) -> LabelAnswer:  # noqa: C901, PLR0912 -- one branch per answer the server can give
         headers = {"Authorization": f"Bearer {self._token}"}
         if self._etag is not None:
             headers["If-None-Match"] = self._etag
@@ -929,6 +1001,12 @@ class LabelPull:
                 self._label_id,
                 extra={"event": "label.server_reachable", "label_id": self._label_id},
             )
+        if status != HTTPStatus.OK:
+            # An answer, so the hold a restart would run starts again here. Not
+            # on a 200: its document replaces the cached one, and the stamp goes
+            # with it, so a document this client could not cache is never left
+            # stamped as though it were the server's latest.
+            self._stamp()
         if status not in (200, 304):
             episode = self._refused_status.setdefault(status, ReportOnce())
             if episode.begin():
@@ -971,7 +1049,64 @@ class LabelPull:
                 extra={"event": "label.document_readable", "label_id": self._label_id},
             )
         self._etag = served_etag or None
+        self._keep(body)
         return LabelAnswer(reachable=True, document=document)
+
+    def _keep(self, body: bytes | None) -> None:
+        """Cache an accepted document, stamped now. **A cache that cannot be written costs the cache, not the label.**"""
+        path = self._cache_path
+        if path is None or body is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomically(path, body)
+            self._set_stamp(path)
+        except OSError as exc:
+            # **The document it would have replaced goes too.** It was stamped
+            # by this very answer, and left, a restart would hold it as the
+            # server's latest word when the latest may say the screen is dark.
+            with contextlib.suppress(OSError):
+                _discard(path)
+            self._report_uncacheable(exc)
+            return
+        if self._uncacheable.end():
+            log.info(
+                "the document for label %s is cached again",
+                self._label_id,
+                extra={"event": "label.cache_writable", "label_id": self._label_id},
+            )
+
+    def _stamp(self) -> None:
+        """Move the cached document's stamp to now, at most once per `LABEL_ANSWER_STAMP_SECONDS`."""
+        path = self._cache_path
+        if path is None:
+            return
+        if self._stamped is not None and self._monotonic() - self._stamped < LABEL_ANSWER_STAMP_SECONDS:
+            return
+        try:
+            self._set_stamp(path)
+        except FileNotFoundError:
+            # Nothing cached yet, so nothing to stamp: the next accepted
+            # document is written with its own.
+            return
+        except OSError as exc:
+            self._report_uncacheable(exc)
+
+    def _set_stamp(self, path: Path) -> None:
+        instant = self._now().timestamp()
+        os.utime(path, (instant, instant))
+        self._stamped = self._monotonic()
+
+    def _report_uncacheable(self, exc: OSError) -> None:
+        if self._uncacheable.begin():
+            log.error(
+                "the document for label %s cannot be cached at %s (%s); the label follows the server, and a restart "
+                "while the server is down starts blank",
+                self._label_id,
+                self._cache_path,
+                exc,
+                extra={"event": "label.cache_unwritable", "label_id": self._label_id},
+            )
 
     async def close(self) -> None:
         if self._session is not None:
