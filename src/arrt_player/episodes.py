@@ -1,6 +1,6 @@
-"""Two shapes this plane kept rewriting: saying a thing once, and waiting longer.
+"""Two shapes the Player kept rewriting: saying a thing once, and waiting longer.
 
-Both exist because **this plane's only failure channel is the journal, and the
+Both exist because **the Player's only failure channel is the journal, and the
 journal has a rate limiter.** A television is asleep most of the night and
 somebody watches a programme for three hours; a condition reported once per poll
 would be ten thousand identical lines, and the lines journald drops to make room
@@ -81,7 +81,7 @@ class Backoff:
     stay blank well into the next morning; with one, recovery is bounded by the
     ceiling regardless of how long the outage ran.
 
-    Two ways of consuming the same ladder, because this plane needs both and they
+    Two ways of consuming the same ladder, because the Player needs both and they
     were written separately before they were seen to be one thing. A caller that
     controls its own sleep reads the return of `hold`; a caller on a fixed poll
     asks `is_due` and skips the pass. `hold` serves both, so a caller can switch

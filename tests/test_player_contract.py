@@ -28,7 +28,7 @@ every invalid one refused. It writes the client heartbeat
 own machine must be the fixture.
 
 These tests read JSON files and never import curation, which is the
-plane-isolation norm; after the repo split they read a pinned copy of the same
+isolation norm; after the repo split they read a pinned copy of the same
 files.
 """
 

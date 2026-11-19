@@ -97,13 +97,13 @@ class TestReadingTheManifestBlock:
         assert said(label) == ["Untitled"]
 
     def test_a_key_this_version_does_not_know_is_dropped_rather_than_refused(self):
-        """A display plane that refused a manifest over an additive change takes the wall down."""
+        """A Player that refused a manifest over an additive change takes the wall down."""
         label = read_label({"title": "Chicago", "accession_number": "1970.1"})
 
         assert label.title == "Chicago"
 
     def test_a_value_that_is_not_text_is_dropped(self):
-        """Curation's bug; rendering `17` onto a wall label would be this plane repeating it."""
+        """Curation's bug; rendering `17` onto a wall label would be the Player repeating it."""
         label = read_label({"title": "Silver Sun", "date_created": 1930})
 
         assert label.title == "Silver Sun"
@@ -227,7 +227,7 @@ class TestWhoMadeIt:
 
     def test_the_stored_name_is_never_split_here_to_manufacture_parts(self):
         """The split is a stored fact because no rule over one string gets both
-        "van Gogh" and "Frank Lloyd Wright" right. A display plane inventing one
+        "van Gogh" and "Frank Lloyd Wright" right. A Player inventing one
         would be asserting something about a person it has no way to know."""
         label = LabelText(artist="Frank Lloyd Wright")
 
@@ -373,7 +373,7 @@ class TestHowTheLabelIsSet:
 
     def test_a_given_name_standing_alone_is_not_set_as_a_family_name(self):
         """The degenerate record — one part, and it is the wrong one. Setting it
-        bold would be this plane claiming which part of a name it is."""
+        bold would be the Player claiming which part of a name it is."""
         label = LabelText(artist_given_name="Rembrandt")
 
         assert name_runs(label) == (Run("Rembrandt"),)

@@ -10,7 +10,7 @@ it, and losing it costs a re-upload rather than a curatorial record.
 Two things live here:
 
 * **`tv_binding`** — the work-to-content-id map, modelled in Arrt's `data-model.md`
-  because it is the entity that carries the norm across the plane boundary.
+  because it is the entity that carries the norm across the boundary between the Player and the server.
 * **`daemon_state`** — which work the wall last showed, and whether the set's
   own slideshow has been switched off. Display-internal, never read by anything
   else. A key is read only by name, so a key no code reads any more (a store
@@ -62,7 +62,7 @@ class UploadStatus(StrEnum):
 
 
 class StateSchemaTooNew(RuntimeError):
-    """The store on disk was written by a newer display plane than this one.
+    """The store on disk was written by a newer Player than this one.
 
     Refused rather than opened, for the same reason a manifest major from the
     future is refused: a reader that guesses at a shape it does not know writes
@@ -142,7 +142,7 @@ class DisplayState:
         self._path = path
         self._connection = sqlite3.connect(path)
         self._connection.row_factory = sqlite3.Row
-        # Foreign keys are not used here — the one cross-plane reference is by id
+        # Foreign keys are not used here — the one reference that crosses to the server is by id
         # and by design has no constraint behind it — but the checks above are,
         # and they are on by default. What is switched on is WAL, so a reader
         # (nothing today; the heartbeat writer tomorrow) never blocks the loop.
@@ -153,7 +153,7 @@ class DisplayState:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise StateSchemaTooNew(
-                f"{self._path} was written by a display plane at schema {version}; this one understands "
+                f"{self._path} was written by a Player at schema {version}; this one understands "
                 f"{SCHEMA_VERSION}. Roll the deployment forward rather than letting an older reader write to it."
             )
         self._connection.executescript(_SCHEMA)

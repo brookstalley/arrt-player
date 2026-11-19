@@ -132,7 +132,7 @@ DEFAULT_TV_CLIENT_NAME: Final[str] = "tvpi"
 
 #: The e-paper label panel, in pixels. Defaults are the reference deployment's
 #: 1448×1072 IT8951; overridable because nothing may hardcode a panel's size —
-#: this product must run on any panel, and the 2024 plane's baked-in 648×480 is
+#: this product must run on any panel, and the 2024 installation's baked-in 648×480 is
 #: the anti-pattern being retired.
 DEFAULT_EPD_PANEL_WIDTH_PX: Final[int] = 1448
 DEFAULT_EPD_PANEL_HEIGHT_PX: Final[int] = 1072
@@ -152,7 +152,7 @@ DEFAULT_POLL_INTERVAL_SECONDS: Final[float] = 1.0
 
 #: The television's brightness scale, which is neither 0-100 nor 0-10: this set
 #: takes -4 through 10, and the sun-position curve is mapped onto that range.
-#: Carried forward from the 2024 plane, which runs the wall on these numbers.
+#: Carried forward from the 2024 installation, which runs the wall on these numbers.
 DEFAULT_TV_MIN_BRIGHTNESS: Final[int] = -4
 DEFAULT_TV_MAX_BRIGHTNESS: Final[int] = 10
 
@@ -510,7 +510,7 @@ class PanelSettings:
     defaults so a panel added later needs one key, not seven.
     """
 
-    #: The **e-paper label** panel, never the television's. This plane is handed
+    #: The **e-paper label** panel, never the television's. The Player is handed
     #: a composed canvas and never needs the TV's size; holding one here is how
     #: the two panels' geometry came to be confused in the first place.
     epd_panel_width_px: int
@@ -527,7 +527,7 @@ class PanelSettings:
     #: Unset is `None` rather than an error: a device with a panel configured and
     #: no stated viewing conditions loses its *label surface*, with a named
     #: reason, while the television keeps rotating. Refusing to start would break
-    #: two rules this plane holds — nothing about the label may stop the wall, and
+    #: two rules the Player holds — nothing about the label may stop the wall, and
     #: a device with no usable label surface is a configuration rather than a
     #: fault. `panel/legibility.py` is where the arithmetic and the refusal live.
     #:
@@ -566,7 +566,7 @@ class PanelSettings:
     def panel_lines(self) -> dict[str, object]:
         """The panel's part of the client's startup line.
 
-        This plane's own panel geometry, per Arrt's `operational-spec.md`
+        The Player's own panel geometry, per Arrt's `operational-spec.md`
         § Configuration — a wrong panel otherwise shows up as a label that renders
         off the edge of a display nobody is looking at closely.
         """

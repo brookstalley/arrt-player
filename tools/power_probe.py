@@ -4,7 +4,7 @@
 downstream of it sends a power key to a television, and nobody has measured what
 the keys do: `platform-and-dependency-findings.md` records two presses from one
 starting state, never tested press-and-hold, and labels its own transitions *a
-sketch*. That was fine while the display plane held no power verb. It is the whole
+sketch*. That was fine while the Player held no power verb. It is the whole
 risk now, because the state the map is missing is the **television** one — a press
 sent there is the interruption Arrt's `nonfunctional-requirements.md` § The television
 belongs to whoever is using it exists to prevent, and it is the one state whose
@@ -489,7 +489,7 @@ def _named(exc: Exception) -> str:
 
     **In the spirit of, not identical to** — it strips the message where the original
     does not, so the two are not interchangeable and this docstring used to claim a
-    parity it did not have. Kept separate rather than shared: the plane's helper is
+    parity it did not have. Kept separate rather than shared: the Player's helper is
     private to a module this tool deliberately does not import, since the instrument
     must not depend on the seam it is measuring for.
 

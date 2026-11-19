@@ -2,7 +2,7 @@
 
 The manifest is **desired display state**, not a list: a feed of works and the
 schedule that says which is up when, so a curator's `next` and `show_now` reach
-this plane as a republished schedule. The pull caches each wall's copy
+the Player as a republished schedule. The pull caches each wall's copy
 atomically — a temp file in the same directory, then `os.replace` — so a reader
 never observes a partial document and no lock is needed on either side.
 
@@ -92,13 +92,13 @@ class ManifestVersionUnsupported(ManifestUnreadable):
 
     A subclass rather than a sibling, because every caller that wants to keep the
     last good manifest wants to do so for both — but the two are logged
-    differently, since one means "upgrade the display plane" and the other means
+    differently, since one means "upgrade the Player" and the other means
     "something wrote a broken file".
     """
 
     def __init__(self, major: int) -> None:
         super().__init__(
-            f"manifest schema major {major} is not supported by this display plane (it understands "
+            f"manifest schema major {major} is not supported by this Player (it understands "
             f"{', '.join(str(known) for known in SUPPORTED_SCHEMA_MAJORS)}); keeping the manifest already loaded"
         )
         self.major = major
@@ -356,13 +356,13 @@ class Watcher:
             stat = self._path.stat()
         except FileNotFoundError:
             if not self._reported_absent:
-                # INFO, not WARNING: a plane that has not published yet is a
-                # normal state on a fresh install, and this plane holding still
+                # INFO, not WARNING: a server that has not published yet is a
+                # normal state on a fresh install, and the Player holding still
                 # until it does is the availability norm working rather than a
                 # fault. Said once, so the wait is visible in the journal without
                 # becoming the journal.
                 log.info(
-                    "no manifest at %s yet; waiting for the curation plane to publish one",
+                    "no manifest at %s yet; waiting for the server to publish one",
                     self._path,
                     extra={"event": "manifest.absent", "manifest_path": str(self._path)},
                 )
@@ -375,7 +375,7 @@ class Watcher:
                 # a failing SD card, EACCES, ESTALE on a mount that went away —
                 # so at a one-second poll this is 86,400 identical WARNINGs a day
                 # into a journal that rate-limits, and the lines it drops are the
-                # ERRORs that are this plane's only failure channel. Said again
+                # ERRORs that are the Player's only failure channel. Said again
                 # when it recovers, so the log carries both ends.
                 log.warning(
                     "could not stat the manifest at %s (%s); keeping the one already loaded",

@@ -120,7 +120,7 @@ ExecStart=/usr/local/bin/uv run --frozen --no-dev --group raster --group epaper 
 
 Restart=always
 
-# At least five seconds, per the rule above. This is the plane whose downtime is
+# At least five seconds, per the rule above. This is the service whose downtime is
 # visible, so it should come back from anything without human action — but a
 # fault that reproduces every start must stay legible in `systemctl status` and
 # keep writing to the journal rather than going quiet.
@@ -146,7 +146,7 @@ RestartSec=5
 TimeoutStopSec=90
 KillSignal=SIGTERM
 
-# The journal is this plane's only failure channel. Raspberry Pi OS ships
+# The journal is the Player's only failure channel. Raspberry Pi OS ships
 # Storage=volatile, so it lives in RAM — deploy/journald.conf.d bounds it.
 StandardOutput=journal
 StandardError=journal

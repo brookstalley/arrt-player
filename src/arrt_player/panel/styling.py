@@ -99,7 +99,7 @@ def plain(line: Line) -> str:
     **The form for anything a person reads outside the panel** — the journal's
     account of what was dropped, the preview's report, a test's expectation. The
     capitals are a fact about how the panel sets a name, and a log line reading
-    `KATSUSHIKA, Hokusai` would be this plane shouting somebody's name into a file
+    `KATSUSHIKA, Hokusai` would be the Player shouting somebody's name into a file
     for a reason that only exists at 7 feet.
     """
     return "".join(run.text for run in line)

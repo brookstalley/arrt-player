@@ -256,10 +256,10 @@ class TestWhatDefaults:
         """**The names a misspelling makes invisible.**
 
         These three are the whole of what `.env` says about the label surface, and
-        every other test in this plane builds its settings directly — so a misspelt
+        every other test in the Player builds its settings directly — so a misspelt
         key or a wrong default here would leave `epd_device` empty on a Pi that has
         a panel, `label_surface` would return None, and the heartbeat would report
-        a device with no panel. That is the exact distinction this plane was built
+        a device with no panel. That is the exact distinction the Player was built
         to draw, collapsed by a typo nothing else would catch.
         """
         panel = load(

@@ -76,6 +76,16 @@ not seen.
   draws the current render again when a screen comes back or changes size,
   although the kernel kept the picture through a replug of the same screen,
   because the screen that comes back need not be the one that left.
+- A wall that leaves its connector (unassigned, or moved to another output) draws
+  it **black**: an all-black frame of the connector's mode through the same
+  `present` every picture goes through (`KmsOutput.blank`), once the wall's loop
+  and pull have ended. Black is what the connector shows before a wall's first
+  draw, which the screen already reports as `dark`; switching the CRTC off was
+  not tried, and may hand the connector back to the text console, which is what
+  the Player's exit does (§ What was measured, "When the program exits"). A
+  Player that is merely stopping blanks nothing, as it leaves the labels, and a
+  screen that is not connected when its wall leaves is not drawn on: it may show
+  the old picture when plugged back in, until another wall is drawn there.
 - A screen that is absent costs one line and nothing else. A device that refuses
   (no `video` group, another program holding the card) raises, and the wall
   logs it, keeps rotating and tries again on every poll.
@@ -152,6 +162,10 @@ is read from debugfs, never assumed: HDMI-A-1 is on `pixelvalve-2`, not
   drops hot-plug the way an unplugged cable does.
 - A screen changing to a different size while the Player runs (the test covers it
   with a double).
+- **A black frame on `vc4`**: that `KmsOutput.blank` leaves the screen black and
+  not on the text console, that a 4K frame of zeros (about 33 MB) allocates and
+  presents as a picture does, and what a screen unplugged at the moment its wall
+  left shows when it is plugged back in. Only the test double has run it.
 - A 4K60 mode (`hdmi_enable_4kp60=1`); 4K30 is ample for a still picture.
 - **A redgifs HD clip taller than 1080 lines through mpv on the Pi**, which
   decides whether `RedgifsResolver` should prefer `sd` over `hd`. The acceptance

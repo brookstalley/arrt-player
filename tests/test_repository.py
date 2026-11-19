@@ -105,16 +105,7 @@ _FIXTURE_TREES = ("tests/",)
 #: Hits the tree carries that are recorded rather than fixed, by file and kind,
 #: each with why. An entry no longer matching fails `test_every_accepted_residue_still_matches`,
 #: so this list shrinks and never outlives its cause.
-_ACCEPTED_RESIDUE: dict[tuple[str, str], str] = {
-    (
-        ".prawduct/artifacts/platform-and-dependency-findings.md",
-        "home-directory path",
-    ): "the Pi's service account, named in a finding about the 2024 card; `audit-8` reads it as a published account name",
-    (
-        ".prawduct/artifacts/archive/build-plan-slideshow.md",
-        "private IPv4 address",
-    ): "a router's default address, written as the example of what a hostile post could link to",
-}
+_ACCEPTED_RESIDUE: dict[tuple[str, str], str] = {}
 
 #: The deployment's published paths. Public (the deploy docs name them), so not a
 #: leak; still forbidden in code, because the same code runs on a dev machine

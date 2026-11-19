@@ -1,6 +1,6 @@
 """The slideshow's network client: API calls to a fixed set of hosts, and media from public addresses only.
 
-**The second module in this plane allowed an HTTP client** (`pull.py` is the
+**The second module in the Player allowed an HTTP client** (`pull.py` is the
 first), and `tests/test_plane_isolation.py` holds it to what this docstring
 says. The rule it is an exception to exists to stop a quiet second channel to
 the Arrt server. A slideshow has no server, and a post may link media on any
@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 #: The host the session cookie belongs to, and the only one it is sent to.
 REDDIT_HOST: Final[str] = "www.reddit.com"
 
-#: The only hosts a listing or API call may go to. The plane-isolation guard reads
+#: The only hosts a listing or API call may go to. The isolation guard reads
 #: this set, and holds this module to spelling no other host.
 API_HOSTS: Final[frozenset[str]] = frozenset({REDDIT_HOST, "api.redgifs.com"})
 

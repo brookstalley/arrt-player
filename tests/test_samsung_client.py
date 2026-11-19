@@ -589,7 +589,7 @@ async def test_every_way_the_set_mentions_art_mode_counts(tv: SamsungTv, art: St
 
 
 async def test_connecting_counts_as_an_announcement(art: StubArt, tmp_path):
-    """A reconnection is news: the set may have entered art mode while this plane
+    """A reconnection is news: the set may have entered art mode while the Player
     could not hear it, and otherwise the wall sits out a wait whose reason has
     gone."""
     tv = SamsungTv(

@@ -1,4 +1,4 @@
-"""The display plane: make the physical world match the manifest.
+"""The Player: make the physical world match the manifest.
 
 A Player is a **client** (`clients.md`): it asks the server which walls it
 drives, pulls each wall's manifest and media into its own cache, and shows
@@ -11,7 +11,7 @@ violation it guards against ("just fetch the label text live") works perfectly i
 development and in every test: the server is up in both, so a green suite is
 exactly what the violation looks like.
 
-The consequence worth knowing before reading further is that this plane keeps
+The consequence worth knowing before reading further is that the Player keeps
 working when the other one is gone. A cached manifest may be arbitrarily stale;
 if the server stops, every wall goes on following its last schedule forever, and that
 is correct behaviour rather than degradation.

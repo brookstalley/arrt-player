@@ -6,7 +6,7 @@ depends_on:
   - artifact: platform-and-dependency-findings
   - artifact: samsung-tv-state-findings
   - artifact: hdmi-output-findings
-last_validated: 2026-10-27
+last_validated: 2026-11-19
 ---
 
 # Architecture — Arrt Player
@@ -14,7 +14,7 @@ last_validated: 2026-10-27
 **What this covers.** The Player's own topology: its one process, what runs
 inside it, the channels it holds open, what it keeps on disk, and the seams that
 let the suite run with no television, screen or panel. It describes the code as
-it stood on 2026-10-27; every claim names the
+it stood on 2026-11-19; every claim names the
 `file:symbol` it rests on.
 
 **What it points at instead of restating.** The server, and every rule the two
@@ -91,7 +91,8 @@ module docstring).
 **One process, one event loop, and in slideshow mode one child.**
 `__main__.main` calls `asyncio.run(_run())`; nothing in `src/` starts a second
 event loop. The one other process is mpv, which `mpv.MpvOutput._start` runs with
-`subprocess.Popen` in its own process group and which the Player owns for its
+`subprocess.Popen` in its own process group, with an environment of only
+`mpv.MPV_ENVIRONMENT` (so none of `.env` reaches it), and which the Player owns for its
 whole life: stopped by group on every way out, its pid kept in
 `CACHE_DIR/.mpv/` so one left by a Player killed outright is stopped at the next
 start (`mpv.stop_stale`, which checks the pid's command line names this
@@ -109,12 +110,13 @@ directory's socket before stopping it, since pids are reused). `mpv.py` also run
 | the supervisor | `__main__._run` (awaited directly) | `client.Supervisor.run`: polls `GET /client` every `CLIENT_POLL_SECONDS` (default 30 s, `config.DEFAULT_CLIENT_POLL_SECONDS`), reconciles workers, POSTs the client heartbeat | the process |
 | `wall:<wall_id>` | `Supervisor._start` | `Supervisor._keep_running` around `__main__.run_wall` | while the wall is assigned |
 | `pull:<wall_id>`, `stop:<wall_id>` | `__main__._beside_its_pull` | `pull.Pull.run` beside the wall loop, and a relay of the supervisor's stop | with their wall's worker |
+| `heartbeat:<wall_id>` | `pull.Pull.run` | `Pull._heartbeats`: forwards the wall's heartbeat every poll interval while the last manifest poll was answered, on its own loop, so a manifest poll backing off never delays a report | with its pull |
 | `label:<output>` | `Supervisor._start_label` | `_keep_running` around `__main__.run_label` → `label_renderer.LabelRenderer.run` | while the label output is mapped |
 | `compose:<wall_id>:<work_id>` | `programmes/schedule.py:Schedule._start` | composing one work for this wall's geometry, on a thread | one composition |
 | `settings-page` (slideshow mode) | `__main__.run_slideshow`, beside the programme | as in Arrt mode | the process |
 | `slideshow-listing` | `programmes/slideshow.py:Slideshow` | one read of the listing, every `REFRESH_S` (600 s), or `FAILED_REFRESH_S` (120 s) or Reddit's own retry-after after a failure; taken between items | one read |
 | `slideshow-fill` | `Slideshow.run` | `MediaCache.fill`: downloads from the play position onward, after each listing taken or when nothing is ready | the programme |
-| `slideshow-caption` | `Slideshow` | one label draw for the post on screen | one draw |
+| `slideshow-label` | `Slideshow` | one label draw for the post on screen | one draw |
 
 Inside a wall worker, `wall.Wall.run` is the loop: `Wall.tick` reads the cached
 manifest (`manifest.Watcher.poll`), asks the programme
@@ -129,9 +131,11 @@ is chosen by `__main__.run_wall` on the output's kind.
 - `label_renderer.py:LabelPanel.draw`: layout and the panel write, bounded by
   `LABEL_DRAW_BUDGET_SECONDS` (15 s). A draw that overruns is left running, not
   cancelled, and the panel's one-at-a-time gate (`LabelPanel._draw`) stays shut
-  until it finishes.
-- `displays/screen.py:ScreenDisplay.show` and `ScreenDisplay._refresh`: the KMS
-  draw. `kms.py` guards its shared device with `threading.Lock`
+  until it finishes. `LabelPanel.close` waits for a draw still in the driver
+  (`LabelPanel._in_driver`), up to the same budget, before it powers the panel
+  down; past it the panel is left open and `label.close_abandoned` says so.
+- `displays/screen.py:ScreenDisplay.show`, `ScreenDisplay._refresh` and
+  `go_dark` (`ScreenOutput.blank`): the KMS draw. `kms.py` guards its shared device with `threading.Lock`
   (`LibdrmDevice._lock`, and the module's `_devices_lock`), because two
   connectors on one card share one DRM master.
 - `tv/samsung.py:SamsungTv.connect`: the library's constructor, which blocks on
@@ -156,7 +160,11 @@ each observer so one that raises costs neither the others nor the reader
 second wall on an output already claimed (`client.wall_unplaceable`), and
 `Supervisor._start` awaits every worker still stopping before the new one runs
 (the `after=stopping` argument to `_keep_running`), so a wall moved between
-outputs never has two workers on one directory or one art channel. There is at
+outputs never has two workers on one directory or one art channel. The supervisor
+keeps the last client document and matches the walls to it again whenever the
+outputs differ from the ones it last matched against (`Supervisor.cycle`,
+`_current_outputs`), so a connector the kernel lists after the Player started
+places its wall although the server, with nothing new to say, answers 304. There is at
 most one Frame per client: `config.FRAME_OUTPUT` is a single name and
 `ClientSettings.frame` a single optional value. There is at most one panel:
 `config.PANEL_OUTPUT` (`epd-0`), opened once per process by
@@ -165,7 +173,11 @@ most one Frame per client: `config.FRAME_OUTPUT` is a single name and
 **Shutdown.** SIGTERM and SIGINT set one `asyncio.Event` (`__main__._run`).
 `Supervisor.stop_all` sets each worker's stop and gathers them; each wall loop
 closes its display in `Wall.run`'s `finally`; the panel is closed last
-(`LabelPanel.close`, the e-paper power-down). The unit gives this 90 s
+(`LabelPanel.close`, the e-paper power-down, after any draw still in the
+driver). A Player that is stopping leaves its screens and its labels as they
+are: only a wall the document takes off an output is retired, and a retired
+screen wall draws black there (`Supervisor._stop`, `client.WallStop`,
+`__main__.run_screen_wall`, `displays/screen.go_dark`). The unit gives this 90 s
 (`deploy/display.service`, `TimeoutStopSec=90`). Every wait in a loop is
 `asyncio.wait_for(stop.wait(), timeout=…)`, so a sleeping worker wakes on the
 signal (`Wall._wait`, `Pull.run`, `Supervisor.run`, `LabelRenderer.run`).
@@ -180,14 +192,14 @@ is that walk's output, not a recollection.
 |---|---|---|
 | `__main__` | Composition root: builds settings, the panel, the Frame client, the supervisor; the only place `tv.samsung`, `pull`, `kms` and the panel driver are named together | almost everything |
 | `client` | `Supervisor`, the client document, output discovery (`hdmi_outputs`, `client_outputs`), the client heartbeat document, `FrameIdentity` | `config`, `episodes`, `heartbeat` |
-| `pull` | Every HTTP request: `Pull` (one wall), `ClientPull` (the client routes), `LabelPull` (one label) | `client`, `config`, `episodes`, `heartbeat`, `label_rule`, `manifest` |
+| `pull` | Every HTTP request: `Pull` (one wall), `ClientPull` (the client routes), `LabelPull` (one label, and its cached document) | `client`, `config`, `episodes`, `heartbeat`, `label_rule`, `manifest` |
 | `wall` | The one wall loop for every display kind; `Clock`; `DisplayRecord`; the `Display` and `Programme` protocols | `config`, `episodes`, `heartbeat`, `manifest` |
 | `displays/frame` | The Frame as a `Display`: uploads, bindings, reconciliation, brightness, the art-mode gate | `brightness`, `config`, `episodes`, `heartbeat`, `logs`, `manifest`, `programmes.schedule`, `state`, `tv`, `wall` |
-| `displays/screen` | An HDMI connector as a `Display`, behind `ScreenOutput` | `compose`, `config`, `displays.screen_brightness`, `episodes`, `heartbeat`, `manifest`, `programmes.schedule`, `wall` |
+| `displays/screen` | An HDMI connector as a `Display`, behind `ScreenOutput`; `go_dark`, the black a wall leaves its connector with | `compose`, `config`, `displays.screen_brightness`, `episodes`, `heartbeat`, `manifest`, `programmes.schedule`, `wall` |
 | `displays/screen_brightness` | An HDMI screen's brightness on the sun, over the `ddc.DdcBus` seam | `brightness`, `config`, `ddc`, `episodes`, `wall` |
 | `programmes/schedule` | What the wall should show from a major 2 feed; composes each work for the display | `compose`, `episodes`, `logs`, `manifest`, `wall` |
 | `manifest` | Parse and watch the cached feed (`Watcher`, `parse`, `REQUESTED_MAJORS = (2,)`) | — |
-| `compose` | Mat composition for a geometry (Pillow) | — |
+| `compose` | Mat composition for a geometry (Pillow), and `is_intact`, the check on a composed file found on disk | — |
 | `kms` | `KmsOutput`/`LibdrmDevice`: libdrm through `ctypes` | `client`, `episodes` |
 | `ddc` | A monitor's DDC/CI features over its HDMI connector's I2C bus (`Ddc`, `I2cTransport`, `bus_for`); no `ddcutil` | `client` |
 | `tv/client` | The `TvClient` seam and its exceptions | — |
@@ -201,13 +213,13 @@ is that walk's output, not a recollection.
 | `episodes` | `ReportOnce`, `Backoff` | — |
 | `config` | `.env`, with the settings page's file beneath it, into `ClientSettings` / `WallSettings` / `Settings` / `UiSettings`; `SetupRequired` | `compose`, `heartbeat`, `settings_ui.store` |
 | `settings_ui/store` | The settings page's file, `$CACHE_DIR/.settings.json` | — |
-| `settings_ui/auth` | The page's password hash, session cookie, setup code and throttle | — |
-| `settings_ui/server` | The settings page (`aiohttp.web`); the Player's one listening socket | `config`, `settings_ui.auth`, `settings_ui.store` |
+| `settings_ui/auth` | The page's password hash, session cookie, setup code and login throttle (per source address, under a ceiling for all of them) | — |
+| `settings_ui/server` | The settings page (`aiohttp.web`), which answers only to its own names (`_known_hosts`); the Player's one listening socket | `config`, `settings_ui.auth`, `settings_ui.store` |
 | `brightness` | Sun-angle brightness (astral), for the Frame and the HDMI screens | — |
 | `programmes/slideshow` | Slideshow mode's programme: the listing on its own task, the cache filled on another, playback from what is cached, the caption; the saved listing | `dwell`, `episodes`, `label_rule`, `mpv`, `programmes.slideshow_status`, `sources`, `sources.cache` |
 | `programmes/slideshow_status` | What the settings page shows of a running slideshow | `sources` |
 | `dwell` | How long an item stays up: a still for the minimum, a clip repeated to reach it and cut at the maximum | — |
-| `mpv` | `MpvOutput`, an HDMI connector through an mpv this process runs; `renderer_problems`, `stop_stale` | `client`, `episodes`, `kms` |
+| `mpv` | `MpvOutput`, the slideshow's screen through an mpv this process runs, started with only `MPV_ENVIRONMENT`; `renderer_problems`, `stop_stale` | `client`, `episodes`, `kms` |
 | `sources` | The source seam (`Item`, `Listing`, `Outcome`, `Kind`), so another source can replace Reddit | — |
 | `sources/fetch` | The slideshow's one HTTP client: API calls to `API_HOSTS`, media from public addresses only | `sources` |
 | `sources/reddit`, `sources/reddit_settings` | The Reddit listing read into items; the listing URL and cookie checks the page uses, with no network import | `sources`, `sources.fetch`, `sources.reddit_settings` |
@@ -277,12 +289,26 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 **What each component must never do.**
 
 - `pull` never writes a manifest it has not checked with the watcher's own
-  parser, and never caches it before every master it names is fetched and
-  hash-checked or answered for (`Pull._pull_manifest`, `Pull._adopt_feed`).
+  parser, and caches it before every master it names is in hand only for the
+  master that cannot be had: one answered for (a `404`, a hash mismatch, a size
+  past what the feed declares, or no size declared) is skipped at once, and one
+  that fails in a way that may clear holds the feed already cached for at most
+  `MEDIA_HOLD_SECONDS`, after which the new feed is cached without it and with
+  no ETag, so every later poll asks for it again (`Pull._pull_manifest`,
+  `_adopt_feed`, `_hold_or_adopt`).
+- `pull` never reads what the server sends without a bound, except the manifest
+  itself: a master is stopped at the bytes its feed declares, the client and
+  label documents at `DOCUMENT_MAX_BYTES` (`Pull._cache_media`, `_stream_to`).
 - Nothing but `displays/frame` and `tv/*` talks to the television; nothing in
   shipped code presses power. The second is Arrt's norm, tested by
   `tests/test_frame_wall.py::test_a_television_somebody_is_watching_is_left_alone`
   and the rows `project-preferences.md` lists for it.
+- No verb that changes what the set shows or stores is sent without reading the
+  set first. Each is a final method of `tv.client.TvClient` that calls `_permit`
+  (the read) and then the client's `_send_<verb>`; a subclass that defines one
+  is refused when the class is made (`TvClient.__init_subclass__`), and a verb
+  added to the seam is in `tv.client.WRITES` or `READS` or a test fails by name
+  (`tests/test_samsung_client.py::test_every_verb_a_client_implements_is_a_read_or_a_write`).
 - No label failure stops a wall: `LabelPanel.draw` never raises (its broad
   `except` with a pragma), and the label runs in its own task.
 
@@ -293,9 +319,9 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 | 1 | Client document | `GET /client`, ETag | server → Player | async poll, 30 s | `player-contract.md` § Transport; `pull.ClientPull.fetch` |
 | 2 | Client heartbeat | `POST /client/heartbeat`, JSON | Player → server | on change, else every 60 s | `client-heartbeat.v1`; `client.client_heartbeat`, `Supervisor._report_outputs` |
 | 3 | Wall feed | `GET /walls/{wall_id}/manifest/v{major}`, ETag, highest major first | server → Player | async poll, `MANIFEST_POLL_SECONDS` (default 1 s) | `player-contract.md` § Major 2, § The cutover; `Pull._request_manifest` |
-| 4 | Media | `GET` of each work's `media.url`, resolved against the manifest URL; SHA-256 checked | server → Player | inside a feed poll | `Pull._cache_media` |
-| 5 | Wall heartbeat | file in the wall's cache, then `POST /walls/{wall_id}/heartbeat` | Player → server | file every 60 s or on change; POST when the file changes | `heartbeat.v1`; `heartbeat.write`, `Pull._forward_heartbeat` |
-| 6 | Label document | `GET /labels/{label_id}`, ETag | server → Player | poll, `LABEL_POLL_SECONDS` (default 1 s) | `labels-and-surfaces.md`; `pull.LabelPull.fetch` |
+| 4 | Media | `GET` of each work's `media.url`, resolved against the manifest URL; streamed to a temporary file under a running SHA-256, stopped past the bytes the feed declares; 30 s without a byte ends it, with no total | server → Player | inside a feed poll | `Pull._cache_media` |
+| 5 | Wall heartbeat | file in the wall's cache, then `POST /walls/{wall_id}/heartbeat` | Player → server | file every 60 s or on change; POST when the file changes, on the pull's own loop at the poll interval while the server answered the last manifest poll | `heartbeat.v1`; `heartbeat.write`, `Pull._heartbeats`, `Pull._forward_heartbeat` |
+| 6 | Label document | `GET /labels/{label_id}`, ETag; each accepted document cached under `CACHE_DIR/.labels/` | server → Player | poll, `LABEL_POLL_SECONDS` (default 1 s) | `labels-and-surfaces.md`; `pull.LabelPull.fetch`, `cached` |
 | 7 | Frame art channel | websocket via `samsungtvws` | Player ↔ television | async, with the set's own announcements | foreign; `tv/client.TvClient`, `samsung-tv-state-findings.md` |
 | 8 | Frame REST | HTTP via the library's REST helper | Player → television | one-shot reads | `SamsungTv.power_state`, `SamsungTv.read_identity` |
 | 9 | HDMI | `ioctl` on `/dev/dri/card*` through libdrm (`ctypes`) | Player → screen | blocking, on a thread | `kms.py`; `hdmi-output-findings.md` |
@@ -305,13 +331,14 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 | 14 | redgifs API | `GET` over https to `api.redgifs.com`, a temporary token taken without an account | redgifs → Player | per clip resolved | foreign; `sources/resolvers/redgifs.py` |
 | 15 | Media downloads | `GET` of any host a post links, public addresses only, checked at connect; up to `MAX_REDIRECTS` hops by hand; kept only if the bytes sniff as a picture or clip | host → Player | the fill task | `sources/fetch.Fetcher.download` |
 | 16 | mpv | JSON IPC over a Unix socket in `CACHE_DIR/.mpv/` | Player ↔ mpv | blocking, on a thread, each call with a timeout | `mpv.py`; `hdmi-output-findings.md` § mpv |
-| 12 | Settings page | HTTP served on `UI_BIND`:`UI_PORT` (default all interfaces, 8771), session cookie | owner's browser → Player | request/response | `settings_ui/server.py`; `security-model.md` § To the Player: the settings page |
+| 12 | Settings page | HTTP served on `UI_BIND`:`UI_PORT` (default all interfaces, 8771), session cookie; refuses with a 421, before any page, a `Host` that is not an IP address, `localhost`, this machine's own name, `<name>.local` or a name in `UI_ALLOWED_HOSTS` | owner's browser → Player | request/response | `settings_ui/server.py`; `security-model.md` § To the Player: the settings page |
 
 **Trust boundaries.** Channels 1–6 cross the LAN and carry `CLIENT_TOKEN` as a
 Bearer header (`Pull._auth`, `ClientPull._auth`, `LabelPull.fetch`). A media URL
 on another origin is fetched without the token (`Pull._cache_media`,
-`pull._same_origin`), so a manifest cannot send the token elsewhere. Every
-document from the server is parsed and refused whole if it is malformed
+`pull._same_origin`), so a manifest cannot send the token elsewhere. Nothing the server sends is
+read without a bound but the manifest (`Pull._cache_media`, `DOCUMENT_MAX_BYTES`).
+Every document from the server is parsed and refused whole if it is malformed
 (`client.parse_client_document`, `manifest.parse`, `label_rule.parse_label_document`).
 Channels 7–8 cross the LAN to a device that authenticates the Player by a token
 it issued, held in `TV_TOKEN_FILE` (default `CACHE_DIR/token_file`,
@@ -345,12 +372,13 @@ constants and properties in `config.py`, `pull.py` and `manifest.py`:
 CACHE_DIR/
   .client.json                 last good client document     (config.CLIENT_DOCUMENT_FILENAME; written by ClientPull)
   .client.etag                                               (pull.CLIENT_ETAG_FILENAME)
+  .labels/<label_id>.json      last label document accepted for each label this client renders (pull.LABEL_CACHE_DIRNAME; written by LabelPull)
   token_file                   the Frame's pairing token, unless TV_TOKEN_FILE says otherwise (config._frame)
   <wall_id>/                   one per wall                  (ClientSettings.wall)
     manifest.json              last good feed                (config.CACHED_MANIFEST_FILENAME; written by Pull)
     manifest.etag                                            (pull.ETAG_FILENAME)
     media/sha256-<hash>        verified masters              (manifest.MEDIA_DIRNAME, manifest.media_name)
-    composed/                  pictures composed for this display (config.COMPOSED_DIRNAME; Schedule)
+    composed/                  pictures composed for this display (config.COMPOSED_DIRNAME; Schedule), each flushed to disk before it takes its name
     display-heartbeat-<wall_id>.json                         (heartbeat.HEARTBEAT_FILENAME_TEMPLATE; Wall._beat)
     display-state.sqlite       Frame walls only              (config.STATE_FILENAME; state.DisplayState)
   .settings.json               the settings page's file, layout version 2 (settings_ui.store.SETTINGS_FILENAME)
@@ -361,10 +389,12 @@ CACHE_DIR/
 
 **Single writer per file.** Each file above has one writer, named in the
 right-hand column. Two walls cannot share a directory: a wall id must match
-`config._PLAIN_COMPONENT` (no `..`, no `/`, no leading dot) or
+`config.PLAIN_COMPONENT` (no `..`, no `/`, no leading dot) or
 `ClientSettings.wall` raises `WallIdUnusable`, and the supervisor reports it and
 does not start the wall. The leading-dot rule is what keeps `.client.json` apart
-from every wall directory.
+from every wall directory, and a wall id equal to any other name the cache
+directory reserves (the settings file, the token file, the client document and
+the rest, derived from the constants that name them) is refused the same way.
 
 **Slideshow mode's files** start with a dot, so no wall id can name them. A
 download is written beside its name and moved into place whole; one a crash left
@@ -375,7 +405,13 @@ name, and rolling back means deleting those keys and setting `version` to 1
 (`settings_ui/store.py` docstring; `deploy/README.md` § The slideshow).
 
 **Atomic writes.** `pull._write_atomically` for the client document, manifest,
-ETags and media; `heartbeat.write` for the heartbeat. Media are evicted only
+ETags, media and label documents; `heartbeat.write` for the heartbeat. A label
+document's modification time is the instant the server last answered for it
+(moved forward at most once a minute, `LABEL_ANSWER_STAMP_SECONDS`), and its ETag
+is not kept, so a restarted Player always asks for the whole document. A composed
+picture found on disk is read once per file stamp and removed if it is not a
+whole JPEG, so the work is composed again (`compose.is_intact`,
+`Schedule._intact`). Media are evicted only
 after a new feed is cached, and a master either feed names is kept
 (`Pull._evict`, called with `held | previous`).
 
@@ -388,8 +424,9 @@ module docstring). The store is the only per-device state that costs anything to
 lose: losing it costs re-uploading the theme to the set.
 
 **Not persisted.** Brightness (recomputed from the sun, `brightness.py`), the
-supervisor's view of running workers, every `ReportOnce` episode, and the label
-renderer's last document (`LabelRenderer._document`). A restart re-announces any
+supervisor's view of running workers, every `ReportOnce` episode, the label's
+ETag, and the label renderer's own state (`LabelRenderer._document` starts from
+the cached document, `LabelRenderer._seed`). A restart re-announces any
 condition still true.
 
 ## Failure Modes & Resilience
@@ -401,21 +438,30 @@ is its test.
 
 | Failure | What happens | Bounds |
 |---|---|---|
-| Server unreachable, 5xx, timeout | Walls rotate from cache; feed poll backs off; heartbeat POSTs stop; client document kept | `Pull`: 2 s doubling to 60 s (`BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS`), request 60 s total / 10 s connect. `ClientPull`: fixed 30 s poll, 30 s / 10 s. `LabelPull`: 1 s poll, 10 s / 5 s |
+| Server unreachable, 5xx, timeout | Walls rotate from cache; feed poll backs off; heartbeat POSTs stop; client document kept | `Pull`: 2 s doubling to 60 s (`BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS`), request 60 s total / 10 s connect, a master 30 s without a byte and no total (`_MEDIA_TIMEOUT`). `ClientPull`: fixed 30 s poll, 30 s / 10 s. `LabelPull`: 1 s poll, 10 s / 5 s |
 | Server down at boot | `Supervisor.run` reconciles from `.client.json` before the first request | — |
 | Token refused (401), wall not this client's (403), nothing published (404 at every major) | Logged once per status per episode; cache kept; poll continues at the normal interval | `Pull._report_refused` |
 | Feed unparseable or an unknown major | Refused before caching; the last good feed stays | `Pull._pull_manifest`, `manifest.Watcher.poll` |
-| A master 404s or fails its hash | That work is skipped; the rest of the feed is cached | `Pull._cache_media` |
-| A master fails transiently | The whole feed is held back; the poll backs off; the heartbeat still goes | `Pull.cycle`, `_Poll.MEDIA_FAILING` |
+| A master 404s, fails its hash, runs past the bytes its feed declares, or has no size declared | That work is skipped; the rest of the feed is cached | `Pull._cache_media` |
+| A master fails transiently (a 5xx, a timeout, a dropped connection) | The feed already cached stays and the poll backs off, for at most 10 minutes; the heartbeat still goes, on its own loop. Then the new feed is cached without that master and without an ETag, and the master is asked for again on every poll until it arrives | `MEDIA_HOLD_SECONDS`, `Pull._hold_or_adopt`, `Pull._heartbeats`, `_Poll.MEDIA_FAILING`; `pull.media_failing`, `pull.hold_ended` |
+| The server's heartbeat answer is a 4xx or a 5xx | A 4xx is not sent again until the report changes; a 5xx is sent again next poll | `Pull._heard` |
+| A composed picture is empty, cut short, or not a JPEG | Removed and composed again; a master that cannot be read for a reason that may clear is retried | `Schedule._intact`, `compose.is_intact`; `schedule.composed_damaged`, `schedule.compose_read_failed` |
 | A wall's pull raises | `__main__._pull_ended` logs and ends that wall's worker; the supervisor restarts both | 5 s doubling to 300 s (`client.RESTART_MIN_SECONDS`, `RESTART_MAX_SECONDS`); the ladder resets after a run longer than 300 s |
 | A wall loop or label renderer raises | `Supervisor._keep_running` logs and restarts it; other walls untouched | same ladder |
 | The supervisor raises | The process ends; systemd restarts it | `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` |
 | Television asleep or gone | `TvUnavailable`; the wall holds; a heartbeat is still written | `TV_RETRY_MIN_SECONDS`..`TV_RETRY_MAX_SECONDS` (5 s..300 s); connect 30 s; upload 60 s; selection confirm 8 s (`config` defaults) |
-| Television in use (not art mode) | Nothing is sent to it | `FrameDisplay.is_ours`; Arrt's norm |
+| Television in use (not art mode), or its power cannot be read | Nothing is sent to it: a selection is held whenever the set is not showing art, and an upload, removal, brightness change or slideshow switch-off whenever it is not showing art or dark. Held writes share one backoff (`_writes_wait`) | `TvClient._permit` (`TvNotOurs`), `FrameDisplay.is_ours`, `_hold_the_writes`; Arrt's norm; `tv.writes_held`, `tv.writes_resumed` |
 | Selections accepted, none displayed | Said once, rotation stops trying for the pass | `Shown.WALL_UNCHANGED`, `FrameDisplay._report_wall_unchanged` |
 | HDMI screen absent or the card refuses | The wall rotates unseen; drawn again when a screen returns | `KmsOutput`, `ScreenDisplay._refresh` every poll |
+| A connector the kernel lists after the Player started, or stops listing | The walls are matched to the last document again, without waiting for the server to say anything new (it answers 304) | `Supervisor.cycle`, `_current_outputs` |
+| A wall is unassigned or moved off an HDMI connector | Its screen is drawn black, once its loop and pull have ended; a screen unplugged at that moment may show its old picture when plugged back in, until another wall is drawn there | `Supervisor._stop`, `__main__.run_screen_wall`, `displays/screen.go_dark`, `KmsOutput.blank`; `screen.blanked`, `screen.blank_failed` |
+| The connector goes, or the Player stops, or the server also gives the connector to another wall | The screen is left as it is | `client._why_stopped` |
+| A wall is retired while its worker waits to restart after a crash | The worker is called once more, already stopped, to leave its output | `Supervisor._keep_running`; `client.worker_retire_failed`, `client.label_retire_failed` when that call fails |
 | Panel will not open, or no text stack, or viewing distance unset | No label; the walls run; the client heartbeat reports the label output not connected | `__main__.label_panel`, `LabelPanel.report` |
-| A panel draw hangs | The renderer stops waiting at 15 s; the gate stays shut until the thread returns | `LABEL_DRAW_BUDGET_SECONDS` |
+| A panel draw hangs | The renderer stops waiting at 15 s; the gate stays shut until the thread returns. At shutdown the panel is left open rather than powered down under the draw | `LABEL_DRAW_BUDGET_SECONDS`, `LabelPanel.close`; `label.close_abandoned` |
+| The Player restarts while the server is down | Each label captions from the document cached when the server last answered, for what is left of the rule's 30-minute hold (never more than that from the restart); a cache that cannot be read is absent | `LabelRenderer._seed`, `_held_from_the_cache`, `LabelPull.cached` |
+| The wall clock steps while the server is down | The label's hold is measured on the monotonic clock, so it neither blanks at once nor holds for ever | `LabelRenderer._last_answer` |
+| The Pi runs out of memory | The kernel starts reclaiming from the Player at 60% of RAM and kills inside the unit at 75%; systemd stops the rest and restarts it | `deploy/display.service`, `MemoryHigh`, `MemoryMax` |
 | Heartbeat file cannot be written | Said once; the wall is unaffected | `Wall._beat` |
 | Frame store from a newer Player | That wall is parked until a rollout | `__main__.run_frame_wall` |
 | Slideshow: Reddit gives no listing (refused, cookie rejected, rate limited, unreachable) | The last listing plays on from the cache; asked again later; the page says why | `FAILED_REFRESH_S` (120 s) or Reddit's retry-after; `Slideshow._take` |
@@ -453,15 +499,30 @@ that cannot proceed is retried on the next poll, not buffered.
   install --no-install-recommends mpv`) and the account in `render`
   (`deploy/display.service`, `SupplementaryGroups`). Neither is in the lockfile;
   `platform-and-dependency-findings.md` § mpv records the measured version.
+- **The unit is frozen, bounded and partly sandboxed.** `ExecStart` is
+  `uv run --frozen --no-dev --group raster --group epaper`, so a start never
+  re-resolves; `MemoryHigh` and `MemoryMax` are shares of the Pi's RAM;
+  `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome` and
+  `RestrictAddressFamilies` limit what the Player and its mpv can reach, and
+  nothing sets `PrivateDevices` or `DevicePolicy` (`deploy/display.service`,
+  `tests/test_deploy_unit.py`). Whether the kernel enforces the memory bound, and
+  whether the sandbox lets the Player draw, is the operator's check at the Pi
+  (the runbook's steps 9a and 14a).
+- **A `*_SECONDS` setting of zero, below zero, `nan` or `inf` is refused by name**
+  at start (exit 2), as are latitude and longitude out of range
+  (`config._seconds`, `config._float`), so an `.env` that held a zero interval stops the Player at
+  the first start after the release.
 - **Settings retired by a release are refused by name** (`config.RETIRED_SETTINGS`),
   so an old `.env` fails at start rather than being half-read.
 
 ## Scaling Model
 
 Not a concern at this size: one household, a handful of outputs per Pi. The
-first limit is the Pi's own: every master is read whole into memory before it is
-hashed (`Pull._cache_media` calls `response.read()`), and composition and the
-label draw are seconds of CPU on a thread. Nothing here is designed to scale out.
+first limit is the Pi's own: a master is streamed to disk and hashed as it comes
+(`Pull._cache_media`), so its size costs time rather than memory, and what does
+cost memory is composing a picture, about a gigabyte a work, one at a time per
+wall; the unit bounds the Player's whole share (`MemoryHigh`, `MemoryMax`).
+Composition and the label draw are seconds of CPU on a thread. Nothing here is designed to scale out.
 
 ## Cross-Cutting Runtime Concerns
 
@@ -470,8 +531,10 @@ label draw are seconds of CPU on a thread. Nothing here is designed to scale out
   step on a Pi with no RTC cannot stall or fire waits (`Clock`'s docstring;
   `episodes.Backoff`). Instants in documents are RFC 3339 with an offset
   (`player-contract.md` § Time). The server's clock and the Player's are not
-  reconciled; the label rule's hold runs from the Player's own receipt time
-  (`LabelRenderer._last_answer`).
+  reconciled; the label rule's offline hold is
+  measured on the monotonic clock from the server's last answer
+  (`LabelRenderer._last_answer`), and after a restart from the cached
+  document's stamp, bounded from the restart (`LabelRenderer._held_from_the_cache`).
 - **Configuration and secrets.** One `.env`, read once at start by `config.load`
   (the unit's `EnvironmentFile=` too). A change takes a restart. A missing or
   malformed value stops the process with `ConfigError` before anything runs
@@ -485,10 +548,10 @@ label draw are seconds of CPU on a thread. Nothing here is designed to scale out
 
   | Boundary | Seam | Double | How the real one is kept out |
   |---|---|---|---|
-  | Television | `tv/client.TvClient` (ABC) | `tests/fakes.py:FakeTv` subclasses it, so a new verb fails the double at import | `displays/frame.frame_wall` takes a `TvClient`; only `__main__.frame_tv` builds `SamsungTv` |
+  | Television | `tv/client.TvClient` (ABC) | `tests/fake_tv.py:FakeTv` (re-exported by `tests/fakes.py`) subclasses it, so a new verb fails the double at import; it keeps a clock of its own for the tests that wait on the set | `displays/frame.frame_wall` takes a `TvClient`; only `__main__.frame_tv` builds `SamsungTv` |
   | Label surface | `panel/surface.LabelSurface` (ABC) | `tests/fakes.py:FakeSurface` for the renderer; `tests/test_epaper.py:FakeEpd` and `FlatRasterizer` for `EpaperSurface` itself | `panel/epaper.EpaperSurface` takes its driver (`epd=`) and a rasterizer as arguments; `omni_epd` is imported only inside `open_panel` |
   | HDMI | `displays/screen.ScreenOutput` (Protocol); `kms.Device` (Protocol) | `tests/fakes.py:RecordingOutput`; `tests/fakes.py:drm_tree` builds a fake `/sys/class/drm` | `client.hdmi_outputs(drm_root=…)` and `kms.KmsOutput(drm_root=…, dev_root=…, device_for=…)` are injectable |
-  | Server | `client.ClientLink` (Protocol) for the supervisor; real `aiohttp` against a local server for the pull | `tests/server_double.py:ServerDouble`, an `aiohttp.web` app on the contract's own routes, validating client heartbeats against `client-heartbeat.v1`, served by `aiohttp.test_utils.TestServer` | tests set `server_url` to the test server's URL (`tests/test_pull.py`) |
+  | Server | `client.ClientLink` (Protocol) for the supervisor; real `aiohttp` against a local server for the pull | `tests/server_double.py:ServerDouble`, an `aiohttp.web` app on the contract's own routes, validating client heartbeats against `client-heartbeat.v1` and wall heartbeats against `heartbeat.v1`, served by `aiohttp.test_utils.TestServer` | tests set `server_url` to the test server's URL (`tests/test_pull.py`) |
   | Clock | `wall.Clock`; `monotonic=` on `Supervisor`, `Pull`, `Backoff` | test clocks | injected everywhere a wait is measured |
   | Text stack | `panel/raster.Rasterizer` | `tests/test_epaper.py:FlatRasterizer` | the real one, `panel/pango.PangoRasterizer`, is exercised by `tests/raster`, which needs `--group raster` and skips without it |
 
@@ -535,6 +598,19 @@ Decisions visible in the code, with where each is argued. New entries append.
     request 2026-11-10 (`tests/test_plane_isolation.py` docstring). It narrows
     decision 3 rather than reversing it: the client cannot learn the server's
     address or token.
+11. **The household's rule is kept in the seam, not by each caller.** Every write
+    to the set reads its state immediately before it is sent, in a final method
+    of `TvClient` that calls the client's `_send_<verb>`, and a verb the
+    measurements do not show safe in the television state is held there
+    (`tv/client.py` docstring; `samsung-tv-state-findings.md` § What works in each
+    state). A verb added later inherits the read.
+12. **A feed whose master fails transiently is held for at most ten minutes**, then
+    cached without that master and with no ETag, so the wall's schedule does not
+    freeze behind one file and the master is still asked for on every poll
+    (`pull.py`, `MEDIA_HOLD_SECONDS`).
+13. **A wall that leaves an HDMI connector draws it black; a Player that stops
+    leaves its screens as they are**, mirroring the labels
+    (`displays/screen.py` docstring; `hdmi-output-findings.md`).
 
 ## Discrepancies with Arrt's record
 
@@ -555,10 +631,10 @@ for a pull request on Arrt, not an edit here.
 - Arrt's `architecture.md` § display "Owned state" places `display-state.sqlite`
   as display's store without a path; here it is per wall,
   `CACHE_DIR/<wall_id>/display-state.sqlite`, and only on Frame walls.
-- Arrt names the Player "display" or "the display plane" throughout. The same
-  name survives in this repo in `logs.py` (the docstring, the context variable
-  `display_work_id`), `heartbeat.py`, the `daemon.*` journal prefix
-  (`FrameDisplay.journal_name`), the stderr message in `__main__.main`
-  ("display plane cannot start"), the unit name `display.service` and its
+- Arrt names the Player "display" or "the display plane" throughout. This repo
+  keeps "display" only where it is an interface: the context variable
+  `display_work_id` in `logs.py`, the `daemon.*` journal prefix
+  (`FrameDisplay.journal_name`), the unit name `display.service` and its
   `SyslogIdentifier=display`. The unit and journal names are operational
-  interfaces; changing them is a migration, not a rename.
+  interfaces; changing them is a migration, not a rename. The stderr message in
+  `__main__.main` says "Arrt Player cannot start".

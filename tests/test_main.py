@@ -7,7 +7,7 @@ line, and no traceback, because a stack through `load()` points at this codebase
 which is the one place the problem is not. It is driven through `main`, since what
 is under test is the handling rather than the work.
 
-**A store written by a newer plane is not a refusal any more.** The store is a
+**A store written by a newer Player is not a refusal any more.** The store is a
 wall's, opened by that wall's worker, so it parks that wall and says so once; the
 process and every other wall keep running.
 
@@ -53,7 +53,7 @@ def test_a_missing_deployment_value_refuses_to_start_and_says_so_at_the_terminal
 
     assert code == 2, "a refusal to start exited zero, so systemd would treat it as a clean stop"
     printed = capsys.readouterr().err
-    assert "display plane cannot start" in printed
+    assert "Player cannot start" in printed
     assert what in printed, "the operator is told it cannot start but not which value is wrong"
 
 
@@ -127,7 +127,7 @@ class TestWhetherThisDeviceHasALabelSurface:
 
         But it is `SurfaceUnavailable` rather than `ConfigError` — the label
         surface goes, the daemon does not. Refusing to start would break two rules
-        this plane holds: nothing about the label may stop the television, and a
+        the Player holds: nothing about the label may stop the television, and a
         device with no usable label surface is a configuration rather than a
         fault. That distinction is the whole reason this raises the type the
         caller already catches.
@@ -320,7 +320,7 @@ async def test_a_crash_still_closes_the_art_channel_on_the_way_out(settings, tv,
 
 
 async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings, tv, state, clock, caplog):
-    """The journal is this plane's only failure channel.
+    """The journal is the Player's only failure channel.
 
     A crash used to write `daemon.stopped` at INFO — the identical line a clean
     shutdown writes — so an operator reading the log could not tell a wall
@@ -432,7 +432,7 @@ async def test_a_pull_that_dies_ends_its_walls_worker_at_once_and_says_why(monke
     assert not supervisors_stop.is_set(), "the pull's death was told to the supervisor as the wall being taken away"
 
 
-async def test_a_store_from_a_newer_plane_parks_its_wall_and_says_so_once(monkeypatch, settings, tv, caplog):
+async def test_a_store_from_a_newer_player_parks_its_wall_and_says_so_once(monkeypatch, settings, tv, caplog):
     """The wall waits to be stopped rather than ending: an ending is a crash to the
     supervisor, restarted every few seconds with a traceback each time, and the
     answer cannot change until a rollout. No loop and no pull start for it."""
@@ -444,7 +444,7 @@ async def test_a_store_from_a_newer_plane_parks_its_wall_and_says_so_once(monkey
     _wire(monkeypatch, tv, daemon_run=must_not_run)
 
     def too_new(path, *, now=None):
-        raise StateSchemaTooNew("display-state.sqlite was written by a display plane at schema 9; this one understands 8.")
+        raise StateSchemaTooNew("display-state.sqlite was written by a Player at schema 9; this one understands 8.")
 
     monkeypatch.setattr(entry, "DisplayState", too_new)
     stop = asyncio.Event()

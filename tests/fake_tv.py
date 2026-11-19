@@ -239,7 +239,7 @@ class FakeTv(TvClient):
     def announce(self, content_id: str, *, is_shown: bool) -> None:
         """Emit what the real set emits, to everyone listening.
 
-        Public so a test can model the announcement this plane did **not** cause:
+        Public so a test can model the announcement the Player did **not** cause:
         somebody picking up the remote makes the set announce a selection nobody
         here asked for, and that is the case an observer exists to hear.
         """

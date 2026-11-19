@@ -71,7 +71,7 @@ class LabelText:
     #: Which part of the name is the family name — the part a panel leads with
     #: and sets apart from the rest. Supplied by the catalogue rather than split
     #: out of `artist` here: no rule over one string is right for both "van Gogh"
-    #: and "Frank Lloyd Wright", and a display plane guessing at it would be
+    #: and "Frank Lloyd Wright", and a Player guessing at it would be
     #: inventing a fact about a person.
     artist_family_name: str | None = None
     artist_given_name: str | None = None
@@ -251,14 +251,14 @@ def read_label(label: dict[str, Any] | None) -> LabelText:
     """Take a manifest entry's label block as text, ignoring anything unrecognised.
 
     **Unknown keys are dropped rather than rejected.** Curation may publish a
-    field this device's version does not know about, and a display plane that
+    field this device's version does not know about, and a Player that
     refused a manifest over one would take the wall down for a change that was
     meant to be additive — against a norm that says a stale manifest is correct
     behaviour rather than degradation.
 
     Non-string values are dropped for the same reason and with less regret: a
     number where text belongs is curation's bug, and rendering `None` or `17` onto
-    a wall label would be this plane repeating it in public.
+    a wall label would be the Player repeating it in public.
     """
     if not isinstance(label, dict):
         return LabelText()

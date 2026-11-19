@@ -338,7 +338,7 @@ class TestOrphans:
         assert "MY-LEGACY-1" not in tv.holding, "the next adoption did not try again"
 
 
-async def test_a_store_from_a_newer_plane_is_refused_rather_than_opened(tmp_path: Path):
+async def test_a_store_from_a_newer_player_is_refused_rather_than_opened(tmp_path: Path):
     """The same rule as a manifest major from the future, and for the same reason.
 
     A reader that guesses at a shape it does not know writes damage, and this is
@@ -358,7 +358,7 @@ async def test_a_store_from_a_newer_plane_is_refused_rather_than_opened(tmp_path
     with pytest.raises(StateSchemaTooNew) as refusal:
         DisplayState(path).__enter__()
 
-    assert str(SCHEMA_VERSION) in str(refusal.value), "the refusal does not say which schema this plane understands"
+    assert str(SCHEMA_VERSION) in str(refusal.value), "the refusal does not say which schema the Player understands"
 
 
 async def test_a_store_written_by_a_player_that_read_major_1_still_opens_and_the_wall_carries_on(settings, tv, clock, publish):

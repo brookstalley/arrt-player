@@ -4,14 +4,14 @@ version: 1
 depends_on:
   - artifact: project-state
   - artifact: architecture
-last_validated: 2026-10-27
+last_validated: 2026-11-19
 ---
 
 # Observability Strategy — Arrt Player
 
 **What this covers.** What the Player says about itself, where it goes, and how
 an operator finds a failure from it. It describes the code as it stood on
-2026-10-27; every claim names the `file:symbol` it rests
+2026-11-19; every claim names the `file:symbol` it rests
 on.
 
 **Why it matters more here than usual.** The Player runs unattended and its only
@@ -120,13 +120,13 @@ on every occurrence because each is about a different work: `label.shrunk`,
 `label.name_wrapped`, `label.truncated`, `rotation.selected`, `label.drawn`.
 
 **The event inventory.** Derived, not remembered: an `ast` walk of every log call
-in `src/arrt_player` (event, level, enclosing function), plus the five places an
+in `src/arrt_player` (event, level, enclosing function), plus the places an
 event name is built rather than written: `client.Supervisor._keep_running`
-(`f"{event}_crashed"`, `f"{event}_ended"`, with `event` = `client.worker` or
-`client.label`), `wall.Wall.run` (`f"{name}.started/stopped/crashed"`, with
+(`f"{event}_crashed"`, `f"{event}_ended"`, `f"{event}_retire_failed"`, with
+`event` = `client.worker` or `client.label`), `wall.Wall.run` (`f"{name}.started/stopped/crashed"`, with
 `name` = `FrameDisplay.journal_name` `daemon` or `ScreenDisplay.journal_name`
 `screen`), and `programmes/schedule.py:Schedule._collect` (a variable set to one
-of three names). A grep for `"event": "` alone misses the built ones.
+of four names). A grep for `"event": "` alone misses the built ones.
 
 | Events | Level | Emitted by | Says |
 |---|---|---|---|
@@ -134,12 +134,13 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | `daemon.misconfigured` | ERROR | `__main__.main` | A `.env` value is missing or wrong; exit 2, also on stderr |
 | `client.started` / `client.stopped` | INFO | `client.Supervisor.run` | Up, with server URL, cache dir, Frame and panel settings (`ClientSettings.startup_lines`); down |
 | **Supervisor** | | | |
-| `client.wall_started` / `client.wall_stopped` | INFO | `Supervisor._start`, `_stop` | A wall assigned to an output, or taken away or moved |
+| `client.wall_started` / `client.wall_stopped` | INFO | `Supervisor._start`, `_stop` | A wall assigned to an output, or taken away or moved; `retired` is true when the document no longer places the wall on that output (its screen is then drawn black), false when the Player is stopping or the output is gone |
 | `client.wall_unplaceable` | ERROR | `Supervisor._unplaceable` | Assigned to an output this client lacks or that another wall holds, or a wall id that is not a plain name; once per (wall, output) |
 | `client.label_started` / `client.label_stopped` | INFO | `Supervisor._start_label`, `_stop_label` | A label output mapped, remapped or unmapped |
 | `client.label_unplaceable` | ERROR | `Supervisor._label_unplaceable` | Mapped to a label output this client lacks, or a second label on one output |
 | `client.worker_crashed` / `client.label_crashed` | ERROR (traceback) | `Supervisor._keep_running` | A worker raised; restarting after the backoff |
 | `client.worker_ended` / `client.label_ended` | ERROR | `Supervisor._keep_running` | A worker returned without being asked to |
+| `client.worker_retire_failed` / `client.label_retire_failed` | ERROR (traceback) | `Supervisor._keep_running` | A wall or label retired while its worker waited to restart was called once more to leave its output, and raised |
 | `client.identity_unreadable` / `client.identity_read` | WARNING / INFO | `client.FrameIdentity.refresh` | The Frame's device id could not be read, then could |
 | **Client routes** (`pull.ClientPull`) | | | |
 | `client.unreachable` / `client.reachable` | WARNING / INFO | `ClientPull._report_unreachable`, `fetch` | `GET /client` got no answer, a timeout or a 5xx |
@@ -153,10 +154,12 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | `pull.unreachable` / `pull.reachable` | WARNING / INFO | `Pull._report_unreachable`, `_report_reachable` | The feed route got no answer, a timeout or a 5xx |
 | `pull.refused` / `pull.accepted` | ERROR / INFO | `Pull._report_refused`, `_report_accepted` | 401 (token), 403 (not this client's wall), 404 at every major, or another status; once per status |
 | `pull.manifest_refused` / `pull.manifest_readable` | ERROR / INFO | `Pull._pull_manifest` | A feed the parser refuses; the cached one stays |
-| `pull.media_failing` / `pull.media_ok` | WARNING / INFO | `Pull._adopt_feed` | A master could not be fetched; the feed is held back |
-| `pull.work_skipped` | WARNING | `Pull._skip_once` | A master 404s or fails its hash; that work is skipped (once per hash) |
+| `pull.media_failing` / `pull.media_ok` | WARNING / INFO | `Pull._hold_or_adopt`, `_media_settled` | A master could not be fetched in a way that may clear; the feed already cached is kept for up to `hold_seconds` (600) |
+| `pull.hold_ended` | WARNING | `Pull._hold_or_adopt` | The hold ran out: the feed is cached without the masters still missing (`work_ids`) and with no ETag, and they are asked for again every poll; said once per episode |
+| `pull.work_skipped` | WARNING | `Pull._skip_once` | A master 404s, fails its hash, runs past the bytes its feed declares, or has no size declared; that work is skipped (once per hash) |
 | `pull.adopted` | INFO | `Pull._adopt_feed` | A new feed cached, with `works` and `media_held` |
-| `pull.heartbeat_refused` / `pull.heartbeat_ok` | WARNING / INFO | `Pull._forward_heartbeat` | The server refused the wall heartbeat (with `status`) |
+| `pull.heartbeat_refused` / `pull.heartbeat_ok` | WARNING / INFO | `Pull._heard` | The server refused the wall heartbeat with a 4xx (`status`); it is sent again only when it changes |
+| `pull.heartbeat_failed` | WARNING | `Pull._heard` | The server answered the wall heartbeat with a 5xx (`status`); it is sent again on the next poll. Ended by `pull.heartbeat_ok` |
 | `pull.crashed` | ERROR (traceback) | `__main__._pull_ended` | The pull raised; its wall's worker is ended to restart both |
 | **A wall's loop** | | | |
 | `daemon.started` / `daemon.stopped` / `daemon.crashed` | INFO / INFO / ERROR | `wall.Wall.run` (Frame) | A Frame wall loop started (with its settings), stopped, or raised |
@@ -168,12 +171,14 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | `manifest.absent`, `manifest.statable` / `manifest.unstatable`, `manifest.unreadable` | INFO, INFO / WARNING, WARNING | `Watcher.poll` | No cached feed yet; the file could not be stat'd or read |
 | `manifest.not_text`, `manifest.refused`, `manifest.version_refused` | ERROR | `Watcher.poll` | A cached feed that is not UTF-8, does not parse, or has a major this Player does not read |
 | `schedule.media_missing` | WARNING | `Schedule._ready` | A work's master is not in the cache yet |
-| `schedule.uncomposable`, `schedule.compose_write_failed`, `schedule.compose_failed` | WARNING | `Schedule._collect` | A work could not be composed for this display |
+| `schedule.uncomposable`, `schedule.compose_read_failed`, `schedule.compose_write_failed`, `schedule.compose_failed` | WARNING | `Schedule._collect` | A work could not be composed for this display; `compose_read_failed` is a master that could not be read for a reason that may clear (an errno), tried again |
+| `schedule.composed_damaged` | WARNING | `Schedule._intact` | A composed picture found empty, cut short or not a JPEG was removed, so the work is composed again |
 | `schedule.composed_removed`, `schedule.tidy_failed` / `schedule.tidy_recovered` | INFO, WARNING / INFO | `Schedule._remove_unwanted`, `_say_tidy_failed` | Old compositions removed, or could not be |
 | `compose.done` | INFO | `compose.compose` | A picture composed (`composed_path`) |
 | **The Frame** (`displays/frame.py:FrameDisplay`, `tv/samsung.py:SamsungTv`) | | | |
 | `tv.unavailable` / `tv.recovered` | WARNING / INFO | `FrameDisplay.went_away`, `answering` | The set cannot be reached; the wall holds |
 | `rotation.wall_not_ours` / `rotation.wall_returned` | INFO | `FrameDisplay.is_ours` | The set is not in art mode, so nothing is sent; then it is again |
+| `tv.writes_held` / `tv.writes_resumed` | INFO | `FrameDisplay._hold_the_writes`, `_write_went_through` | The seam refused an upload, removal, brightness change or slideshow switch-off (`TvNotOurs`, with the `verb`) because the set is lit and not showing art, or its power cannot be read; said once, then when a write goes through |
 | `display.power_unreadable` / `display.power_readable` | INFO | `FrameDisplay._screen_is_not_ours` | `PowerState` could not be read; `in_use` is reported |
 | `rotation.selected` | INFO | `FrameDisplay.show` | A work is on the wall, confirmed by the set (`tv_content_id`, `theme_id`) |
 | `rotation.wall_unchanged` / `rotation.wall_recovered` | WARNING / INFO | `FrameDisplay._report_wall_unchanged`, `show` | The set accepted a selection and displayed nothing (`art_mode`) |
@@ -191,6 +196,7 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`; in slideshow mode the `screen.brightness_*` events come from the slideshow's screen, with `wall_id` `slideshow`) | | | |
 | `screen.absent` / `screen.returned` | WARNING / INFO | `KmsOutput._gone`, `_draw` | No screen on the connector, then one (drawn at once) |
 | `screen.draw_failed` / `screen.draw_recovered` | WARNING / INFO | `ScreenDisplay.show` | The output refused a picture |
+| `screen.blanked` / `screen.blank_failed` | INFO / WARNING | `displays/screen.go_dark` | A wall that left an output (`wall_id`, `output`) had its screen drawn black, or the device refused and the screen keeps its last picture |
 | `screen.refresh_failed` / `screen.refresh_recovered` | WARNING / INFO | `ScreenDisplay._refresh` | The per-poll redraw failed |
 | `rotation.selected` | INFO | `ScreenDisplay.show` | A work drawn (`picture_path`) |
 | `screen.brightness_set` | INFO, or WARNING when `read_back` differs | `ScreenBrightness._said_set` | The screen's brightness set from the sun (`output`, `brightness`, `read_back`, `solar_angle`); written only when the value changes |
@@ -205,10 +211,15 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | `panel.close_failed` | WARNING | `EpaperSurface.close` | The panel's power-down raised |
 | `label.renderer_started` | INFO | `LabelRenderer.run` | A renderer captions a wall (`label_id`, `output`, `wall_id`) |
 | `label.server_unreachable` / `label.server_reachable` | WARNING / INFO | `LabelPull` | The label route got no answer, a timeout or a 5xx |
+| `label.id_unusable` | ERROR | `LabelPull.fetch` | The server named a label that is not a plain path component; this client never asks for it and its panel stays as it is |
+| `label.cache_unreadable` | WARNING | `LabelPull.cached` | The cached label document could not be read; the label starts blank until the server answers |
+| `label.cache_unwritable` / `label.cache_writable` | ERROR / INFO | `LabelPull` | The label document could not be cached or its stamp moved; a restart while the server is down starts blank. Then it could |
+| `label.cache_seeded` / `label.cache_other_wall` | INFO | `LabelRenderer._seed` | The renderer starts from the document cached when the server last answered (with the instant); or the cached document is for another wall and is not used |
 | `label.refused` / `label.accepted` | ERROR / INFO | `LabelPull.fetch` | The server refused the label (with `status`) |
 | `label.document_refused` / `label.document_readable` | ERROR / INFO | `LabelPull.fetch` | A label document this reader will not use |
 | `label.drawn` | INFO | `LabelPanel.draw` | The only positive label line: the panel captions a work |
 | `label.blanked`, `label.card`, `label.absent` | INFO | `LabelPanel.draw` | Blank on purpose (with `display_state`), the wall's card, or a work with no label text |
+| `label.close_abandoned` | WARNING | `LabelPanel.close` | A draw was still in the driver after the label budget when the panel was to be closed; the panel is left open |
 | `label.failed` / `label.recovered` | WARNING / INFO | `LabelPanel._would_not_take_it`, `draw` | A drawing did not reach the panel (refused, raised, still drawing, or over the 15 s budget) |
 | `label.unusable` | WARNING | `LabelPanel.draw` | The geometry leaves no usable area; once per episode |
 | `label.shrunk` | WARNING | `LabelPanel.draw` | Identifying facts set below the legibility floor (`floor_px`, `smallest_px`) |
@@ -216,10 +227,11 @@ of three names). A grep for `"event": "` alone misses the built ones.
 | `label.truncated` | INFO | `LabelPanel.draw` | Lines dropped for room (`dropped`) |
 | **The settings page** (`__main__`, `settings_ui/server.py`) | | | |
 | `daemon.setup_mode` | WARNING | `__main__.main` | The chosen mode is missing settings (`mode`, `missing`), so only the settings page runs |
-| `settings_page.listening` | INFO | `__main__.run_settings_page` | The page is up (bind, port, `setup_mode`); the setup link itself goes to stdout, never the journal |
+| `settings_page.listening` | INFO | `__main__.run_settings_page` | The page is up (bind, port, `setup_mode`); the setup link is printed to stdout, which the unit sends to the journal, and is not in this event |
 | `settings_page.unavailable` | ERROR | `__main__.run_settings_page` | The page cannot listen (address in use); the walls run on |
 | `settings_page.password_set`, `settings_page.password_changed` | INFO | `server._setup`, `_change_password` | The first password set from the setup link; a password changed |
-| `settings_page.login_refused`, `settings_page.password_refused` | WARNING | `server._login`, `_change_password` | A wrong password at sign-in; a wrong current password when changing it |
+| `settings_page.login_refused`, `settings_page.password_refused` | WARNING | `server._login`, `_change_password` | A wrong password at sign-in; a wrong current password when changing it. Each carries `remote`, the source address the throttle charges |
+| `settings_page.host_refused` | WARNING | `server._known_hosts` | A request for a name the page does not answer to was refused with a 421 before any page (`host`, `setting`: the `.env` key that lists more) |
 | `settings_page.saved` | INFO | `server._save` | Settings saved (`changed`: the keys, never the values); the Player restarts onto them |
 | `settings_page.write_failed` | ERROR | `server._wrote` | The settings file could not be written (full disk, permission) |
 | **Slideshow mode: the programme** (`__main__.run_slideshow`, `programmes/slideshow.py:Slideshow`) | | | |
@@ -270,9 +282,10 @@ their reader; Arrt § The Health Surface owns what it does with them.
 `heartbeat.INTERVAL_SECONDS` (60 s), and at once when the display state or the
 capabilities change. It is written on every path through `Wall.tick`, including
 a pass with no feed and a pass where the display was unreachable
-(`tests/test_heartbeat_wiring.py`). `pull.Pull._forward_heartbeat` POSTs it when
-the file and its `reported_at` change, and only after a feed poll that reached
-the server.
+(`tests/test_heartbeat_wiring.py`). `pull.Pull._heartbeats`, a loop of its own beside
+the manifest poll, POSTs it (`_forward_heartbeat`) every poll interval when the
+file and its `reported_at` have changed, while the last manifest poll reached
+the server, so a manifest backoff never delays it.
 
 | Key (`Health.document`) | What problem it shows |
 |---|---|
@@ -330,9 +343,9 @@ above is a hand-placed call. There is no layer 2.
   `label_renderer.LabelRenderer._show`. Because it is a `ContextVar`, it follows
   into `asyncio.to_thread` work, which copies the context. It is the one id that
   spans the Player and the server (Arrt § Correlation).
-- **`wall_id`** is an `extra` field, not bound. 24 of the 151 call sites
-  (2026-11-11) carry it by the same `ast` walk: 21 as a literal key, three through a spread dict
-  (`Supervisor._keep_running`'s `extra`, twice, and `Wall.run`'s
+- **`wall_id`** is an `extra` field, not bound. On 2026-11-19, 30 of the 174 call
+  sites carried it as a literal key by the same `ast` walk, and a few more
+  through a spread dict (`Supervisor._keep_running`'s `extra`, and `Wall.run`'s
   `start_lines()`). Which ones do not, and why that matters, is under
   Known gaps.
 - **`label_id`, `output`, `tv_content_id`, `status`, `server_url`** are carried
@@ -421,11 +434,11 @@ The `tools/` scripts drive hardware and are not observability tools.
   heartbeat POST to the double (`ServerDouble.receive_heartbeat`) is not
   validated. `tests/test_heartbeat_key.py` pins `reported_at` in both schemas.
 - **When the heartbeat is written** is held by `tests/test_heartbeat_wiring.py`.
-- **The event names are not pinned as a set.** 55 of the 114 names appear
-  nowhere in `tests/` as a quoted literal (checked by grepping each), among them
-  `client.started`, `client.wall_started`, every `pull.*` but `pull.crashed`,
-  and `label.drawn`'s siblings `label.renderer_started` and
-  `label.server_unreachable`. A test may still reach some through a message
+- **The event names are not pinned as a set.** On 2026-11-19, 67 of the 166
+  literal names appear nowhere in `tests/` as a quoted literal (checked by
+  grepping each), among them `client.wall_started`, `pull.unreachable`,
+  `pull.refused`, `pull.adopted`, and `label.drawn`'s siblings
+  `label.renderer_started` and `label.server_unreachable`. A test may still reach some through a message
   match or a built string; a rename of any of them is likely to pass the suite.
 - **On the Pi**, `deploy/README.md` § How to tell your own install worked is the
   operator's check, with the caveat below.
@@ -485,6 +498,6 @@ For a pull request on Arrt, not an edit here.
   `client.reachable` and `label.server_unreachable` / `label.server_reachable`.
   The row's "heartbeat's cache report" does not exist: no heartbeat key reports
   what the cache holds.
-- Arrt calls the Player "display" or "the display plane". This repo keeps that
-  name where it is an interface: the unit `display.service`, the journal
+- Arrt calls the Player "display" or "the display plane". This repo keeps
+  "display" where it is an interface: the unit `display.service`, the journal
   identifier `display`, and the `daemon.*` events of a Frame wall.

@@ -959,7 +959,7 @@ class TestTheNameLadder:
         museum with no individual maker records the culture in the maker slot
         (`museum-label-findings.md`), so the label leads with that. It is
         reachable anyway — the Met leaves both its maker fields empty — and a
-        WARNING channel this plane's observability calls load-bearing may not be
+        WARNING channel the Player's observability calls load-bearing may not be
         diluted by the case that gets there.
         """
         layout = lay_out(

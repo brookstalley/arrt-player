@@ -119,8 +119,8 @@ async def test_a_feed_whose_every_master_is_missing_selects_nothing_and_says_so_
 
 
 async def test_a_feed_that_can_show_nothing_warns_once_a_work_not_once_a_second(daemon: Wall, tv: FakeTv, publish, clock, caplog):
-    """journald rate-limits, and the lines it drops are the ERRORs that are this
-    plane's only failure channel: a missing master is said once per work per
+    """journald rate-limits, and the lines it drops are the ERRORs that are the
+    Player's only failure channel: a missing master is said once per work per
     feed, however long its slot lasts."""
     publish(["w1", "w2", "w3"], interval_seconds=60, media=False)
 
@@ -245,7 +245,7 @@ async def test_a_wall_that_displays_nothing_ends_the_pass_rather_than_trying_oth
 async def test_it_says_the_wall_is_not_changing_once_not_once_a_slot(daemon: Wall, tv: FakeTv, publish, clock, caplog):
     """A panel stays dark for hours. One line per slot is a hundred a night
     saying the one thing that has not changed, and journald drops what it
-    rate-limits — which would be the ERRORs this plane's only failure channel
+    rate-limits — which would be the ERRORs the Player's only failure channel
     carries."""
     publish(["w1", "w2"], interval_seconds=10)
     # Art mode stays *on*: a set that says it is showing art and then does not
@@ -390,7 +390,7 @@ async def test_the_wall_comes_back_the_moment_the_set_announces_art_mode(daemon:
 
 async def test_it_says_the_wall_is_not_ours_once_not_once_a_slot(daemon: Wall, tv: FakeTv, publish, clock, caplog):
     """Somebody watches television for hours. A line per attempt would bury the
-    ERRORs that are this plane's only failure channel."""
+    ERRORs that are the Player's only failure channel."""
     publish(["w1", "w2"], interval_seconds=10)
     tv.art_mode = "off"
 

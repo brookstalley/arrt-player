@@ -1,9 +1,9 @@
-"""The television, as the rest of this plane is allowed to see it.
+"""The television, as the rest of the Player is allowed to see it.
 
 **The interface exists because the client behind it is a liability.** The
 `samsungtvws` fork this product depends on is unowned, four months static, and
 carries a known defect in the verb that matters most; there is no maintained
-alternative offering the async art client this plane is built on. The mitigation
+alternative offering the async art client the Player is built on. The mitigation
 was never "switch upstreams" — it is keeping the television boundary small and
 behind a seam, so replacing the client is a swap rather than a rewrite.
 

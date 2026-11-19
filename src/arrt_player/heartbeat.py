@@ -1,10 +1,10 @@
-"""What this plane says about itself, for anyone who cares to look.
+"""What the Player says about itself, for anyone who cares to look.
 
 **What runs display → curation about a wall**, and deliberately not a
 dependency in either direction: this writes the file, the pull forwards it, and
 nothing here checks whether anybody read it. Curation being absent, or present and ignoring it, changes
-nothing here. That is what keeps the availability norm true — the display plane's
-ability to show art never depends on the curation plane being reachable — while
+nothing here. That is what keeps the availability norm true — the Player's
+ability to show art never depends on the server being reachable — while
 still giving a health surface something real to read.
 
 **Two names in this document are a contract rather than a preference, because the
@@ -13,7 +13,7 @@ per wall, so a health surface can name which wall is silent; the Player writes i
 in the wall's own cache and the server keeps what it is sent under the same name
 — and the instant is spelled `reported_at`. `arrt/src/arrt/programming/manifest/heartbeat.py` treats
 any other spelling as an unreadable heartbeat and says so — so a writer that
-called the field `timestamp` would produce a plane that looks *down* to curation
+called the field `timestamp` would produce a Player that looks *down* to curation
 while running perfectly. That is this product's defining failure mode
 manufactured by the mechanism built to detect it, which is why both names are
 imported from nowhere and written here as constants with this note attached.
@@ -47,8 +47,8 @@ from typing import Any, Final
 
 log = logging.getLogger(__name__)
 
-#: **One file per wall.** Not configurable: both planes name it, and a setting
-#: is a way for them to disagree. Which walls this client serves is the server's
+#: **One file per wall.** Not configurable: the Player and the server both name it,
+#: and a setting is a way for them to disagree. Which walls this client serves is the server's
 #: to say, and that is a different thing from what a wall's file is called.
 #:
 #: Per wall so that health can name which wall is silent. One shared file could
@@ -119,35 +119,35 @@ class DisplayReport:
 
 @dataclass(frozen=True, slots=True)
 class Health:
-    """This plane's own account of itself, as facts rather than a verdict.
+    """The Player's own account of itself, as facts rather than a verdict.
 
     **`last_error` is a string rather than an exception**, and it is whatever the
     daemon last found worth recording — it is not cleared by a good pass. A
     heartbeat that dropped the error the moment anything succeeded would report a
-    plane that is fine while it fails every other minute, which is the shape of
+    Player that is fine while it fails every other minute, which is the shape of
     failure this deployment is most likely to have.
     """
 
     #: The schema version of the manifest currently loaded, as `major.minor`, or
     #: None before one has been adopted. **The schema rather than a generation
     #: counter**, because that is the version display acts on: it refuses a major
-    #: it does not know, so this is the number that explains a plane sitting on an
+    #: it does not know, so this is the number that explains a Player sitting on an
     #: old manifest.
     manifest_schema: str | None = None
     #: The theme whose manifest is loaded.
     theme_id: str | None = None
-    #: The work the wall is showing, as this plane last confirmed it.
+    #: The work the wall is showing, as the Player last confirmed it.
     current_work_id: str | None = None
     #: What the set last announced, which is the set's own word rather than ours.
     announced_content_id: str | None = None
     #: Whether the television answered the last time it was asked.
     television_reachable: bool | None = None
-    #: Whether the set is in art mode, as far as this plane last saw.
+    #: Whether the set is in art mode, as far as the Player last saw.
     television_showing_art: bool | None = None
     #: Whether this device has a label surface at all. **A separate fact from the
     #: one below, because `null` there was carrying two meanings**: a device with
     #: no panel, and a device whose panel is fine but has not been asked to draw
-    #: yet. A freshly started plane read on curation's panel as a device with no
+    #: yet. A freshly started Player read on curation's panel as a device with no
     #: panel, which is a different deployment.
     has_label_surface: bool = False
     #: Whether the label surface accepted the last label it was given. None until
@@ -205,7 +205,7 @@ class Health:
 def path_in(root: Path, wall_id: str) -> Path:
     """Where one wall's heartbeat lives under a given directory.
 
-    The one place the template is filled in on this side, so this plane cannot
+    The one place the template is filled in on this side, so the Player cannot
     spell the name two ways — and so curation's copy of the template has exactly
     one thing to agree with.
     """
@@ -221,7 +221,7 @@ def write(root: Path, health: Health, *, wall_id: str, reported_at: datetime) ->
 
     The obvious one is the reader: curation polls this file on its own schedule,
     so a plain truncating write leaves a window in which it sees half a document
-    — which it correctly reports as an unreadable heartbeat, i.e. as this plane
+    — which it correctly reports as an unreadable heartbeat, i.e. as the Player
     being broken. `Path.replace` (an `os.replace`) is atomic within a filesystem, and the temp file is
     made in the same directory to guarantee that.
 

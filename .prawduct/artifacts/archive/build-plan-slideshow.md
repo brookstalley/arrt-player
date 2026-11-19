@@ -110,7 +110,7 @@ maintained: false
 - **One HDMI output in slideshow mode.** Both Pi 4 HDMI connectors are on one DRM card, and only one process can be its master (`kms.py` docstring). So one mpv can drive only one connector. The page lists the connected HDMI outputs and the owner picks one. Derived from the measured architecture: the owner's "one or more" is narrowed by it (confirmed by the owner, 2026-11-13), and only one screen is connected today.
 - **What mpv reports is not evidence of what is on screen.** mpv reported 0 drops while every commit failed. So `MpvOutput` treats mpv's own failure lines (`Failed to commit atomic request`, a VO that fails to start) as "not shown", logs them by name and restarts mpv. It never trusts the drop counter alone. (Learning: confirm a boundary library's success against the remote system's own state.)
 - **The cookie goes only to `www.reddit.com`.** Media are fetched without it. The cookie is write-only on the page and never logged or put in a repr.
-- **A post can name any URL, so a download must not be able to reach the LAN.** A post linking `http://192.168.1.1/…` would otherwise make the Player, which sits on the home LAN, fetch from the router. That is SSRF through a listing. So the downloader:
+- **A post can name any URL, so a download must not be able to reach the LAN.** A post linking a private address (the router's, say) would otherwise make the Player, which sits on the home LAN, fetch from the router. That is SSRF through a listing. So the downloader:
   - resolves each host and refuses loopback, private, link-local, multicast and reserved addresses, checking every redirect hop the same way;
   - follows at most 5 redirects;
   - never sends the Arrt server's address or token;

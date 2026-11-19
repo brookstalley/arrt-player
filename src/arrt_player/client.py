@@ -14,7 +14,7 @@ keyed on the output, and stops it when the mapping goes. A label's wall need not
 be one this client shows.
 
 **This module speaks no HTTP.** The two requests are made by `pull.py`, the one
-module the plane-isolation guard lets hold a client, and handed in by the entry
+module the isolation guard lets hold a client, and handed in by the entry
 point as a `ClientLink`. So is the worker itself: what runs a wall on the Frame
 names the television's library, and only the composition root may.
 

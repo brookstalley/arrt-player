@@ -4,7 +4,7 @@ version: 1
 depends_on:
   - artifact: product-brief
   - artifact: data-model
-last_validated: 2026-11-10
+last_validated: 2026-11-19
 ---
 
 # Security Model — Arrt Player
@@ -94,10 +94,15 @@ The Player authenticates outward to two peers, the server and the television, or
   on any other `TV_PORT` it uses plain `ws://` (`_is_ssl_connection` is
   `port == 8002`). The set's certificate is self-signed, so the Player does not
   know it is talking to the set it paired with.
-- **Kept out of the journal**: the library logs `New token %s` at INFO;
-  `logs.py:configure` floors the `samsungtvws` logger at WARNING
-  (`_TELEVISION_CLIENT_FLOOR`), held by
-  `tests/test_logs.py::test_a_token_logged_at_info_by_that_logger_is_not_emitted`.
+- **Kept out of the journal and the heartbeat**: the library logs `New token %s`
+  at INFO, and `websockets`, which carries the art channel, logs the request line
+  with the token in its URL at DEBUG; `logs.py:configure` floors both loggers at
+  WARNING (`_TELEVISION_LOGGERS`, `_TELEVISION_CLIENT_FLOOR`), held by
+  `tests/test_logs.py::test_a_token_logged_at_info_by_that_logger_is_not_emitted`
+  and its DEBUG sibling. A library failure that quotes the token (in the URL or
+  in a reply's `token` field) is written with the value withheld before it is
+  logged or kept as the wall's `last_error`, which the heartbeat carries to the
+  server (`tv/samsung.py:_TOKEN`, `_named`; `tests/test_samsung_client.py`).
   The startup line names the token's path, never its contents
   (`config.py:FrameSettings.frame_lines`).
 
@@ -111,7 +116,9 @@ sensitive as the token itself.
 
 - **First password needs the setup code.** `__main__.settings_page` mints one
   (`auth.new_setup_code`, 12 random bytes) only when no password is stored, and
-  prints it inside the page's address. It is spent before the new password is
+  prints it inside the page's address. That line goes to stdout, which the unit
+  sends to the journal (`StandardOutput=journal`), where the groups that already
+  administer the Pi can read it; the code is new at each start. It is spent before the new password is
   hashed, so two requests carrying it cannot both set one. `/setup` refuses without it
   (`tests/test_settings_ui.py::TestTheFirstRun`), refuses once a password is
   set, and clears it on use (`::test_setting_a_password_signs_you_in_and_spends_the_code`).
@@ -120,9 +127,14 @@ sensitive as the token itself.
   when the password is set, so a journal read afterwards grants nothing.
 - **The password** is kept as a salted scrypt hash in `$CACHE_DIR/.settings.json`
   (`auth.hash_password`, n=2^14, r=8), at least `auth.MINIMUM_PASSWORD_LENGTH`
-  characters. Wrong passwords are throttled per process, doubling to a minute
-  (`auth.Throttle`; `::test_wrong_passwords_are_throttled_and_the_right_one_waits_too`).
-  Each attempt is charged before its password is checked, so concurrent attempts
+  characters. Wrong passwords are throttled **per source address**, each address's
+  wait doubling to a minute, under a ceiling for all addresses together of 30
+  wrong in any 10 minutes (`auth.Throttle`, `CEILING_FAILURES`,
+  `CEILING_WINDOW_SECONDS`; `::test_wrong_passwords_are_throttled_and_the_right_one_waits_too`,
+  `::TestAGuesserCannotLockTheOwnerOut`). One throttle for the process would let a
+  guesser delay the owner's right password with wrong ones; per address, the
+  owner's is not the one slowed, and the ceiling bounds a guesser with many
+  addresses at the price of making every address wait. Each attempt is charged before its password is checked, so concurrent attempts
   cannot share one window (`::test_concurrent_wrong_passwords_share_one_window`),
   and scrypt runs on a thread, off the loop that drives the walls.
   To recover a forgotten one, delete `auth.password` from the file and restart.
@@ -130,9 +142,20 @@ sensitive as the token itself.
   `auth.session_secret`, stored with the password, so it survives a restart. It
   is HttpOnly, `SameSite=Strict` and lasts 30 days. Setting a password mints a
   new secret, which ends every older session (`TestTheCookie`).
+- **It answers only to its own names, which closes DNS rebinding.** A web page in
+  a browser on the LAN can point its own domain at this Player after loading, and
+  its requests then reach the page with an `Origin` and a `Host` that both name
+  the rebound domain, so comparing the one with the other passes them. A request
+  whose `Host` is not an IP address, `localhost`, this machine's own name,
+  `<name>.local`, the address the page is bound to or a name in `UI_ALLOWED_HOSTS`
+  is refused with a 421 before any page is served (`server._known_hosts`,
+  `settings_page.host_refused`; `::TestTheNamesItAnswersTo`). **Upgrading:** a name only the
+  router's DNS gives the Player (`<name>.lan`, say) is refused until it is listed
+  in `UI_ALLOWED_HOSTS`, and the refusal says so.
 - **Cross-site requests.** Every POST must carry an `Origin` equal to the page's
-  own (`server._same_origin_posts`); one with none or another is refused before
-  the handler runs (`TestWhatThePageRefuses`). Every response sets a CSP that
+  own, or a name `UI_ALLOWED_HOSTS` lists (`server._same_origin_posts`,
+  `origin_allowed`); one with none or another is refused before
+  the handler runs (`TestWhatThePageRefuses`, `::TestWhichOriginsMayPost`). Every response sets a CSP that
   loads its stylesheet and typefaces from the page's own `/static` and nothing
   else, with no inline style and no script (`tests/test_settings_ui_style.py`).
   `/static` is served without a session, since the login page uses it too; it
@@ -215,9 +238,10 @@ reach outside the cache or onto another host with the token.
 | Input | Checked by | Refused when |
 |---|---|---|
 | Client document | `client.py:parse_client_document` | Not JSON, not an object, no `client_id`/`name`, `walls` or `labels` not a list, any entry missing a key. Refused whole; walls keep running. |
-| Wall id from the document | `config.py:ClientSettings.wall` (`_PLAIN_COMPONENT`) | Not one plain path component: `..`, `/`, a leading dot. The wall is not started. |
+| Wall id from the document | `config.py:ClientSettings.wall` (`PLAIN_COMPONENT`) | Not one plain path component: `..`, `/`, a leading dot; or a name the cache directory reserves for its own files (derived from the constants that name them). The wall is not started. |
 | Manifest (feed) | `manifest.py:parse`, `_feed`, `_work`, `_slot`, `_scene`, `_instant` | Wrong major, malformed, a rule of Arrt's `player-contract.md` § Rules a schema cannot state broken, an instant without an offset, a media hash not 64 lowercase hex. Last good feed kept. |
-| Master bytes | `pull.py:Pull._cache_media` | SHA-256 does not match the feed. Discarded, never written. |
+| Master bytes | `pull.py:Pull._cache_media`, `_stream_to` | SHA-256 does not match the feed, or the body runs past the bytes the feed declares for it, or the feed declares none. Discarded or not asked for; a master is never held whole in memory. |
+| Client and label documents | `pull.py:DOCUMENT_MAX_BYTES` | Larger than 1 MiB. Refused whole. |
 | Master image | `compose.py:compose` | Pillow cannot decode it, or its decompression-bomb guard fires (`Image.DecompressionBombError` is caught). |
 | Label document | `label_rule.py:parse_label_document` | Refused whole; last good one kept. |
 | Label text | `panel/pango.py` (`set_text`, never `set_markup`) | Never parsed as markup; a tag is drawn as characters. No `set_markup` or `parse_markup` in `src/` or `tools/` (searched 2026-10-27). |
@@ -245,7 +269,8 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
 
 - **It never selects a picture on a set that is not in art mode.**
   `displays/frame.py:FrameDisplay.is_ours` reads `get_artmode` before every
-  selection, and `programmes/schedule.py:Schedule.step` asks it before `show`.
+  selection, `programmes/schedule.py:Schedule.step` asks it before `show`, and
+  the seam reads it again immediately before the send (`tv/client.py:TvClient._permit`).
   Held by `tests/test_frame_wall.py::test_a_television_somebody_is_watching_is_left_alone`
   and `::test_a_republished_schedule_is_not_put_on_a_television_somebody_is_watching`.
 - **Shipped code presses no key.** No `send_key`, `KEY_`, `shortcuts`,
@@ -257,12 +282,16 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   that the daemon's power guard arrives with Player power control.
   `tools/power_probe.py` presses power and refuses to without
   `--i-am-at-the-set` (`tests/test_power_probe.py`).
-- **Other verbs are not behind the art-mode gate.** Connecting, switching off the
-  set's own slideshow (once, `FrameDisplay._connected`), listing, uploading,
-  deleting orphans and setting brightness run in `FrameDisplay.prepare` and
-  `after` whatever the set is showing. Upload, delete and slideshow were measured
-  invisible in the dark state; in the television state they were "not tried"
-  (`samsung-tv-state-findings.md` § What works in each state).
+- **Every other write is behind the same read.** Uploading, deleting, setting
+  brightness and switching off the set's own slideshow (once,
+  `FrameDisplay._connected`) are sent only when `get_artmode` says on, or says off
+  while `PowerState` says `standby`; they are held when the set is lit and not in
+  art mode, and whenever `PowerState` cannot be read (`tv.client.WRITES`,
+  `TvNotOurs`). Upload, delete and slideshow were measured invisible in the dark
+  state; in the television state they were "not tried", so they are held there
+  (`samsung-tv-state-findings.md` § What works in each state). Connecting and
+  listing are reads and are not held. Whether a held write would have disturbed a
+  programme is unmeasured, and the gate does not find out.
 - **It deletes from the set every user upload it cannot account for.**
   `FrameDisplay._remove_orphans` removes every content id in `MY-C0002`
   (`tv/client.py:UPLOADED_CATEGORY`, "my-pictures") that no row of this wall's
@@ -299,10 +328,15 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   `SERVER_URL` is logged at start (`ClientSettings.startup_lines`), so
   credentials written into it as userinfo would be logged too. The TV token: see
   Authentication.
-- **The repository is public.** No addresses, hostnames or usernames in tracked
-  files (`tests/test_repository.py::test_no_source_file_carries_a_deployment_value`,
+- **The repository is public.** No addresses, hostnames or usernames in any file
+  the repository can commit, documents, `deploy/` and `.prawduct/` included
+  (`tests/test_repository.py::test_no_source_file_carries_a_deployment_value`,
+  `::test_no_file_in_the_working_tree_carries_a_deployment_value`,
   `::test_no_tracked_file_carries_this_machines_deployment_values`, which match
-  shapes, not values).
+  shapes, not values): private, CGNAT, link-local and unique-local addresses,
+  home-directory paths, `.local` and `.lan` names beyond the three the product's
+  own examples use, and `user@host` logins. A hit that is recorded rather than fixed
+  is listed with its reason in the test's `_ACCEPTED_RESIDUE`.
 - **Retention.** The journal is volatile and bounded
   (`deploy/journald.conf.d/10-bound-the-journal.conf`). The cache keeps a retired
   wall's directory indefinitely (`data-model.md` § The cache).
@@ -316,13 +350,15 @@ a hostile or broken peer on the LAN can do, and what bounds it:
 |---|---|---|
 | A server, or anything holding the client token | Choose what hangs on this client's walls; forge nothing on other clients | Arrt § Inventory; the Player shows only what the feed names |
 | A server | Point a master at any URL the Player will GET | No token sent off-origin; bytes discarded unless the hash matches; GET only |
-| A server | Send a very large master | `aiohttp.ClientTimeout(total=60)` per request (`Pull.run`); `response.read()` has no size cap |
-| A server | Name a wall id that is a path | `_PLAIN_COMPONENT` |
+| A server | Send a very large master | Stopped at the bytes the feed declares for it, streamed to disk; 30 s without a byte ends it (`Pull._cache_media`, `_stream_to`, `_MEDIA_TIMEOUT`). The manifest itself is not capped |
+| A server | Send a very large client or label document | Read up to 1 MiB (`pull.DOCUMENT_MAX_BYTES`) |
+| A server | Name a wall id that is a path, or one a file of the cache is named | `PLAIN_COMPONENT`, and the reserved names (`WallIdUnusable`) |
 | Anything on the LAN | Impersonate the television (no certificate check) and receive uploads | The LAN boundary; the uploads are public artworks |
 | Anything on the LAN with the TV token | Drive the set | Arrt § Inventory ("LAN-scoped") |
 | Anything on the LAN | Reach the settings page before its owner, and set its password | The setup code, printed at start and spent on use |
-| Anything on the LAN | Guess the page's password | Length floor; a throttle doubling to a minute per attempt |
+| Anything on the LAN | Guess the page's password | Length floor; a throttle per source address doubling to a minute per attempt, under a ceiling of 30 wrong in 10 minutes for all addresses |
 | A page elsewhere in the owner's browser | Post a form to the settings page | `Origin` check on every POST; `SameSite=Strict` cookie |
+| A page elsewhere in the owner's browser | Rebind its own name to the Player's address and use the page as same-origin | A `Host` that is not one of the page's names is refused with a 421 before any page (`server._known_hosts`) |
 | Anything on the LAN that sees the owner's traffic | Read the password or the cookie off the wire | Not bounded: plain HTTP, as for the server (Arrt § Trust Boundary) |
 | Whoever posts in the slideshow's listing | Make the Player fetch a LAN address (SSRF through a listing) | Every host, and every redirect hop, resolved and refused unless public, in the resolver aiohttp connects through so a name cannot change between check and connect; at most 5 redirects (`fetch.PublicOnlyResolver`, `_check_target`; `tests/test_fetch.py`) |
 | Whoever posts in the slideshow's listing | Send something huge or something that is not media | 200 MB a file, the cache capped at 2 GB, and the bytes, not the header, decide whether it is a picture or a clip (`fetch.MAX_FILE_BYTES`, `cache.CAP_BYTES`, `fetch.sniff`) |
@@ -335,13 +371,39 @@ Runs as the unprivileged `tvpi` user and group, with `spi gpio video` added for
 the e-paper panel and `/dev/dri`, `render` for the GPU's render node that mpv
 draws through in slideshow mode, and `i2c` for a screen's DDC/CI bus
 (`tests/test_deploy_unit.py` checks them). It refuses to start if `.env` is missing
-(un-prefixed `EnvironmentFile=`). It sets `UMask=0077` (2026-11-11), so every
-file the Player creates is `tvpi`'s alone. Otherwise it names no systemd
-sandboxing: no `NoNewPrivileges=`, `ProtectSystem=`, `ProtectHome=`,
-`PrivateTmp=`, `ReadWritePaths=` or `CapabilityBoundingSet=` (read 2026-11-11).
-`tests/test_deploy_unit.py` checks the environment file, the restart policy, the
-absolute interpreter path, no home-directory path, the stop timeout and the
-umask, and no other hardening.
+(un-prefixed `EnvironmentFile=`). It sets `UMask=0077`, so every
+file the Player creates is `tvpi`'s alone.
+
+- **Frozen.** `ExecStart` is `uv run --frozen --no-dev --group raster --group epaper`:
+  a start takes the lockfile as it is and never resolves over the network, and
+  the dev group stays off the Pi (`test_the_unit_starts_frozen_and_without_the_dev_tools`).
+- **Bounded in memory.** `MemoryHigh=60%` and `MemoryMax=75%` of the Pi's RAM, so
+  an exhausted Pi loses the Player and not sshd (`test_the_unit_bounds_its_memory_below_the_pis`).
+- **Sandboxed as far as `tvpi` owning the checkout allows.** `NoNewPrivileges=yes`,
+  `PrivateTmp=yes`, `ProtectSystem=full` (`/usr`, `/boot`, `/efi` and `/etc`
+  read-only), `ProtectHome=yes` (`/home`, `/root` and `/run/user` empty to the
+  Player) and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`. The
+  checkout, venv and `.env` are `tvpi`'s and `uv run` syncs the venv at start, so
+  the code directory stays writable: **`ProtectSystem=strict` and root-owned code
+  wait for the owner's ruling.** Nothing sets `PrivateDevices=`, `DevicePolicy=`
+  or `ProtectKernelModules=`, because the display card, the render node, SPI,
+  GPIO and the DDC bus are reached through the groups above
+  (`test_the_unit_is_sandboxed_as_far_as_tvpi_owning_the_checkout_allows`,
+  `test_the_sandbox_leaves_the_devices_the_walls_draw_through`,
+  `test_the_directives_the_sandbox_must_not_move_are_as_they_were`).
+- **mpv starts with only `PATH`, `HOME`, `XDG_CACHE_HOME`, `LANG` and `LC_ALL`**
+  (`mpv.MPV_ENVIRONMENT`), so no token, cookie or other `.env` value reaches the
+  process that decodes files strangers posted. **mpv still runs as `tvpi`**, which
+  can read `.env`, the settings file and the token file; the environment is not
+  the only door, and closing the others waits on the same ruling.
+- **Not yet run under systemd.** Whether the hardened unit starts, whether it still
+  draws on the screen, the label and the DDC bus, whether mpv draws with the
+  reduced environment, and whether the kernel enforces the memory bound are the
+  operator's checks on the Pi (the runbook's steps 9a and 14a).
+
+`tests/test_deploy_unit.py` also checks the environment file, the restart
+policy, the absolute interpreter path, no home-directory path and the stop
+timeout.
 
 ### Supply chain
 

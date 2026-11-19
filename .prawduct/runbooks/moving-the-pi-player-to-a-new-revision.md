@@ -140,6 +140,28 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
    *Why `sudo`: `.env` is readable by `tvpi` and root only.*
 
+7b. **IF step 2 showed `deploy/README.md` § Two things that can stop an
+    upgrade**, check that `.env` holds none of the zero intervals it names:
+
+        sudo grep -nEi '^[A-Z_]+_SECONDS=["'"'"']?(0+(\.0*)?|-.*|nan|inf.*)["'"'"']?[[:space:]]*$' /opt/arrt-player/.env
+
+    **Expected:** nothing printed.
+    **If it prints a line:** set that key to the number of seconds meant, or
+    delete it for the default, with `sudoedit` as in step 7. *Why: the Player
+    refuses to start (exit 2, `daemon.misconfigured` naming the key) with a
+    `*_SECONDS` of 0, below 0, `nan` or `inf`, and `Restart=always` then tries
+    again every 5 s with every wall dark.*
+
+7c. **IF step 2 showed that section and you open the settings page by a name** that is not an IP address, not
+    `localhost`, not the Pi's own name and not `<name>.local` (a router's
+    `<name>.lan`, or a reverse proxy's name): list it in `.env`.
+
+        sudoedit /opt/arrt-player/.env
+
+    Add `UI_ALLOWED_HOSTS=<name>`, several comma-separated, names only. *Why:
+    the page refuses any other name with a 421 before any page, and the journal
+    says `settings_page.host_refused`.*
+
 7a. Check the system packages the Player runs beside it:
 
         mpv --version | head -1
