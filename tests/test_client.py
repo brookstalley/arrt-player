@@ -1305,6 +1305,11 @@ WALL_EVENTS = frozenset(
         "binding.uploaded",
         "binding.upload_failed",
         "binding.orphaned",
+        # Chunk 06: the Frame's retirement, in the same pass as its orphan sweep,
+        # and the store's feed count, read by the store the wall's worker opens.
+        "binding.retired",
+        "binding.retirement_unconfirmed",
+        "store.feed_time_unreadable",
         "tv.orphans_removed",
         "tv.orphan_removal_unconfirmed",
         "tv.removal_incomplete",
@@ -1390,6 +1395,8 @@ PROCESS_EVENTS = frozenset(
     {
         "daemon.misconfigured",
         "daemon.setup_mode",
+        # Chunk 05: said once at start, before the supervisor runs any wall.
+        "files.drawing",
         "client.started",
         "client.stopped",
         "client.identity_unreadable",
