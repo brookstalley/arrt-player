@@ -46,12 +46,13 @@ from `CACHE_DIR` and a wall id, never configured
 | `.client.json` | `pull.py:ClientPull.fetch` | The last `GET /client` answer that `client.py:parse_client_document` accepted, as the server's text. Read at start by `ClientPull.cached`, so a restart with the server down starts the walls it last knew (`client.py:Supervisor.run`). |
 | `.client.etag` | `pull.py:ClientPull.fetch` | The ETag served with it. Removed before a new document is written, and written again only if the server served one, so it never sits beside a document it does not describe, even after a crash between the writes. Sent only while `.client.json` exists (`ClientPull._cached_etag`). |
 | `token_file` | the `samsungtvws` library, not the Player | The Frame's pairing token, at this path only when `TV_ADDRESS` is set and `TV_TOKEN_FILE` is not (`config.py:_frame`). See `security-model.md` § To the television: the pairing token. |
-| `<wall id>/` | `__main__.py:run_frame_wall`, `run_screen_wall` (mkdir) | One wall. `config.py:ClientSettings.wall` refuses an id that is not one plain path component (`_PLAIN_COMPONENT`, `WallIdUnusable`). A leading dot is refused, which keeps the two `.client.*` files apart from every wall directory. |
-| `<wall id>/manifest.json` | `pull.py:Pull._adopt_feed` | The last feed that `manifest.py:parse` accepted, re-serialised (`json.dumps(document, indent=2)`), not the server's bytes. Written only after every work's media is cached or answered for. Read by `manifest.py:Watcher`. |
-| `<wall id>/manifest.etag` | `pull.py:Pull._adopt_feed` | The ETag served with the feed. Removed before a new feed is written, and written again only if the server served one (2026-11-11, #4: it used to survive an ETag-less adoption, and could then get a 304 for a feed the server had gone back to). Sent only while `manifest.json` exists (`Pull._cached_etag`). |
-| `<wall id>/media/sha256-<hex>` | `pull.py:Pull._cache_media` | One presentation master, named by the SHA-256 of its bytes (`manifest.py:media_name`). Written only when `hashlib.sha256(data)` equals the feed's `media.sha256`. After each adoption, `Pull._evict` removes every file that neither the new feed nor the one it replaced names. |
-| `<wall id>/composed/<key>.jpg` | `compose.py:compose`, driven by `programmes/schedule.py:Schedule` | Each work drawn for this wall's display geometry and mat, named by `compose.py:composition_key`. Pruned by `Schedule._tidy`. Never leaves the device (Arrt's `data-model.md` § Direction, "Derived artifacts are regenerated, never transported"). |
-| `<wall id>/display-heartbeat-<wall id>.json` | `heartbeat.py:write`, called from the wall loop | The wall's heartbeat (`heartbeat.py:Health.document`), rewritten about every 60 s (`heartbeat.py:INTERVAL_SECONDS`) and sooner on a display-state change (`wall.py:DisplayRecord`). `pull.py:Pull._forward_heartbeat` POSTs it when it changes. |
+| `<wall id>/` | `__main__.py:run_frame_wall`, `run_screen_wall` (mkdir) | One wall. `config.py:ClientSettings.wall` refuses an id that is not one plain path component (`PLAIN_COMPONENT`, `WallIdUnusable`). A leading dot is refused, which keeps the two `.client.*` files apart from every wall directory; so is any other name the cache directory reserves, derived from the constants that name those files. |
+| `<wall id>/manifest.json` | `pull.py:Pull._cache_feed` | The last feed that `manifest.py:parse` accepted, re-serialised (`json.dumps(document, indent=2)`), not the server's bytes. Written only after every work's media is cached or answered for, or after a master that keeps failing has been waited for `MEDIA_HOLD_SECONDS`, when it is written without that master (`Pull._hold_or_adopt`). Read by `manifest.py:Watcher`. |
+| `<wall id>/manifest.etag` | `pull.py:Pull._cache_feed` | The ETag served with the feed. Removed before a new feed is written, and written again only if the server served one and every master is in hand: a feed cached after the hold ran out has none, so the next poll is answered whole and asks for the missing masters again. Sent only while `manifest.json` exists **and the watcher's own parser reads it** (`Pull._cached_etag`), so a torn or hand-edited manifest is replaced rather than vouched for with a 304. |
+| `<wall id>/media/sha256-<hex>` | `pull.py:Pull._cache_media` | One presentation master, named by the SHA-256 of its bytes (`manifest.py:media_name`). Streamed to a temporary file beside it and renamed only when the SHA-256 of what was written equals the feed's `media.sha256` and the body did not run past the bytes the feed declares. After each adoption, `Pull._evict` removes every file that neither the new feed nor the one it replaced names. |
+| `<wall id>/composed/<key>.jpg` | `compose.py:compose`, driven by `programmes/schedule.py:Schedule` | Each work drawn for this wall's display geometry and mat, named by `compose.py:composition_key`, flushed to disk before it takes its name. One found on disk that is not a whole JPEG (empty, cut short, zero-filled) is removed and composed again, each file read once per size and time (`Schedule._intact`, `compose.is_intact`). Pruned by `Schedule._tidy`. Never leaves the device (Arrt's `data-model.md` § Direction, "Derived artifacts are regenerated, never transported"). |
+| `.labels/<label id>.json` | `pull.py:LabelPull` | The last label document the server sent for each label this client renders and this reader accepted. Its modification time is the instant the server last answered for it, moved forward at most once a minute (`LABEL_ANSWER_STAMP_SECONDS`). The ETag is not kept, so a restart asks for the whole document. Read at start by `LabelPull.cached`; one that cannot be read is treated as absent. A leading dot keeps it apart from every wall directory. |
+| `<wall id>/display-heartbeat-<wall id>.json` | `heartbeat.py:write`, called from the wall loop | The wall's heartbeat (`heartbeat.py:Health.document`), rewritten about every 60 s (`heartbeat.py:INTERVAL_SECONDS`) and sooner on a display-state change (`wall.py:DisplayRecord`). `pull.py:Pull._heartbeats` POSTs it (`_forward_heartbeat`) when it changes. |
 | `<wall id>/display-state.sqlite` (+ `-wal`, `-shm`) | `state/store.py:DisplayState` | Frame walls only (`config.py:WallSettings.state_path`, opened in `__main__.py:run_frame_wall`). See `DisplayState` below. |
 
 **Every cache write is temp-then-rename with `fsync`**: `pull.py:_write_atomically`
@@ -123,6 +124,11 @@ exported variable). `.env.example` documents every key. The unit loads
 | Retired | `WALL_ID`, `WALL_TOKEN`, `MANIFEST_SOURCE` | `RETIRED_SETTINGS` | Any of them set stops the start with a `ConfigError` naming its replacement. |
 
 A typed value that does not parse is refused, never defaulted (`_int`, `_float`).
+A number that is `nan` or infinite is refused, and so is any `*_SECONDS` interval or
+timeout at zero or below (`_seconds`): a zero is a loop that never waits, not "as
+fast as possible". `LATITUDE` and `LONGITUDE` must lie in range. `UI_ALLOWED_HOSTS`
+(`UiSettings.allowed_hosts`) lists the names the settings page answers to beyond
+its own.
 A `ConfigError` exits with status 2 and one line on stderr (`__main__.py:main`).
 
 `WallSettings` and `Settings` (a Frame wall: `WallSettings` plus `FrameSettings`)
@@ -134,11 +140,11 @@ Lost on restart by design; each is rebuilt from the cache or the server.
 
 | Holder | What | Source |
 |---|---|---|
-| `client.py:Supervisor` | Running wall workers keyed by wall id (`_running`), label renderers keyed by label output name (`_labels`), workers still stopping (`_stopping`) | `client.py:Supervisor.reconcile`, `_reconcile_labels` |
+| `client.py:Supervisor` | Running wall workers keyed by wall id (`_running`), label renderers keyed by label output name (`_labels`), workers still stopping (`_stopping`), the last client document and the outputs the walls were matched against (`_document`, `_reconciled_outputs`) | `client.py:Supervisor.reconcile`, `_reconcile_labels` |
 | `client.py:FrameIdentity` | The Frame's `device.duid`, once read; never read again after | `tv/samsung.py:SamsungTv.read_identity` |
 | `manifest.py:Watcher` | The last good `Feed` and the file stamp `(st_mtime_ns, st_size)` last read | `Watcher.poll` |
-| `pull.py:LabelPull` | The label document's ETag; not persisted, so a restarted renderer fetches the whole document | `LabelPull.fetch` |
-| `label_renderer.py:LabelRenderer` | The last accepted label document and the drawing on the panel | `LabelRenderer.tick` |
+| `pull.py:LabelPull` | The label document's ETag; not persisted, so a restarted renderer fetches the whole document. The document itself is cached (`.labels/`) | `LabelPull.fetch` |
+| `label_renderer.py:LabelRenderer` | The last accepted label document (the cached one until the server answers), the drawing on the panel, and the monotonic time of the server's last answer, which the offline hold runs from | `LabelRenderer.tick`, `_seed` |
 | `displays/frame.py:FrameDisplay` | `_showing_art`, `_wall_content_id`, the set's last announcement, retry ladders, whether reconciliation is owed | `FrameDisplay.__init__` |
 
 ## Relationships
@@ -180,7 +186,17 @@ Each machine below is one the code holds in a type or a field, not inferred.
   (`RESTART_MIN_SECONDS`, `RESTART_MAX_SECONDS`); a run longer than the ceiling
   resets the ladder. Then **running** again.
 - **running** → **stopping** → *absent*: the wall left the document, or moved to
-  another output (`Supervisor._stop`). A move is a stop and a fresh start.
+  another output (`Supervisor._stop`). A move is a stop and a fresh start. The stop
+  is **retired** when the document no longer places the wall on the output its
+  worker runs on (`client.WallStop.retire`), and an HDMI wall then draws its
+  screen black on the way out (`displays/screen.go_dark`); it is merely **stopped**
+  when the Player is stopping, when the output has left this client, or when the
+  document still places the wall there and another wall is drawn on it, and the
+  screen is left as it is. A wall retired while its worker waits to restart is
+  called once more, already stopped, to leave (`_keep_running`).
+- The walls are matched to the last document again whenever this client's
+  outputs differ from the ones they were last matched against, so a connector
+  that appears or goes is acted on although the server answers 304.
 - *absent* → **unplaceable**: no such output, output already claimed, or
   `WallIdUnusable`. Logged once per (wall, output) (`_unplaceable`).
 - Any → **stopping**: SIGTERM or SIGINT (`__main__.py:_run`); `Supervisor.stop_all`
@@ -202,12 +218,17 @@ One poll ends in one of three outcomes:
 
 | Outcome | When | Next |
 |---|---|---|
-| `ANSWERED` | 200 adopted or refused as unreadable, 304, or a 4xx refusal | Heartbeat forwarded; backoff reset to 2 s; wait `poll_interval_seconds`. |
-| `MEDIA_FAILING` | A master returned a non-200, non-404 status or a transport error | Heartbeat forwarded; manifest not written; backoff doubles. |
+| `ANSWERED` | 200 adopted or refused as unreadable, 304, or a 4xx refusal | Backoff reset to 2 s; wait `poll_interval_seconds`. |
+| `MEDIA_FAILING` | A master returned a non-200, non-404 status or a transport error | Manifest not written until `MEDIA_HOLD_SECONDS` have passed since the first failure of the episode, then written without the missing masters and with no ETag; backoff doubles. |
 | `UNREACHABLE` | Transport error, timeout or 5xx on the manifest | No heartbeat; backoff 2 s doubling to 60 s (`BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS`). |
 
-A master that answers 404 or fails its hash is skipped, not retried this feed
-(`Pull._cache_media`, `_skip_once`), and the feed is still adopted.
+The heartbeat is forwarded by a loop of its own (`Pull._heartbeats`) at the poll
+interval, whenever the last manifest poll was answered, whatever the manifest
+poll's backoff is doing.
+
+A master that answers 404, fails its hash, runs past the bytes the feed declares,
+or has no declared size is skipped, not retried this feed (`Pull._cache_media`,
+`_skip_once`), and the feed is still adopted.
 
 ### Manifest adoption (`manifest.py:Watcher.poll`)
 
@@ -272,9 +293,10 @@ What the code enforces, and by what.
 
 | Constraint | Enforced by |
 |---|---|
-| A wall id names one plain directory under `CACHE_DIR` | `config.py:_PLAIN_COMPONENT` in `ClientSettings.wall` |
+| A wall id names one plain directory under `CACHE_DIR`, and no name the cache reserves | `config.py:PLAIN_COMPONENT` in `ClientSettings.wall` |
 | `CACHE_DIR` and `TV_TOKEN_FILE` are absolute | `config.py:_absolute` |
-| A cached master's bytes match its name | `pull.py:Pull._cache_media` (SHA-256 before write) |
+| A cached master's bytes match its name | `pull.py:Pull._cache_media` (SHA-256 of the streamed bytes before the rename) |
+| A file under a composed picture's final name is a whole JPEG | `programmes/schedule.py:Schedule._intact` (a damaged one is removed), `compose.py:is_intact` |
 | `manifest.json` is always a document `manifest.parse` accepts | `pull.py:Pull._pull_manifest` parses before `_adopt_feed` writes |
 | `.client.json` is always a document `parse_client_document` accepts | `pull.py:ClientPull.fetch` parses before writing |
 | A feed names no work missing from `works`; slots ordered, non-overlapping, inside a whole-day horizon; instants carry an offset | `manifest.py:_feed`, `_instant` (Arrt's `player-contract.md` § Rules a schema cannot state, § Time) |
@@ -302,9 +324,8 @@ Recorded, not fixed; Arrt's artifacts are changed on Arrt.
   `artwork_id` is `UNIQUE` within the file, and the per-wall scope comes from one
   file per wall directory (`config.py:WallSettings.state_path`). Same effect,
   different mechanism.
-- **Arrt § TvBinding calls it "display plane only"**, and `state/store.py`'s and
-  `manifest.py`'s docstrings still say "display plane" and "curation plane". The
-  Player is a separate repository and a client; there are no planes in it.
+- **Arrt § TvBinding calls it "display plane only".** The Player is a separate
+  repository and a client, and its code says "the Player" and "the server".
 - **Arrt's `data-model.md` § Player observation says a heartbeat "also carries
   cache state".** `heartbeat.py:Health.document` carries no cache-state field.
   That section is under "Planned entities … not built", so this may be an
