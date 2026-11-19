@@ -343,8 +343,7 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   Authentication.
 - **The repository is public.** No addresses, hostnames or usernames in any file
   the repository can commit, documents, `deploy/` and `.prawduct/` included
-  (`tests/test_repository.py::test_no_source_file_carries_a_deployment_value`,
-  `::test_no_file_in_the_working_tree_carries_a_deployment_value`,
+  (`tests/test_repository.py::test_no_file_in_the_working_tree_carries_a_deployment_value`,
   `::test_no_tracked_file_carries_this_machines_deployment_values`, which match
   shapes, not values): private, CGNAT, link-local and unique-local addresses,
   home-directory paths, `.local` and `.lan` names beyond the three the product's
