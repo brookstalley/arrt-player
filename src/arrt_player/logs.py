@@ -19,6 +19,15 @@ through every call site that might log is a discipline, and one forgotten call
 site defeats a discipline — the lines that go missing that way are the ones
 logged from inside a failure, which are the ones worth having.
 
+**`wall_id` and `label_id` are bound the same way, for the same reason.** One
+Player drives several walls and labels in one process, and the journal is its
+only failure channel, so a line that does not say which wall it is about cannot
+be acted on. The supervisor binds a wall's id around everything its worker runs
+(`wall_context`), and a label's id and the wall it captions around everything
+its renderer runs (`label_context`); every line logged three calls deep inside
+— a pull, a draw thread, the television's reader task — carries them. A field
+the call site passes itself is never overwritten.
+
 Deliberately a sibling of the server's module of the same name rather
 than a shared one: the Player and the server share no code by ratified norm, and this file
 is the cheapest possible thing to keep in two places.
@@ -37,6 +46,21 @@ from typing import Any, Final
 #: television client run as tasks on one thread, and a thread local would leak
 #: one work's id onto another's lines.
 _WORK_ID: ContextVar[str | None] = ContextVar("display_work_id", default=None)
+
+#: The wall whose worker is running, and the label whose renderer is, if any. A
+#: task copies the context it is created in and `asyncio.to_thread` copies the
+#: caller's, so each worker's tasks and threads see its own and no other's.
+_WALL_ID: ContextVar[str | None] = ContextVar("display_wall_id", default=None)
+_LABEL_ID: ContextVar[str | None] = ContextVar("display_label_id", default=None)
+
+#: The bound fields a call site's own value wins over, and the variable each is
+#: read from. Not `work_id`, which is stamped over whatever the call site passed,
+#: as it always has been: `display.state` passes the work the screen now shows,
+#: None when dark, from inside the block of the work it was showing.
+_BOUND_UNLESS_PASSED: Final[tuple[tuple[str, ContextVar[str | None]], ...]] = (
+    ("wall_id", _WALL_ID),
+    ("label_id", _LABEL_ID),
+)
 
 #: What every line carries, ordered the way a person scans one: when, how bad,
 #: where from, what happened.
@@ -66,19 +90,48 @@ def work_context(work_id: str) -> Iterator[None]:
         _WORK_ID.reset(token)
 
 
+@contextmanager
+def wall_context(wall_id: str) -> Iterator[None]:
+    """Bind a wall's id to everything logged inside this block: its worker, and every task and thread it starts."""
+    token = _WALL_ID.set(wall_id)
+    try:
+        yield
+    finally:
+        _WALL_ID.reset(token)
+
+
+@contextmanager
+def label_context(label_id: str, wall_id: str) -> Iterator[None]:
+    """Bind a label's id, and the wall it captions, to everything logged inside this block."""
+    label, wall = _LABEL_ID.set(label_id), _WALL_ID.set(wall_id)
+    try:
+        yield
+    finally:
+        _WALL_ID.reset(wall)
+        _LABEL_ID.reset(label)
+
+
 class WorkCorrelationFilter(logging.Filter):
-    """Stamp the bound work id onto every record that passes through.
+    """Stamp the bound work, wall and label ids onto every record that passes through.
 
     A filter rather than a formatter concern: the id belongs to the record, so
     anything that later formats or routes it can see it. Never rejects a record —
     a log filter that dropped lines would make the absence of a signal mean two
     different things, and absence is already the Player's signal for a dead loop.
+
+    **A `wall_id` or `label_id` the call site passed is kept**, whatever is
+    bound: a line about another wall than the one whose worker logs it says so
+    itself, and the worker's would be the wrong wall.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
         work_id = _WORK_ID.get()
         if work_id is not None:
             record.work_id = work_id
+        for name, variable in _BOUND_UNLESS_PASSED:
+            value = variable.get()
+            if value is not None and name not in vars(record):
+                setattr(record, name, value)
         return True
 
 
