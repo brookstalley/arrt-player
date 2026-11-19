@@ -443,10 +443,12 @@ unit differing, and steps 10–11 install it.
   `/run/user` unreachable) and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
   AF_NETLINK`. The devices are untouched. The unit's comments say what each line
   was checked against.
-- **mpv gets none of `.env`.** The slideshow's mpv is started with `PATH`, `HOME`,
-  `XDG_CACHE_HOME`, `LANG` and `LC_ALL` from the Player's environment and nothing
-  else (`mpv.MPV_ENVIRONMENT`), so the client token and the Reddit cookie do not
-  reach the program that decodes strangers' posts.
+- **mpv's environment holds none of `.env`.** The slideshow's mpv is started
+  with `PATH`, `HOME`, `XDG_CACHE_HOME`, `LANG` and `LC_ALL` from the Player's
+  environment and nothing else (`mpv.MPV_ENVIRONMENT`), so the client token and
+  the Reddit cookie are not handed to the program that decodes strangers' posts.
+  mpv still runs as `tvpi`, and `tvpi` can read `.env` and `.settings.json`;
+  closing that waits on running mpv under an account of its own.
 
 **What the Pi needs:** `.env` must name no path under `/home`, `/root` or
 `/run/user`, which the Player can no longer reach (the runbook's step 9a). After

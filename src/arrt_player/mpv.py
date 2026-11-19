@@ -37,7 +37,8 @@ drives one connector.
 **mpv is handed none of the Player's secrets.** It decodes files that strangers
 posted, so a decoder bug runs as mpv; the unit loads `.env` into the Player's
 environment, client token and Reddit cookie included. mpv starts with only the
-variables in `MPV_ENVIRONMENT`.
+variables in `MPV_ENVIRONMENT`. It still runs as the Player's account, which can
+read the files those secrets are kept in.
 
 **Blocking, like every `displays.screen.ScreenOutput`.** Each call waits on mpv
 with a timeout and is meant for a worker thread; a lock keeps two threads from
