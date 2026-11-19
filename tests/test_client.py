@@ -1432,6 +1432,15 @@ PROCESS_EVENTS = frozenset(
         "settings_page.host_refused",
         "settings_page.saved",
         "settings_page.write_failed",
+        # Chunk 09: the page forgetting the Frame's pairing when its address changes.
+        "settings_page.pairing_forgotten",
+        "settings_page.pairing_not_forgotten",
+        # Chunk 08: systemd's notification socket, from _run, the supervisor's
+        # own cycle (PettingSupervisor) and the slideshow's wait, never a worker.
+        "notify.absent",
+        "notify.unusable",
+        "notify.unsent",
+        "notify.sent",
         "slideshow.starting",
         "slideshow.renderer_unavailable",
         "slideshow.saved_listing",
