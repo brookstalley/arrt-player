@@ -4,6 +4,25 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-19, after wave 1 of the audit fixes.** The full set is in Arrt's `owner-rulings.md` under the same date. The two that are
+the Player's:
+
+- **Not now: the Player's code owned by root with `ProtectSystem=strict`.** "That's
+  just too heavy for right now. We may do that eventually, but not yet." The
+  sandboxing `build-plan-audit-wave-1.md` added stands as it is.
+- **One label panel per Player is the recorded limit for now, and nothing may be
+  designed that closes off several.** "I'm fine recording one label panel per player
+  right now, but we shouldn't design anything that precludes having multiple labels,
+  just as we don't prevent having multiple displays per player. In the future, there
+  may be players that only do labels and might have multiple. We don't have to build
+  that right now, but let's make sure we aren't closing off that path." A label is an
+  output a Player has zero or more of, as a display is, and a Player with labels and
+  no display must stay describable; what is built today may assume one.
+
+Also confirmed: `arrt.local` is an example name; a guesser with two addresses can
+hold a device that has never signed in out of the settings page for as long as the
+guessing continues.
+
 **2026-11-13, at the set.** "yep looks great", on the slideshow playing on the LG at 4K
 with captions on the panel, then "all good" after switching back to Arrt from the page.
 That answer also confirmed the three readings put to the owner with it: a still shows
