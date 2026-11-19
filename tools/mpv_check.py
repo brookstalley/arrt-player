@@ -4,7 +4,7 @@ Run on the Pi, as the account the unit runs as, with the Player stopped (only on
 program can hold the screen):
 
     sudo systemctl stop display
-    sudo -u tvpi uv run python tools/mpv_check.py --min 4 --max 8 /path/to/media/*
+    sudo -u tvpi /usr/local/bin/uv run --frozen --no-dev python tools/mpv_check.py --min 4 --max 8 /path/to/media/*
     sudo systemctl start display
 
 Every file goes through `mpv.MpvOutput` and `dwell.dwell_seconds`, exactly as the

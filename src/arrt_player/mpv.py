@@ -40,7 +40,7 @@ environment, client token and Reddit cookie included. mpv starts with only the
 variables in `MPV_ENVIRONMENT`. It still runs as the Player's account, which can
 read the files those secrets are kept in.
 
-**Blocking, like every `displays.screen.ScreenOutput`.** Each call waits on mpv
+**Blocking, like a `displays.screen.ScreenOutput`.** Each call waits on mpv
 with a timeout and is meant for a worker thread; a lock keeps two threads from
 interleaving commands on the one socket.
 """
@@ -338,8 +338,10 @@ class MpvOutput:
     """One HDMI connector, drawn by an mpv this object starts, watches and stops.
 
     `load` puts a file up and says whether it is there; `check` says whether it
-    is still there; `show` and `refresh` make this a `displays.screen.ScreenOutput`
-    for stills, so a wall can be drawn through it unchanged.
+    is still there. It is the slideshow's screen (`programmes.slideshow.Screen`).
+    `show` and `refresh` have the shapes of `displays.screen.ScreenOutput`'s, but
+    this is not one: it has no `blank`, and no wall is drawn through it, since a
+    wall on an HDMI connector draws through `kms.KmsOutput` (`__main__.screen_output`).
     """
 
     def __init__(
@@ -409,10 +411,10 @@ class MpvOutput:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    # -- displays.screen.ScreenOutput ----------------------------------------------
+    # -- stills, in ScreenOutput's shapes (it has no blank) -------------------------
 
     def show(self, render: Path) -> None:
-        """Put a still up. A failure is logged here and comes back through `refresh`, as the protocol asks."""
+        """Put a still up. A failure is logged here and comes back through `refresh`, as `ScreenOutput.show` asks."""
         with self._lock:
             self._load(render)
 
