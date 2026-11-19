@@ -1346,22 +1346,29 @@ class TestTheStoreKeepsEachSetsBindingsApart:
         with sqlite3.connect(settings.state_path) as connection:
             assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
 
-    @pytest.mark.parametrize(
-        "statement",
-        ["INSERT INTO tv_binding_aside", "DELETE FROM tv_binding", "INSERT INTO tv_binding (", "COMMIT"],
-    )
-    def test_a_fault_while_the_bindings_move_leaves_them_under_their_set(self, state: DisplayState, statement: str):
+    #: The statements a move of the bindings makes, its commit last: a fault is met at each in turn.
+    MOVE_STATEMENTS = 10
+
+    @pytest.mark.parametrize("at", range(1, MOVE_STATEMENTS + 1))
+    def test_a_fault_while_the_bindings_move_leaves_them_under_their_set(self, state: DisplayState, at: int):
         from arrt_player.state.store import StoreFault
 
         state.belongs_to(THIS_SET)
         state.record_upload("w1", "MY-F0001")
         state.set_last_selected_work_id("w1")
-        armed = _arm(state, lambda: _sqlite_error("SQLITE_FULL", "database or disk is full"), failing=lambda s: statement in s)
+        met: list[str] = []
+
+        def the_one_at(statement: str) -> bool:
+            met.append(statement)
+            return len(met) == at
+
+        armed = _arm(state, lambda: _sqlite_error("SQLITE_FULL", "database or disk is full"), failing=the_one_at, times=1)
 
         with pytest.raises(StoreFault) as raised:
             state.belongs_to(ANOTHER_SET)
 
-        assert armed.raised == 1, f"the fault was never met at {statement}"
+        assert armed.raised == 1, f"the move made {len(met)} statements, not {at}"
+        assert at < self.MOVE_STATEMENTS or met[-1] == "COMMIT", "the last statement of the move is not its commit"
         assert raised.value.operation == "belongs_to"
         _disarm(state, armed)
         assert state.tv_identity == THIS_SET
