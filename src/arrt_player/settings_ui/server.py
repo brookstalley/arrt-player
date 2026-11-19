@@ -769,8 +769,12 @@ def _what_the_save_did(
                 f"The television at {new} will be asked to pair {when}: expect a prompt on that set, even over a "
                 "programme, and accept it there. Until then this Player shows nothing new on it."
             )
+            said.append(_PICTURES_AT_A_NEW_ADDRESS.format(new=new, old=f"the television at {old}" if old else _AN_EARLIER_SET))
         else:
-            said.append("This Player no longer drives a Frame: a wall placed on its Samsung Frame waits for an address.")
+            said.append(
+                "This Player no longer drives a Frame: a wall placed on its Samsung Frame waits for an address. "
+                "The pictures it put on the television stay there."
+            )
         if forgotten:
             said.append(
                 f"The pairing with the television at {old} is forgotten."
@@ -1428,8 +1432,23 @@ def _frame_section(state: PageState, stored: store.Stored) -> str:
 _PAIRING_NOTE: Final[str] = (
     "Saving a new address forgets this Player's pairing with the set at the old one, and the television at the "
     "new address is asked to pair: expect a prompt on that set, even over a programme, to be accepted there. "
-    "The Player then manages the pictures uploaded to that set, and removes any it did not put there."
+    "The Player knows each television by its own id, not its address. The same television at a new address keeps "
+    "the pictures this Player put on it, and nothing is uploaded again. On another television the Player starts "
+    "afresh: it uploads every work to it and removes the uploaded pictures there that it did not put there, and the "
+    "old television keeps this Player's pictures until the Player is pointed at it again or they are removed there."
 )
+
+#: Said by a save that gives the Frame a new address: what happens to the pictures, on each television.
+#: The Player tells the sets apart by their own ids (`displays/frame.py`), never by the address.
+_PICTURES_AT_A_NEW_ADDRESS: Final[str] = (
+    "If the set at {new} is the same television, the pictures this Player put on it are kept and nothing is "
+    "uploaded again. If it is another, the Player uploads every work to it and removes the uploaded pictures there "
+    "that it did not put there, and {old} keeps the pictures this Player put on it until the Player is pointed at it "
+    "again or they are removed there."
+)
+
+#: How a save names the television an address held before the page knew one.
+_AN_EARLIER_SET: Final[str] = "a television this Player drove before"
 
 
 def _name_field(state: PageState, stored: store.Stored, *, local: str) -> str:
