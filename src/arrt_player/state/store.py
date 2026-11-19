@@ -22,12 +22,23 @@ still reported success — recording no content id while its retry loop set
 `success = True`. A row here cannot say `uploaded` without an id: the check
 constraint rejects it, so the failure mode is a write that raises during
 development rather than a wall that silently shows nothing.
+
+**A fault of the file or the disk is raised as `StoreFault`, and nothing else
+is.** Every operation the wall makes on a running store reads SQLite's own
+result code from what failed and classifies it (`_FAULTS`): a lock or a busy
+database may clear by itself, and a full or read-only disk, an I/O error or a
+damaged file will not. Anything else SQLite raises (a constraint, a statement
+this code got wrong) is this code's mistake, raised unchanged so that the
+supervisor's restart, the last resort, still answers it with a traceback.
+**A write that raised did not happen**: it is rolled back before the fault is
+raised, so what the store answers afterwards is what is on disk.
 """
 
+import contextlib
 import logging
 import sqlite3
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -68,6 +79,47 @@ class StateSchemaTooNew(RuntimeError):
     future is refused: a reader that guesses at a shape it does not know writes
     damage, and this is the one file whose loss is not free.
     """
+
+
+class StoreFault(Exception):
+    """One operation on the store failed for a reason outside this code: the disk, the file, or a lock.
+
+    `may_clear` is the classification (`_FAULTS`): True for a lock or a busy
+    database, which another moment may not meet; False for a fault the wall
+    cannot outlive without somebody fixing the disk or the file. `fault` is
+    SQLite's name for it (`SQLITE_IOERR`), and `operation` is the store's method
+    that met it, so a journal line and the heartbeat say both.
+    """
+
+    def __init__(self, operation: str, doing: str, cause: sqlite3.Error, *, fault: str, may_clear: bool) -> None:
+        super().__init__(f"the display store could not {doing} ({fault}: {cause})")
+        self.operation = operation
+        self.fault = fault
+        self.may_clear = may_clear
+
+
+#: SQLite's primary result codes for the faults of the file and the disk, and
+#: whether each may clear by itself. **Read from the result code, never from the
+#: class or the message**: `OperationalError` also carries this code's own
+#: mistakes (`SQLITE_ERROR`, "no such table"), which no wait would cure. A code
+#: absent here is not a store fault and is raised unchanged.
+_FAULTS: Final[dict[int, bool]] = {
+    # Another connection holds the file: it may let go at the next pass.
+    sqlite3.SQLITE_BUSY: True,
+    sqlite3.SQLITE_LOCKED: True,
+    # The disk or the file: nothing here changes them.
+    sqlite3.SQLITE_FULL: False,
+    sqlite3.SQLITE_READONLY: False,
+    sqlite3.SQLITE_IOERR: False,
+    sqlite3.SQLITE_CORRUPT: False,
+    sqlite3.SQLITE_NOTADB: False,
+    sqlite3.SQLITE_CANTOPEN: False,
+    sqlite3.SQLITE_PERM: False,
+}
+
+#: The extended result code's low byte is its primary code (`SQLITE_IOERR_WRITE`
+#: is `SQLITE_IOERR | 3 << 8`), which is what the classification is keyed on.
+_PRIMARY: Final[int] = 0xFF
 
 
 @dataclass(frozen=True)
@@ -148,6 +200,13 @@ class DisplayState:
         # (nothing today; the heartbeat writer tomorrow) never blocks the loop.
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._prepare()
+        #: The work on the wall as last committed, **held here as well as on
+        #: disk**, because the wall's heartbeat reads it on every way out of a
+        #: pass, the one that ended on a store fault included: a read of the file
+        #: there would raise the fault the heartbeat exists to report. This store
+        #: is the file's sole writer, so the copy is the file's value; it moves
+        #: only after a commit.
+        self._last_selected: str | None = self._get(_LAST_SELECTED_WORK_ID)
 
     def _prepare(self) -> None:
         version = self._connection.execute("PRAGMA user_version").fetchone()[0]
@@ -203,15 +262,17 @@ class DisplayState:
 
     def binding_for(self, artwork_id: str) -> Binding | None:
         """What this device knows about one work's image, if anything."""
-        row = self._connection.execute(
-            f"{_BINDING_COLUMNS} WHERE artwork_id = ?",
-            (artwork_id,),
-        ).fetchone()
+        with self._operation("binding_for", f"read the binding of {artwork_id}"):
+            row = self._connection.execute(
+                f"{_BINDING_COLUMNS} WHERE artwork_id = ?",
+                (artwork_id,),
+            ).fetchone()
         return _binding(row) if row is not None else None
 
     def bindings(self) -> tuple[Binding, ...]:
         """Every work this device has a record for, in no meaningful order."""
-        rows = self._connection.execute(_BINDING_COLUMNS).fetchall()
+        with self._operation("bindings", "read the bindings"):
+            rows = self._connection.execute(_BINDING_COLUMNS).fetchall()
         return tuple(_binding(row) for row in rows)
 
     def accounted_content_ids(self) -> frozenset[str]:
@@ -225,7 +286,8 @@ class DisplayState:
         at the cost of one transfer, and is correct even when the set renamed
         rather than lost it.
         """
-        rows = self._connection.execute("SELECT tv_content_id FROM tv_binding WHERE tv_content_id IS NOT NULL").fetchall()
+        with self._operation("accounted_content_ids", "read the content ids it accounts for"):
+            rows = self._connection.execute("SELECT tv_content_id FROM tv_binding WHERE tv_content_id IS NOT NULL").fetchall()
         return frozenset(row["tv_content_id"] for row in rows)
 
     def record_upload(self, artwork_id: str, tv_content_id: str, *, render_fingerprint: str | None = None) -> Binding:
@@ -242,7 +304,8 @@ class DisplayState:
         no caller ever passed is gone, because a parameter nothing supplies reads
         as a capability rather than as a gap.
         """
-        return self._write_binding(artwork_id, tv_content_id, UploadStatus.UPLOADED, render_fingerprint)
+        with self._operation("record_upload", f"record the upload of {artwork_id}"):
+            return self._write_binding(artwork_id, tv_content_id, UploadStatus.UPLOADED, render_fingerprint)
 
     def record_upload_failure(self, artwork_id: str) -> Binding:
         """Record that an upload was attempted and did not land.
@@ -251,11 +314,13 @@ class DisplayState:
         that failed from one nobody has tried — and so a work that fails every
         pass is visible in the store rather than only in the journal.
         """
-        return self._write_binding(artwork_id, None, UploadStatus.FAILED, None)
+        with self._operation("record_upload_failure", f"record the failed upload of {artwork_id}"):
+            return self._write_binding(artwork_id, None, UploadStatus.FAILED, None)
 
     def mark_orphaned(self, artwork_id: str) -> Binding:
         """Record that the television no longer lists this work's content id."""
-        return self._write_binding(artwork_id, None, UploadStatus.ORPHANED, None)
+        with self._operation("mark_orphaned", f"record {artwork_id} as orphaned"):
+            return self._write_binding(artwork_id, None, UploadStatus.ORPHANED, None)
 
     def _write_binding(
         self,
@@ -290,11 +355,16 @@ class DisplayState:
 
     @property
     def last_selected_work_id(self) -> str | None:
-        """The work last put on the wall, so a restart resumes rather than restarts."""
-        return self._get(_LAST_SELECTED_WORK_ID)
+        """The work last put on the wall, so a restart resumes rather than restarts.
+
+        Answered from memory (see `__init__`), so it never raises a store fault.
+        """
+        return self._last_selected
 
     def set_last_selected_work_id(self, work_id: str) -> None:
-        self._set(_LAST_SELECTED_WORK_ID, work_id)
+        with self._operation("set_last_selected_work_id", f"record {work_id} as the work on the wall"):
+            self._set(_LAST_SELECTED_WORK_ID, work_id)
+        self._last_selected = work_id
 
     @property
     def native_slideshow_disabled(self) -> bool:
@@ -305,10 +375,36 @@ class DisplayState:
         television's own slideshow fighting host-driven `select_image` is the
         failure this switch prevents, and it does not come back on by itself.
         """
-        return self._get(_SLIDESHOW_DISABLED) == "1"
+        with self._operation("native_slideshow_disabled", "read whether the set's own slideshow is off"):
+            return self._get(_SLIDESHOW_DISABLED) == "1"
 
     def mark_native_slideshow_disabled(self) -> None:
-        self._set(_SLIDESHOW_DISABLED, "1")
+        with self._operation("mark_native_slideshow_disabled", "record the set's own slideshow as off"):
+            self._set(_SLIDESHOW_DISABLED, "1")
+
+    @contextlib.contextmanager
+    def _operation(self, operation: str, doing: str) -> Iterator[None]:
+        """Run one operation of the wall's on the store: roll back what raised, and raise a fault of the file as one.
+
+        **Rolled back whatever raised**, before anything is classified. A
+        statement that failed inside the transaction it opened, or a commit
+        refused, can leave that transaction open, and SQLite says it may or may
+        not have rolled it back itself: this connection would then read the
+        write back as kept, and the next commit that succeeded would publish it.
+        A rollback that itself fails is not allowed to replace the fault being
+        reported.
+        """
+        try:
+            yield
+        except sqlite3.Error as exc:
+            with contextlib.suppress(sqlite3.Error):
+                self._connection.rollback()
+            code = getattr(exc, "sqlite_errorcode", None)
+            may_clear = _FAULTS.get(code & _PRIMARY) if isinstance(code, int) else None
+            if may_clear is None:
+                raise
+            fault = getattr(exc, "sqlite_errorname", None) or f"SQLite result code {code}"
+            raise StoreFault(operation, doing, exc, fault=fault, may_clear=may_clear) from exc
 
     def _get(self, key: str) -> str | None:
         row = self._connection.execute("SELECT value FROM daemon_state WHERE key = ?", (key,)).fetchone()

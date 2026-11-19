@@ -32,6 +32,14 @@ is sent (`tv.client.WRITES`), and is refused with `TvNotOurs` when the set is
 somebody else's. What this module decides is only what to do with a refusal, per
 verb, and how soon to ask again; `is_ours` stays as the cheap early exit that
 keeps a held change from reaching the seam at all.
+
+**A fault of the device's own store ends the pass, not the wall.** The store
+raises `StoreFault` for a fault of the disk or the file (`state.store._FAULTS`),
+and the wall's loop treats it as it treats the set going away: the pass ends,
+the next comes after a wait on the same ladder, and the journal says it once per
+episode, at WARNING for a lock that may clear and at ERROR for a fault the wall
+cannot outlive. The heartbeat's `last_error` names it. Anything else the store
+raises is this code's mistake and still reaches the supervisor's restart.
 """
 
 import logging
@@ -47,6 +55,7 @@ from arrt_player.logs import work_context
 from arrt_player.manifest import Watcher
 from arrt_player.programmes.schedule import Schedule
 from arrt_player.state import Binding, DisplayState, UploadStatus
+from arrt_player.state.store import StoreFault
 from arrt_player.tv import (
     PowerStateUnreadable,
     RemovalOutcome,
@@ -92,7 +101,10 @@ def frame_wall(
 class FrameDisplay:
     """One television, as a wall's display."""
 
-    unavailable: tuple[type[Exception], ...] = (TvUnavailable,)
+    #: **The store's faults as well as the set's absence**, because the wall's
+    #: loop answers both the same way: end the pass, beat, wait, try again.
+    #: `went_away` tells them apart.
+    unavailable: tuple[type[Exception], ...] = (TvUnavailable, StoreFault)
     #: The Frame wall's start, stop and crash lines read `frame.started`,
     #: `frame.stopped`, `frame.crashed`.
     journal_name = "frame"
@@ -209,6 +221,29 @@ class FrameDisplay:
         )
         self._unavailable = ReportOnce()
 
+        #: The device's own store would not do what a pass asked of it. Its own
+        #: ladder, on the same bounds as the set's, and its own episodes: one for
+        #: a fault that may clear, said at WARNING, and one for a fault the wall
+        #: cannot outlive, said at ERROR, so a lock that turns into a full disk
+        #: is still said at the level that reaches somebody. Both end at the
+        #: first pass that completes (`answering`).
+        self._store_retry = Backoff(
+            minimum=settings.tv_retry_min_seconds,
+            maximum=settings.tv_retry_max_seconds,
+            monotonic=clock.monotonic,
+        )
+        self._store_busy = ReportOnce()
+        self._store_failing = ReportOnce()
+        #: Whether the last pass ended on the store. The wall's loop beats such a
+        #: pass as unreachable, which is a claim about the set this pass did not
+        #: establish, so the heartbeat says it could not tell (`heartbeat_fields`).
+        self._ended_on_the_store = False
+        #: An art-mode announcement whose read has not yet been acted on to the
+        #: end. The set's flag is consumed when it is collected, so a pass that a
+        #: store fault ends after collecting it would otherwise lose the news,
+        #: and the display state would wait for the next selection to be right.
+        self._art_mode_news_owed = False
+
         #: When a write the seam held may next be tried: an upload, a removal, a
         #: brightness change or the slideshow switch, refused (`TvNotOurs`) while
         #: the set is lit and not showing art. **Each try costs two reads of the
@@ -286,20 +321,55 @@ class FrameDisplay:
         # other minute. It is overwritten by the next failure, so it is always
         # the latest rather than the first.
         self._last_error = str(exc)
+        if isinstance(exc, StoreFault):
+            return self._the_store_failed(exc)
+        self._ended_on_the_store = False
         self.record.moved_to(ScreenState.UNREACHABLE)
         if self._unavailable.begin():
             log.warning("%s; holding the wall where it is and retrying", exc, extra={"event": "tv.unavailable"})
         return self._connection_retry.hold()
 
     def answering(self) -> None:
+        self._ended_on_the_store = False
         if self._unavailable.end():
             log.info("the television is answering again", extra={"event": "tv.recovered"})
         self._connection_retry.clear()
+        # Both, not either-or: a pass that completes ends whichever was said.
+        busy_ended, failing_ended = self._store_busy.end(), self._store_failing.end()
+        if busy_ended or failing_ended:
+            log.info("the display store is answering again", extra={"event": "store.recovered"})
+        self._store_retry.clear()
+
+    def _the_store_failed(self, exc: StoreFault) -> float:
+        """A pass ended on the store: say it once per episode, at the level its class earns, and wait.
+
+        **The screen's state is left where it was**, unlike an unreachable set's:
+        the store failing says nothing about what the wall shows, and the
+        heartbeat's `last_error` carries the fault to the server.
+        """
+        self._ended_on_the_store = True
+        fields = {"operation": exc.operation, "fault": exc.fault}
+        if exc.may_clear:
+            if self._store_busy.begin():
+                log.warning(
+                    "%s; the wall goes on at its next pass",
+                    exc,
+                    extra={"event": "store.busy", **fields},
+                )
+        elif self._store_failing.begin():
+            log.error(
+                "%s; the wall cannot record what it does until the disk or the file is fixed, and tries again",
+                exc,
+                extra={"event": "store.failed", **fields},
+            )
+        return self._store_retry.hold()
 
     def heartbeat_fields(self, *, reachable: bool | None) -> dict[str, Any]:
         return {
             "announced_content_id": self._announced_content_id,
-            "television_reachable": reachable,
+            # A pass that ended on the store did not find out whether the set
+            # answers: the loop's "unreachable" is about the pass, not the set.
+            "television_reachable": None if self._ended_on_the_store else reachable,
             "television_showing_art": self._showing_art,
             # **The Frame draws no label**, so it reports none, as a screen does.
             # A client's panel is reported as a label output in the client
@@ -532,16 +602,24 @@ class FrameDisplay:
         """
         announcement = self._announcement
         if announcement is not None and announcement is not self._announcement_taken:
+            # The work is resolved before the news is marked taken: the store
+            # can fail that read, and news marked taken first would be lost.
+            work_id = self._work_bound_to(announcement.content_id) if announcement.is_shown else None
             self._announcement_taken = announcement
             if announcement.is_shown:
                 self._wall_content_id = announcement.content_id
                 self._learned_showing_art(showing=True)
-                self.record.moved_to(ScreenState.SHOWING_ART, self._work_bound_to(announcement.content_id))
-        if self._tv.art_mode_announcement_pending():
+                self.record.moved_to(ScreenState.SHOWING_ART, work_id)
+        # Collected every pass, whether or not news is already owed, so the set's
+        # flag never waits to cost a second read for the same news.
+        announced = self._tv.art_mode_announcement_pending()
+        if announced or self._art_mode_news_owed:
+            self._art_mode_news_owed = True
             # Clears the writes' wait too (`_wall_is_answering`): the set saying
             # its mode changed is news to a held upload as much as to the wall.
             self._wall_is_answering()
             await self._read_art_mode()
+            self._art_mode_news_owed = False
 
     def _work_bound_to(self, content_id: str) -> str | None:
         """The work this device put on the set under `content_id`, or None for a picture it did not put there."""

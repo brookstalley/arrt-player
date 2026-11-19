@@ -384,3 +384,314 @@ async def test_a_store_written_by_a_player_that_read_major_1_still_opens_and_the
     assert publish.work_of(tv.on_the_wall) == "w2"
     with sqlite3.connect(settings.state_path) as connection:
         assert connection.execute("SELECT value FROM daemon_state WHERE key = 'last_acted_sequence'").fetchone() == ("41",)
+
+
+# -- a fault of the store's file or disk (issue #19) ---------------------------
+#
+# Driven at the sqlite3 connection, the boundary the store owns: the faults are
+# the errors the sqlite3 module raises, with SQLite's result code and its name,
+# as a real one carries them. One test meets a genuine fault of SQLite's own.
+
+
+def _sqlite_error(name: str, message: str, kind: type[sqlite3.Error] = sqlite3.OperationalError) -> sqlite3.Error:
+    """An error as the sqlite3 module raises it: SQLite's message, result code and code name."""
+    error = kind(message)
+    error.sqlite_errorcode = getattr(sqlite3, name)
+    error.sqlite_errorname = name
+    return error
+
+
+class _FailingConnection:
+    """The store's connection, raising `fault` from the statements `failing` picks, `times` times (None: always)."""
+
+    def __init__(self, connection: sqlite3.Connection, fault, *, failing, times: int | None = None) -> None:
+        self._connection = connection
+        self._fault = fault
+        self._failing = failing
+        self.times = times
+        self.raised = 0
+
+    def _due(self, statement: str) -> bool:
+        if self.times is not None and self.raised >= self.times:
+            return False
+        if not self._failing(statement):
+            return False
+        self.raised += 1
+        return True
+
+    def execute(self, statement: str, parameters=()):
+        if self._due(statement):
+            raise self._fault()
+        return self._connection.execute(statement, parameters)
+
+    def commit(self) -> None:
+        if self._due("COMMIT"):
+            raise self._fault()
+        self._connection.commit()
+
+    def __getattr__(self, name: str):
+        return getattr(self._connection, name)
+
+
+def _arm(state: DisplayState, fault, *, failing=lambda _statement: True, times: int | None = None) -> _FailingConnection:
+    armed = _FailingConnection(state._connection, fault, failing=failing, times=times)
+    state._connection = armed
+    return armed
+
+
+def _disarm(state: DisplayState, armed: _FailingConnection) -> None:
+    state._connection = armed._connection
+
+
+def _a_binding_write(statement: str) -> bool:
+    return "INSERT INTO tv_binding" in statement
+
+
+def _store_events(caplog, event: str) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if getattr(record, "event", None) == event]
+
+
+class TestAFaultOfTheFileIsClassified:
+    @pytest.mark.parametrize(
+        ("name", "message", "may_clear"),
+        [
+            ("SQLITE_BUSY", "database is locked", True),
+            ("SQLITE_LOCKED", "database table is locked", True),
+            ("SQLITE_FULL", "database or disk is full", False),
+            ("SQLITE_READONLY", "attempt to write a readonly database", False),
+            ("SQLITE_IOERR", "disk I/O error", False),
+            ("SQLITE_IOERR_WRITE", "disk I/O error", False),
+            ("SQLITE_CORRUPT", "database disk image is malformed", False),
+            ("SQLITE_NOTADB", "file is not a database", False),
+        ],
+    )
+    def test_a_fault_of_the_disk_or_the_file_is_a_store_fault_of_its_class(
+        self, state: DisplayState, name: str, message: str, may_clear: bool
+    ):
+        from arrt_player.state.store import StoreFault
+
+        _arm(state, lambda: _sqlite_error(name, message))
+
+        with pytest.raises(StoreFault) as raised:
+            state.record_upload("w1", "MY-F0001")
+
+        assert raised.value.may_clear is may_clear
+        assert raised.value.operation == "record_upload"
+        assert raised.value.fault == name
+        assert message in str(raised.value), "the fault does not say what it was"
+        assert "w1" in str(raised.value), "the fault does not say what it met"
+
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            lambda: _sqlite_error("SQLITE_CONSTRAINT", "CHECK constraint failed", sqlite3.IntegrityError),
+            lambda: _sqlite_error("SQLITE_ERROR", "no such table: tv_binding"),
+            lambda: sqlite3.OperationalError("raised without a result code"),
+        ],
+        ids=["a-constraint", "this-codes-own-statement", "no-result-code"],
+    )
+    def test_anything_else_sqlite_raises_reaches_the_restart_unchanged(self, state: DisplayState, fault):
+        """This code's own mistakes are the supervisor's to restart on, with a traceback that points at them."""
+        from arrt_player.state.store import StoreFault
+
+        expected = fault()
+        _arm(state, lambda: expected)
+
+        with pytest.raises(sqlite3.Error) as raised:
+            state.record_upload("w1", "MY-F0001")
+
+        assert raised.value is expected
+        assert not isinstance(raised.value, StoreFault)
+
+    def test_a_genuine_fault_of_sqlites_own_is_classified_by_its_code(self, state: DisplayState):
+        """Not a constructed error: SQLite itself refuses the write, and the code it carries decides."""
+        from arrt_player.state.store import StoreFault
+
+        state._connection.execute("PRAGMA query_only = 1")
+
+        with pytest.raises(StoreFault) as raised:
+            state.set_last_selected_work_id("w1")
+
+        assert (raised.value.fault, raised.value.may_clear) == ("SQLITE_READONLY", False)
+        assert raised.value.operation == "set_last_selected_work_id"
+
+
+class TestAWriteThatRaisedDidNotHappen:
+    def test_a_refused_commit_is_not_read_back_or_published_by_the_next(self, state: DisplayState):
+        """The transaction a refused commit leaves open is rolled back, so the
+        store answers what is on disk and a later commit publishes only its own."""
+        armed = _arm(state, lambda: _sqlite_error("SQLITE_BUSY", "database is locked"), failing=lambda s: s == "COMMIT", times=1)
+
+        with pytest.raises(Exception):  # noqa: B017, PT011 -- the class is the classification test's; this is about what is left
+            state.record_upload("w1", "MY-F0001")
+        _disarm(state, armed)
+
+        assert state.binding_for("w1") is None, "a write that raised is read back as kept"
+        state.record_upload("w2", "MY-F0002")
+        with sqlite3.connect(state._path) as other:
+            rows = other.execute("SELECT artwork_id FROM tv_binding").fetchall()
+        assert rows == [("w2",)], "the next commit published the write that raised"
+
+    def test_the_work_on_the_wall_is_answered_while_the_file_cannot_be_read(self, state: DisplayState):
+        """The heartbeat reads it on the pass a store fault ended, so it must not raise that fault."""
+        state.set_last_selected_work_id("w1")
+        _arm(state, lambda: _sqlite_error("SQLITE_IOERR", "disk I/O error"))
+
+        assert state.last_selected_work_id == "w1"
+
+    def test_the_work_on_the_wall_does_not_move_on_a_write_that_raised(self, state: DisplayState):
+        state.set_last_selected_work_id("w1")
+        armed = _arm(state, lambda: _sqlite_error("SQLITE_FULL", "database or disk is full"))
+
+        with pytest.raises(Exception):  # noqa: B017, PT011 -- what is left is the subject here
+            state.set_last_selected_work_id("w2")
+        _disarm(state, armed)
+
+        assert state.last_selected_work_id == "w1"
+        with DisplayState(state._path) as reopened:
+            assert reopened.last_selected_work_id == "w1"
+
+
+class TestTheWallOutlivesAStoreFault:
+    async def test_a_lock_met_once_is_one_warning_and_the_wall_goes_on(self, daemon: Wall, tv: FakeTv, publish, state, caplog):
+        """The plan's first case: the store is locked once, at the write that records
+        w1's upload. The pass ends with one WARNING and no crash, and the next pass
+        uploads w1 again, records it and shows it. The first copy is on the set
+        under an id nothing accounts for, so the orphan path removes it."""
+        publish(["w1", "w2"], interval_seconds=3600)
+        _arm(state, lambda: _sqlite_error("SQLITE_BUSY", "database is locked"), failing=_a_binding_write, times=1)
+
+        with caplog.at_level(logging.INFO):
+            await daemon.tick()
+            assert tv.on_the_wall is None
+            await daemon.tick()
+
+        busy = _store_events(caplog, "store.busy")
+        assert len(busy) == 1, f"a lock met once was said {len(busy)} times"
+        assert busy[0].levelno == logging.WARNING
+        assert busy[0].operation == "record_upload"
+        assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+        assert publish.work_of(tv.on_the_wall) == "w1", "the wall did not go on after the lock"
+        assert len(_store_events(caplog, "store.recovered")) == 1
+        assert "MY-F0001" not in state.accounted_content_ids(), "the copy whose record failed is accounted for"
+
+    async def test_a_disk_that_fails_every_pass_is_one_error_and_the_heartbeat_names_it(
+        self, daemon: Wall, tv: FakeTv, publish, state, caplog, clock, wall_dir
+    ):
+        """The plan's second case: every statement meets a disk I/O error, pass
+        after pass. One ERROR for the episode, naming the operation; the wall's
+        heartbeat names the fault; the screen's state is not reported unreachable;
+        and when the disk answers again the wall carries on."""
+        from test_display_state import heartbeat
+
+        from arrt_player.heartbeat import INTERVAL_SECONDS
+
+        publish(["w1", "w2"], interval_seconds=3600)
+        await daemon.tick()  # w1 up
+        armed = _arm(state, lambda: _sqlite_error("SQLITE_IOERR", "disk I/O error"))
+
+        with caplog.at_level(logging.INFO):
+            for _ in range(5):
+                clock.advance(INTERVAL_SECONDS + 1)
+                await daemon.tick()
+
+        failed = _store_events(caplog, "store.failed")
+        assert len(failed) == 1, f"a failing disk was said {len(failed)} times in five passes"
+        assert failed[0].levelno == logging.ERROR
+        # The pass's first use of the store: resolving the set's echo of w1's selection.
+        assert failed[0].operation == "bindings"
+        assert failed[0].fault == "SQLITE_IOERR"
+        document = heartbeat(wall_dir)
+        assert "disk I/O error" in document["last_error"]
+        assert "SQLITE_IOERR" in document["last_error"]
+        assert document["display_state"]["state"] == "showing_art", "a store fault was reported as an unreachable screen"
+        assert document["television_reachable"] is None, "a pass that ended on the store claimed the set was unreachable"
+        assert document["current_work_id"] == "w1"
+        assert not _store_events(caplog, "tv.unavailable"), "a store fault was said as the set going away"
+
+        _disarm(state, armed)
+        with caplog.at_level(logging.INFO):
+            clock.advance(INTERVAL_SECONDS + 1)
+            await daemon.tick()
+        assert len(_store_events(caplog, "store.recovered")) == 1
+        assert heartbeat(wall_dir)["television_reachable"] is True
+
+    async def test_a_lock_that_becomes_a_full_disk_is_said_at_both_levels(self, daemon: Wall, publish, state, caplog):
+        publish(["w1", "w2"], interval_seconds=3600)
+        faults = iter(
+            [_sqlite_error("SQLITE_BUSY", "database is locked")] * 2
+            + [_sqlite_error("SQLITE_FULL", "database or disk is full")] * 2
+        )
+        _arm(state, lambda: next(faults), times=4)
+
+        with caplog.at_level(logging.INFO):
+            for _ in range(4):
+                await daemon.tick()
+
+        assert len(_store_events(caplog, "store.busy")) == 1
+        assert len(_store_events(caplog, "store.failed")) == 1
+
+    async def test_the_sets_news_a_store_fault_cut_short_is_acted_on_at_the_next_pass(
+        self, daemon: Wall, tv: FakeTv, publish, state, clock, wall_dir
+    ):
+        """The set announces art mode while the store cannot be read. The read is
+        taken, and the store fails resolving the work on the wall; the news is not
+        lost, so the next pass reads once more and the display state follows the
+        set. The restart a store fault used to cost made the same read, because
+        connecting is news."""
+        from test_display_state import display
+
+        publish(["w1", "w2"], interval_seconds=3600)
+        await daemon.tick()  # w1 up
+        tv.art_mode = "off"
+        tv.art_mode_announced = True
+        await daemon.tick()  # in use
+        assert display(wall_dir)[0] == "in_use"
+
+        tv.art_mode = "on"
+        tv.art_mode_announced = True
+        armed = _arm(
+            state,
+            lambda: _sqlite_error("SQLITE_BUSY", "database is locked"),
+            failing=lambda s: s.startswith("SELECT artwork_id"),
+            times=1,
+        )
+        reads = tv.art_mode_reads
+        await daemon.tick()  # the read says art; the work cannot be resolved
+        _disarm(state, armed)
+        clock.advance(1)
+        await daemon.tick()
+
+        assert display(wall_dir) == ("showing_art", "w1"), "the set's news was lost to the store fault"
+        assert tv.art_mode_reads == reads + 2
+
+    async def test_a_picture_announced_while_the_store_cannot_be_read_is_not_lost(
+        self, daemon: Wall, tv: FakeTv, publish, state, wall_dir
+    ):
+        """The sibling of the case above, for the other kind of news: somebody
+        picks the wall's picture with the remote while the store fails the read
+        that names its work. The announcement is still untaken at the next pass,
+        so the display state follows it, with no read of the set for it."""
+        from test_display_state import display
+
+        publish(["w1", "w2"], interval_seconds=3600)
+        await daemon.tick()  # w1 up, as MY-F0001
+        tv.art_mode = "off"
+        tv.art_mode_announced = True
+        await daemon.tick()  # in use
+
+        tv.art_mode = "on"
+        tv.announce("MY-F0001", is_shown=True)
+        armed = _arm(
+            state,
+            lambda: _sqlite_error("SQLITE_BUSY", "database is locked"),
+            failing=lambda s: s.startswith("SELECT artwork_id"),
+            times=1,
+        )
+        reads = tv.art_mode_reads
+        await daemon.tick()
+        _disarm(state, armed)
+        await daemon.tick()
+
+        assert display(wall_dir) == ("showing_art", "w1"), "the announced picture was lost to the store fault"
+        assert tv.art_mode_reads == reads
