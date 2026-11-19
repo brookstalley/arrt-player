@@ -459,10 +459,46 @@ that the kernel enforces the memory bound. Neither can be checked off the Pi.
 puts back. That unit's `uv run` installs the dev group again at its first start,
 from uv's cache or from PyPI.
 
+## Two things that can stop an upgrade, and a name to list (2026-11-19, audit wave 1)
+
+**Any `*_SECONDS` in `.env` that is 0, negative, `nan` or `inf` now refuses the
+start** (exit 2, `daemon.misconfigured` naming the variable), and so does a
+`LATITUDE` or `LONGITUDE` outside its range. `.env.example` never gave zero a
+meaning (an interval left unset takes its default), but an earlier Player took
+`MANIFEST_POLL_SECONDS=0` or `BRIGHTNESS_INTERVAL_SECONDS=0` and ran, and a zero
+is a loop that never waits. Under `Restart=always` an `.env` that still holds one
+restarts every 5 s with every wall dark until it is fixed, so look before
+installing the release:
+
+    sudo grep -nEi '^[A-Z_]+_SECONDS=["'"'"']?(0+(\.0*)?|-.*|nan|inf.*)["'"'"']?[[:space:]]*$' /opt/arrt-player/.env
+
+**Expected:** nothing printed. A line it prints is a value to change to the
+number of seconds meant, or to delete so the default applies. The check under
+*The settings page* (`load()` as `tvpi`) names any other key the new revision
+refuses.
+
+**The settings page answers only to its own names.** A request whose `Host` is
+not an IP address, `localhost`, this machine's own name, `<name>.local` or the
+address the page is bound to is refused with a 421 before any page, and the
+journal says `settings_page.host_refused` with the name. The address the Player
+prints at start, and the machine's name, need nothing. **A name only the
+router's DNS gives the Player (`<name>.lan`, say), or a reverse proxy's, must be
+listed in `.env`, comma-separated, then the Player restarted:**
+
+    UI_ALLOWED_HOSTS=wall.lan
+
+Names only, with no `http://` and no port.
+
+**Wrong passwords at the page are now throttled per source address**, with a
+ceiling of 30 wrong in 10 minutes for all addresses together; the owner's own
+sign-in is not slowed by somebody else's guesses.
+
+**The way back** is the previous revision, which ignores `UI_ALLOWED_HOSTS`.
+
 ## The two new units, and where everything they name now lives
 
-`display.service` and `curation.service` are the planes this product is being
-rebuilt onto. Three paths they depend on were unsettled until the cutover and are
+`display.service` and `curation.service` were the two units this product was
+rebuilt onto; the Pi now runs the first alone. Three paths they depend on were unsettled until the cutover and are
 settled now; Arrt's `operational-spec.md` § Where the two trees live records why each one
 won, and this is the short form:
 
