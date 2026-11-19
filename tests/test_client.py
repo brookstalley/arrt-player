@@ -1259,10 +1259,6 @@ WALL_EVENTS = frozenset(
         "frame.started",
         "frame.stopped",
         "frame.crashed",
-        # The Frame's loop events by the name the record still gives them.
-        "daemon.started",
-        "daemon.stopped",
-        "daemon.crashed",
         "daemon.state_too_new",
         "screen.started",
         "screen.stopped",
