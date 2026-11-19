@@ -12,10 +12,13 @@ wall's pull, with the Frame's driver for the Frame (`run_frame_wall`) and the
 screen's for a screen this host draws on (`run_screen_wall`).
 
 **And one label renderer per mapped label output** (`labels-and-surfaces.md`):
-`run_label` for the e-paper panel, which this module opens once per process
-(`label_panel`) because it is the client's, not any wall's. The Frame's identity
-is read here too, at the client, so a Frame with no wall on it still says who it
-is (`FrameIdentity`).
+`run_label`, on the panel its label names among this client's panels, which this
+module opens once per process (`label_panels`) because they are the client's,
+not any wall's. **The panels are held by output name, zero or more of them, as
+the displays are** (the owner's ruling of 2026-11-19): the configuration
+describes one today (`config.PANEL_OUTPUT`), and nothing here assumes it. The
+Frame's identity is read here too, at the client, so a Frame with no wall on it
+still says who it is (`FrameIdentity`).
 
 **A dead pull ends its own wall's worker, and the supervisor starts it again.**
 A pull that stops leaves its wall rotating its cache, taking no updates and
@@ -53,8 +56,9 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
+from pathlib import Path
 
 from arrt_player import logs
 from arrt_player.client import (
@@ -63,8 +67,9 @@ from arrt_player.client import (
     LabelAssignment,
     OutputReport,
     Supervisor,
+    WorkerStop,
     client_outputs,
-    wall_retired,
+    is_retired,
 )
 from arrt_player.config import (
     ARRT_MODE,
@@ -87,6 +92,7 @@ from arrt_player.ddc import Ddc, DdcBus, I2cTransport, bus_for
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import ScreenOutput, go_dark, screen_wall
 from arrt_player.displays.screen_brightness import ScreenBrightness
+from arrt_player.episodes import ReportOnce
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.manifest import Watcher
@@ -95,7 +101,7 @@ from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
 from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
 from arrt_player.programmes.slideshow import Screen, Slideshow
 from arrt_player.programmes.slideshow_status import SlideshowStatus
-from arrt_player.pull import ClientPull, LabelPull, Pull
+from arrt_player.pull import LABEL_CACHE_DIRNAME, ClientPull, LabelPull, Pull
 from arrt_player.settings_ui import auth, server, store
 from arrt_player.sources.cache import MediaCache
 from arrt_player.sources.fetch import Fetcher
@@ -239,6 +245,18 @@ def label_panel(settings: PanelSettings) -> LabelPanel | None:
     return LabelPanel(name=PANEL_OUTPUT, surface=surface, error=None, size=size)
 
 
+def label_panels(settings: PanelSettings) -> dict[str, LabelPanel]:
+    """Every label panel this client holds, by output name: none, or the one the configuration describes.
+
+    **A mapping, not a panel**, so that what holds, reports, draws on and closes
+    the panels never assumes there is one: the configuration's limit
+    (`config.PANEL_OUTPUT`) is the configuration's, and a second panel would be
+    a second entry here and nothing more.
+    """
+    panel = label_panel(settings)
+    return {panel.name: panel} if panel is not None else {}
+
+
 def frame_tv(settings: FrameSettings) -> SamsungTv:
     """The Frame's television client, as every reader of it is built."""
     return SamsungTv(
@@ -254,25 +272,104 @@ def frame_tv(settings: FrameSettings) -> SamsungTv:
 
 async def run_label(
     settings: ClientSettings,
-    panel: LabelPanel,
+    panels: Mapping[str, LabelPanel],
     assignment: LabelAssignment,
-    stop: asyncio.Event,
-    retired: asyncio.Event,
+    stop: WorkerStop,
     *,
     clock: Clock | None = None,
 ) -> None:
-    """The supervisor's label worker: one renderer on this client's panel, until stopped."""
-    # One clock for both: the pull stamps the server's last answer by `now`, and
-    # the renderer reads that stamp back against its own `now`.
+    """The supervisor's label worker: one renderer on the panel its label names, until stopped.
+
+    **Only on that panel.** A label naming an output this client holds no panel
+    for is said once by name and not drawn, never drawn on another panel: the
+    supervisor already refuses one its label outputs do not list, so reaching
+    here is the two disagreeing, which a restart would not mend. It waits to be
+    stopped rather than ending, which the supervisor would answer with a restart
+    and a line every backoff step.
+    """
+    panel = panels.get(assignment.output)
+    if panel is None:
+        if not stop.is_set():
+            log.error(
+                "label %s names label output %s, and this client holds no panel by that name (it holds %s); it is not drawn",
+                assignment.label_id,
+                assignment.output,
+                ", ".join(sorted(panels)) or "none",
+                extra={"event": "label.no_panel", "label_id": assignment.label_id, "output": assignment.output},
+            )
+            await stop.wait()
+        return
+    # One clock for all three: the pull stamps the server's last answer by `now`,
+    # the renderer reads that stamp back against its own `now`, and the offline
+    # hold runs on the same clock's monotonic as the pull's stamp throttle.
     clock = clock if clock is not None else Clock.system()
     renderer = LabelRenderer(
         assignment=assignment,
         link=LabelPull(settings, assignment.label_id, now=clock.now, monotonic=clock.monotonic),
         panel=panel,
         now=clock.now,
+        monotonic=clock.monotonic,
         poll_seconds=settings.label_poll_seconds,
     )
-    await renderer.run(stop, retired)
+    await renderer.run(stop)
+
+
+def label_cache_file(link: LabelPull) -> Path | None:
+    """Where `link` caches its label's document, or None for an id it will not cache.
+
+    **Learned from the pull, never derived beside it**, so the file removed is
+    the file written: one rule for a label id's path, in `pull.LabelPull`.
+    """
+    # `LabelPull` exposes no public path, and `pull.py` is the one module that
+    # names it; this is the only reader, so a public accessor there replaces
+    # exactly this line.
+    return link._cache_path  # noqa: SLF001 -- the pull owns the path; see above
+
+
+class LabelCacheSweep:
+    """Removes the cached documents of labels the current client document does not map (`Supervisor`'s `forget_labels`).
+
+    **Every file under `LABEL_CACHE_DIRNAME` that no mapped label would read is
+    removed**: a retired label's, one moved to another client's panel, one the
+    server deleted, and an atomic write's leftover. A label the document maps
+    keeps its file whichever of this client's outputs it is on, and whether or
+    not this client can draw it. The supervisor calls this only once a document
+    has been read, so an unreadable or absent one removes nothing.
+
+    **Never raises**: a cache that cannot be swept costs disk, and is said once
+    per episode.
+    """
+
+    def __init__(self, settings: ClientSettings) -> None:
+        self._settings = settings
+        self._directory = settings.cache_dir / LABEL_CACHE_DIRNAME
+        self._unsweepable = ReportOnce()
+
+    def __call__(self, mapped: Collection[str]) -> None:
+        kept = {path for label_id in mapped if (path := label_cache_file(LabelPull(self._settings, label_id))) is not None}
+        try:
+            found = [entry for entry in self._directory.iterdir() if entry not in kept and entry.is_file()]
+            for entry in found:
+                entry.unlink(missing_ok=True)
+                log.info(
+                    "removed %s: no label this client is given reads it",
+                    entry.name,
+                    extra={"event": "label.cache_forgotten", "path": str(entry)},
+                )
+        except FileNotFoundError:
+            # Nothing has been cached yet.
+            return
+        except OSError as exc:
+            if self._unsweepable.begin():
+                log.warning(
+                    "the cached documents of labels this client no longer draws cannot be removed from %s (%s)",
+                    self._directory,
+                    exc,
+                    extra={"event": "label.cache_unsweepable"},
+                )
+            return
+        if self._unsweepable.end():
+            log.info("the label cache can be swept again", extra={"event": "label.cache_sweepable"})
 
 
 async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Clock | None = None) -> None:
@@ -339,7 +436,7 @@ async def run_screen_wall(
     restarts, it does only that.
     """
     if stop.is_set():
-        if wall_retired(stop):
+        if is_retired(stop):
             await go_dark(screen_output(wall, output), wall_id=wall.wall_id, output_name=output)
         return
     wall.wall_dir.mkdir(parents=True, exist_ok=True)
@@ -356,7 +453,7 @@ async def run_screen_wall(
     try:
         await _beside_its_pull(wall, stop, screen.run)
     finally:
-        if wall_retired(stop):
+        if is_retired(stop):
             await go_dark(drawn_on, wall_id=wall.wall_id, output_name=output)
 
 
@@ -606,7 +703,7 @@ async def _run() -> int:
 
     clock = Clock.system()
     identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
-    panel = label_panel(settings.panel)
+    panels = label_panels(settings.panel)
     supervisor = Supervisor(
         settings=settings,
         link=ClientPull(settings),
@@ -614,8 +711,9 @@ async def _run() -> int:
         outputs=lambda: client_outputs(settings, frame_identity=identity.value if identity is not None else None),
         now=clock.now,
         monotonic=clock.monotonic,
-        label_worker=partial(run_label, settings, panel) if panel is not None else None,
-        label_outputs=lambda: [panel.report()] if panel is not None else [],
+        label_worker=partial(run_label, settings, panels, clock=clock) if panels else None,
+        label_outputs=lambda: [panel.report() for panel in panels.values()],
+        forget_labels=LabelCacheSweep(settings),
         frame_identity=identity,
     )
     page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
@@ -625,7 +723,7 @@ async def _run() -> int:
         # After every renderer has stopped. A draw that ran past its budget is
         # left running, so one may still be in the driver: `close` waits for it,
         # for at most the label budget. On e-paper this is the panel's power-down.
-        if panel is not None:
+        for panel in panels.values():
             panel.close()
         stop.set()
         await page

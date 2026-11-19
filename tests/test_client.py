@@ -38,6 +38,7 @@ from arrt_player.client import (
 )
 from arrt_player.compose import Geometry, composed_path, mat_mode
 from arrt_player.config import COMPOSED_DIRNAME, ClientSettings, UiSettings
+from arrt_player.label_renderer import LabelPanel
 from arrt_player.pull import ClientPull
 from arrt_player.wall import Clock
 
@@ -970,10 +971,10 @@ class RecordingLabels:
         self.started: list[LabelAssignment] = []
         self.stopped: list[tuple[LabelAssignment, bool]] = []
 
-    async def __call__(self, assignment, stop, retired) -> None:
+    async def __call__(self, assignment, stop) -> None:
         self.started.append(assignment)
         await stop.wait()
-        self.stopped.append((assignment, retired.is_set()))
+        self.stopped.append((assignment, stop.retired))
 
 
 def with_a_panel(client, drm, labels, **overrides) -> Supervisor:
@@ -1051,7 +1052,7 @@ async def test_two_labels_on_one_output_start_one_renderer(client, server, drm, 
 async def test_a_crashed_renderer_is_logged_and_started_again(client, server, drm, caplog):
     calls: list[str] = []
 
-    async def fails_once(assignment, stop, retired):
+    async def fails_once(assignment, stop):
         calls.append(assignment.label_id)
         if len(calls) == 1:
             raise RuntimeError("something nobody predicted")
@@ -1074,8 +1075,8 @@ async def test_a_label_unmapped_while_its_renderer_waits_to_restart_is_called_on
     calls: list[tuple[bool, bool]] = []
     crashed: list[str] = []
 
-    async def crashes_first(assignment, stop, retired):
-        calls.append((stop.is_set(), retired.is_set()))
+    async def crashes_first(assignment, stop):
+        calls.append((stop.is_set(), stop.retired))
         if len(calls) == 1:
             crashed.append(assignment.label_id)
             raise RuntimeError("the panel's driver raised something nobody predicted")
@@ -1088,6 +1089,77 @@ async def test_a_label_unmapped_while_its_renderer_waits_to_restart_is_called_on
         await eventually(lambda: len(calls) == 2, what="the renderer to be called once more")
 
     assert calls == [(False, False), (True, True)]
+
+
+async def test_a_label_unmapped_while_its_renderer_waits_to_restart_is_left_blank_without_saying_it_started(
+    client, server, drm, caplog
+):
+    """The once-more call through the real worker: the panel is left blank, and
+    the journal says the renderer left it so, not that one started."""
+    from fakes import FakeSurface
+
+    surface = FakeSurface()
+    panels = {"epd-0": LabelPanel(name="epd-0", surface=surface, error=None, size=(1448, 1072))}
+    calls: list[bool] = []
+
+    async def crashes_first(assignment, stop):
+        calls.append(stop.is_set())
+        if len(calls) == 1:
+            raise RuntimeError("the panel's driver raised something nobody predicted")
+        await entry.run_label(client, panels, assignment, stop)
+
+    server.map_label("label-1", "epd-0", "living-room", LABEL_DOCUMENT)
+    supervisor = with_a_panel(client, drm, crashes_first, restart_min_seconds=60, restart_max_seconds=60)
+    try:
+        with caplog.at_level(logging.INFO):
+            async with Running(supervisor):
+                await eventually(lambda: calls, what="the renderer to crash")
+                server.unmap_label("label-1")
+                await eventually(lambda: len(calls) == 2 and surface.shown, what="the once-more call to blank the panel")
+    finally:
+        surface.release.set()
+
+    assert calls == [False, True]
+    assert surface.last_text == []
+    events = [record.__dict__.get("event") for record in caplog.records]
+    assert "label.renderer_started" not in events, "a retired renderer's last call said it started"
+    assert events.count("label.renderer_retired") == 1
+
+
+async def test_a_new_renderer_waits_for_the_one_still_stopping_on_its_panel(client, server, drm):
+    """Two renderers drawing on one panel at once is what the wait prevents."""
+    order: list[str] = []
+
+    async def slow_to_stop(assignment, stop):
+        order.append(f"start {assignment.label_id}")
+        await stop.wait()
+        await asyncio.sleep(0.2)
+        order.append(f"end {assignment.label_id}")
+
+    server.map_label("label-1", "epd-0", "living-room", LABEL_DOCUMENT)
+    async with Running(with_a_panel(client, drm, slow_to_stop)):
+        await eventually(lambda: order == ["start label-1"], what="the first renderer to start")
+        server.map_label("label-2", "epd-0", "study", {**LABEL_DOCUMENT, "wall_id": "study"})
+        await eventually(lambda: "start label-2" in order, what="the second renderer to start")
+
+    assert order[:3] == ["start label-1", "end label-1", "start label-2"], "a renderer started on a panel still being drawn"
+
+
+async def test_a_crashed_renderer_is_started_again_after_the_ladder_s_first_wait_and_not_before(client, server, drm):
+    started: list[float] = []
+
+    async def fails_once(assignment, stop):
+        started.append(asyncio.get_running_loop().time())
+        if len(started) == 1:
+            raise RuntimeError("something nobody predicted")
+        await stop.wait()
+
+    server.map_label("label-1", "epd-0", "living-room", LABEL_DOCUMENT)
+    supervisor = with_a_panel(client, drm, fails_once, restart_min_seconds=0.4, restart_max_seconds=5)
+    async with Running(supervisor):
+        await eventually(lambda: len(started) == 2, what="the renderer to be started again")
+
+    assert 0.4 <= started[1] - started[0] < 1.5, "the restart did not wait the ladder's first step"
 
 
 async def test_the_client_heartbeat_reports_the_panel_and_a_client_without_one_reports_no_label_outputs(client, server, drm):

@@ -216,6 +216,41 @@ class TestWhereThePageListens:
         assert settings.panel.epd_device == "waveshare_epd.it8951"
 
 
+class TestOnePanelIsTheRecordedLimit:
+    """The owner's ruling of 2026-11-19: one label panel per Player is recorded as
+    the limit for now, and nothing may close off several. So a configuration
+    naming two panels is refused at start, by name, citing the limit as the
+    ruling's — never handed to the driver as one identifier (which would fail as
+    a panel that will not open, and read as broken hardware), and never cut down
+    to its first panel with the second silently undriven."""
+
+    @pytest.mark.parametrize(
+        "named",
+        ["waveshare_epd.it8951,omni_epd.mock", "waveshare_epd.it8951 omni_epd.mock", "waveshare_epd.it8951; omni_epd.mock"],
+    )
+    def test_epd_device_naming_two_panels_is_refused_by_name_citing_the_ruling(self, cache_dir: Path, named: str):
+        with pytest.raises(ConfigError) as refused:
+            load(an_environment(cache_dir, frame=False, EPD_DEVICE=named))
+
+        said = str(refused.value)
+        assert "EPD_DEVICE" in said
+        assert "2 panels" in said, "the refusal does not say how many panels the value names"
+        assert "waveshare_epd.it8951" in said
+        assert "omni_epd.mock" in said
+        assert "one label panel" in said, "the refusal does not name the limit"
+        assert "ruling of 2026-11-19" in said, "the refusal does not cite the ruling the limit is"
+        assert "not a limit of the design" in said
+
+    def test_the_slideshow_refuses_two_panels_as_a_client_does(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="EPD_DEVICE names 2 panels"):
+            load(a_slideshow(cache_dir, EPD_DEVICE="waveshare_epd.it8951,omni_epd.mock"))
+
+    def test_one_panel_with_spaces_around_it_is_one_panel(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, frame=False, EPD_DEVICE="  omni_epd.mock  "))
+
+        assert settings.panel.epd_device == "omni_epd.mock"
+
+
 class TestTheFrameIsAnOutputAClientMayHave:
     def test_tv_address_present_is_a_frame(self, cache_dir: Path):
         settings = load(an_environment(cache_dir))

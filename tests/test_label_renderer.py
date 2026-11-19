@@ -37,7 +37,7 @@ from server_double import ServerDouble
 
 from arrt_player import label_renderer as renderer_module
 from arrt_player import logs
-from arrt_player.client import LabelAssignment
+from arrt_player.client import LabelAssignment, WorkerStop
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.label_rule import HOLD, parse_label_document
 from arrt_player.panel import TypeScale
@@ -863,13 +863,12 @@ class TestRunningAndStopping:
     async def test_a_retired_renderer_leaves_its_panel_blank(self, renderer, link, surface):
         """The mapping went: a caption left up would name a wall the panel no longer belongs to."""
         link.serve(a_document())
-        stop, retired = asyncio.Event(), asyncio.Event()
-        running = asyncio.create_task(renderer.run(stop, retired))
+        stop = WorkerStop()
+        running = asyncio.create_task(renderer.run(stop))
         assert await _comes_back(surface.left), "the first label was never drawn"
         assert surface.last_text[:1] == ["Ruscha, Ed"]
 
-        retired.set()
-        stop.set()
+        stop.retire()
         await asyncio.wait_for(running, timeout=5)
 
         assert surface.last_text == []
@@ -879,8 +878,8 @@ class TestRunningAndStopping:
         """A client going down, or a label moved to another wall: the next drawing
         replaces it, and the panel stays open for the next renderer."""
         link.serve(a_document())
-        stop, retired = asyncio.Event(), asyncio.Event()
-        running = asyncio.create_task(renderer.run(stop, retired))
+        stop = WorkerStop()
+        running = asyncio.create_task(renderer.run(stop))
         assert await _comes_back(surface.left), "the first label was never drawn"
 
         stop.set()
@@ -890,6 +889,60 @@ class TestRunningAndStopping:
         assert len(surface.shown) == 1
         assert surface.closed == 0
         assert link.closed == 1
+
+    async def test_a_retired_renderer_blanks_once_and_says_so_once(self, renderer, link, surface, caplog):
+        link.serve(a_document())
+        stop = WorkerStop()
+        with caplog.at_level(logging.INFO, logger="arrt_player.label_renderer"):
+            running = asyncio.create_task(renderer.run(stop))
+            assert await _comes_back(surface.left), "the first label was never drawn"
+            stop.retire()
+            await asyncio.wait_for(running, timeout=5)
+
+        assert [[block.text for block in layout.blocks] for layout in surface.shown][1:] == [[]], "not one blank"
+        events = [record.__dict__.get("event") for record in caplog.records]
+        assert events.count("label.renderer_started") == 1
+        assert events.count("label.renderer_retired") == 1
+
+    async def test_a_renderer_called_already_retired_blanks_and_says_nothing_of_starting(self, renderer, link, surface, caplog):
+        """The supervisor's once-more call, for a label unmapped while its renderer
+        waited to restart: it leaves the panel blank, asks for nothing, and its line
+        says that, not that a renderer started captioning a wall it no longer has."""
+        stop = WorkerStop()
+        stop.retire()
+        with caplog.at_level(logging.INFO, logger="arrt_player.label_renderer"):
+            await asyncio.wait_for(renderer.run(stop), timeout=5)
+
+        assert len(surface.shown) == 1
+        assert surface.last_text == []
+        assert link.fetches == 0, "a retired renderer asked the server for its label"
+        assert link.closed == 1
+        events = [record.__dict__.get("event") for record in caplog.records]
+        assert "label.renderer_started" not in events, "a retired renderer's last call said it started"
+        assert events.count("label.renderer_retired") == 1
+
+    async def test_a_renderer_called_already_stopped_and_not_retired_does_nothing(self, renderer, link, surface, caplog):
+        stop = WorkerStop()
+        stop.set()
+        with caplog.at_level(logging.INFO, logger="arrt_player.label_renderer"):
+            await asyncio.wait_for(renderer.run(stop), timeout=5)
+
+        assert surface.shown == []
+        assert link.fetches == 0
+        assert caplog.records == []
+
+    async def test_a_plain_event_stops_a_renderer_without_retiring_it(self, renderer, link, surface):
+        """Retirement is said one way, by `WorkerStop`: an event that cannot carry it reads as not retired."""
+        link.serve(a_document())
+        stop = asyncio.Event()
+        running = asyncio.create_task(renderer.run(stop))
+        assert await _comes_back(surface.left), "the first label was never drawn"
+
+        stop.set()
+        await asyncio.wait_for(running, timeout=5)
+
+        assert surface.last_text[:1] == ["Ruscha, Ed"]
+        assert len(surface.shown) == 1
 
     def test_closing_the_panel_releases_the_surface(self, panel, surface):
         """On e-paper `close()` is the power-down, not bookkeeping."""
