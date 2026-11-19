@@ -43,6 +43,8 @@ its size is its mode, and it has no density, so its mat is a fraction of its
 shorter side.
 """
 
+import ipaddress
+import math
 import os
 import re
 import unicodedata
@@ -78,6 +80,11 @@ CACHED_MANIFEST_FILENAME: Final[str] = "manifest.json"
 #: wall id may not begin with one (`wall()`), so no wall's directory can be named
 #: this.
 CLIENT_DOCUMENT_FILENAME: Final[str] = ".client.json"
+
+#: The television's pairing token, directly under `CACHE_DIR` when `TV_TOKEN_FILE`
+#: names no other path. **No leading dot**, so it is one of the names a wall id
+#: may not take (`CACHE_DIR_NAMES`).
+TV_TOKEN_FILENAME: Final[str] = "token_file"  # noqa: S105 -- a file's name, not a token
 
 #: The name of this client's Frame output, as it reports it and as a curator
 #: assigns a wall to it. One per client: a client drives at most one television.
@@ -264,6 +271,25 @@ SLIDESHOW_LISTING_FILENAME: Final[str] = ".slideshow-listing.json"
 MPV_RUNTIME_DIRNAME: Final[str] = ".mpv"
 
 
+#: Every name this Player keeps directly under `CACHE_DIR`, beside the walls'
+#: directories. **A wall id may take none of them** (`ClientSettings.wall`): a
+#: wall named `token_file` would put its manifest inside the television's pairing
+#: token, or its directory where the token is written. Built from the constants
+#: that name the files, so a file added later is reserved by naming it here.
+#: Those with a leading dot are refused by the rule against a leading dot too;
+#: listing them as well keeps the set true if that rule changes.
+CACHE_DIR_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        TV_TOKEN_FILENAME,
+        CLIENT_DOCUMENT_FILENAME,
+        settings_store.SETTINGS_FILENAME,
+        SLIDESHOW_MEDIA_DIRNAME,
+        SLIDESHOW_LISTING_FILENAME,
+        MPV_RUNTIME_DIRNAME,
+    }
+)
+
+
 #: The longest name a Player may give itself. It is a label for a person, shown
 #: in the settings page's title and the startup line, not an identifier.
 MAXIMUM_PLAYER_NAME_LENGTH: Final[int] = 64
@@ -366,9 +392,13 @@ class UiSettings:
     #: When a `REDDIT_SESSION` the environment pins says it expires, so the page
     #: can warn about a cookie it may not show.
     pinned_session_expiry: float | None = None
+    #: The names the page answers to beyond the ones it always does (an IP
+    #: address, `localhost`, this machine's own name and `<name>.local`), from
+    #: `UI_ALLOWED_HOSTS`. Lowercased, without a trailing dot.
+    allowed_hosts: frozenset[str] = frozenset()
 
     def startup_lines(self) -> dict[str, object]:
-        return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned)}
+        return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned), "allowed_hosts": sorted(self.allowed_hosts)}
 
 
 class WallIdUnusable(ValueError):
@@ -379,7 +409,9 @@ class WallIdUnusable(ValueError):
     component (`..`, `a/b`, a leading dot) would put a wall's files somewhere
     other than its own directory — beside another wall's, or outside the cache.
     Refused by name rather than cleaned, because a cleaned id is a second wall's
-    directory waiting to happen.
+    directory waiting to happen. So is an id that is one of the names this
+    client keeps beside the walls (`CACHE_DIR_NAMES`), compared without case
+    because a dev machine's filesystem may not distinguish it.
     """
 
 
@@ -709,6 +741,11 @@ class ClientSettings:
                 f"the server named a wall {wall_id!r}, which is not a plain directory name; "
                 "this client keeps each wall's files in a directory named by its id, so it will not serve it"
             )
+        if wall_id.casefold() in {name.casefold() for name in CACHE_DIR_NAMES}:
+            raise WallIdUnusable(
+                f"the server named a wall {wall_id!r}, which is a name this client already keeps in CACHE_DIR; "
+                "a directory by that name would collide with it, so it will not serve it"
+            )
         return WallSettings(
             wall_id=wall_id,
             wall_dir=self.cache_dir / wall_id,
@@ -835,7 +872,7 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings | SlideshowSet
         client_token=_require(env, "CLIENT_TOKEN"),
         player_name=(env.get("PLAYER_NAME") or "").strip(),
         cache_dir=cache_dir,
-        poll_interval_seconds=_float(env, "MANIFEST_POLL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS),
+        poll_interval_seconds=_seconds(env, "MANIFEST_POLL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS),
         frame=_frame(env, cache_dir),
         panel=_panel(env),
         mat_width_inches=_positive_float(env, "MAT_WIDTH_INCHES", DEFAULT_MAT_WIDTH_INCHES),
@@ -855,11 +892,14 @@ def _slideshow(env: dict[str, str], cache_dir: Path) -> SlideshowSettings:
     minimum = (env.get("SLIDESHOW_MIN_SECONDS") or "").strip()
     maximum = (env.get("SLIDESHOW_MAX_SECONDS") or "").strip()
     name = (env.get("PLAYER_NAME") or "").strip()
+    dwell = dwell_problem(minimum, maximum)
     for said in (
         listing_url_problem(url),
         session_problem(session),
         slideshow_output_problem(output),
-        dwell_problem(minimum, maximum),
+        # Named here rather than in `dwell_problem`, whose words the page shows
+        # beside fields that are not called by the keys' names.
+        dwell and f"SLIDESHOW_MIN_SECONDS is {minimum!r} and SLIDESHOW_MAX_SECONDS is {maximum!r}. {dwell}",
         player_name_problem(name),
     ):
         if said:
@@ -906,6 +946,7 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
     if not 0 < port < 65536:  # noqa: PLR2004 -- the range of a TCP port
         raise ConfigError(f"UI_PORT must be a TCP port, not {port}.")
     return UiSettings(
+        allowed_hosts=_host_names(env, "UI_ALLOWED_HOSTS"),
         cache_dir=cache_dir,
         bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
         port=port,
@@ -914,6 +955,33 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
         pinned_values={name: clean(env[name]) for name, clean in _PINNED_SHOWN.items() if env.get(name)},  # type: ignore[operator]
         pinned_session_expiry=session_expiry(clean_session(env["REDDIT_SESSION"])) if env.get("REDDIT_SESSION") else None,
     )
+
+
+#: A DNS name: dot-separated labels of letters, digits and inner hyphens.
+_HOST_NAME: Final = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def _host_names(env: dict[str, str], name: str) -> frozenset[str]:
+    """Comma-separated host names, lowercased; a URL, a port or a path among them is refused by name.
+
+    Refused rather than reduced to its name, because `http://wall.lan` or
+    `wall.lan:8771` is a sign the operator meant something this setting does not
+    do, and quietly keeping half of it would hide that. An IP address is
+    accepted, though the page answers to every one anyway.
+    """
+    names = frozenset(part.strip().rstrip(".").lower() for part in (env.get(name) or "").split(",") if part.strip())
+    for host in names:
+        if not (_HOST_NAME.fullmatch(host) or _is_ip_address(host)):
+            raise ConfigError(f"{name} lists host names only, as in wall.lan,wall.example.com; got {host!r}, which is not one.")
+    return names
+
+
+def _is_ip_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _stored_values(cache_dir: Path) -> dict[str, str]:
@@ -959,7 +1027,7 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
     return FrameSettings(
         tv_address=_require(env, "TV_ADDRESS"),
         tv_port=_int(env, "TV_PORT", 8002),
-        tv_token_file=_absolute(token_file, "TV_TOKEN_FILE") if token_file else cache_dir / "token_file",
+        tv_token_file=_absolute(token_file, "TV_TOKEN_FILE") if token_file else cache_dir / TV_TOKEN_FILENAME,
         tv_client_name=env.get("TV_CLIENT_NAME") or DEFAULT_TV_CLIENT_NAME,
         latitude=location.latitude,
         longitude=location.longitude,
@@ -967,13 +1035,13 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         location_region=location.region,
         tv_min_brightness=_int(env, "TV_MIN_BRIGHTNESS", DEFAULT_TV_MIN_BRIGHTNESS),
         tv_max_brightness=_int(env, "TV_MAX_BRIGHTNESS", DEFAULT_TV_MAX_BRIGHTNESS),
-        brightness_interval_seconds=_float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS),
-        upload_timeout_seconds=_float(env, "TV_UPLOAD_TIMEOUT_SECONDS", DEFAULT_UPLOAD_TIMEOUT_SECONDS),
-        upload_retry_seconds=_float(env, "TV_UPLOAD_RETRY_SECONDS", DEFAULT_UPLOAD_RETRY_SECONDS),
-        select_confirm_seconds=_float(env, "TV_SELECT_CONFIRM_SECONDS", DEFAULT_SELECT_CONFIRM_SECONDS),
-        tv_connect_timeout_seconds=_float(env, "TV_CONNECT_TIMEOUT_SECONDS", DEFAULT_TV_CONNECT_TIMEOUT_SECONDS),
-        tv_retry_min_seconds=_float(env, "TV_RETRY_MIN_SECONDS", DEFAULT_TV_RETRY_MIN_SECONDS),
-        tv_retry_max_seconds=_float(env, "TV_RETRY_MAX_SECONDS", DEFAULT_TV_RETRY_MAX_SECONDS),
+        brightness_interval_seconds=_seconds(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS),
+        upload_timeout_seconds=_seconds(env, "TV_UPLOAD_TIMEOUT_SECONDS", DEFAULT_UPLOAD_TIMEOUT_SECONDS),
+        upload_retry_seconds=_seconds(env, "TV_UPLOAD_RETRY_SECONDS", DEFAULT_UPLOAD_RETRY_SECONDS),
+        select_confirm_seconds=_seconds(env, "TV_SELECT_CONFIRM_SECONDS", DEFAULT_SELECT_CONFIRM_SECONDS),
+        tv_connect_timeout_seconds=_seconds(env, "TV_CONNECT_TIMEOUT_SECONDS", DEFAULT_TV_CONNECT_TIMEOUT_SECONDS),
+        tv_retry_min_seconds=_seconds(env, "TV_RETRY_MIN_SECONDS", DEFAULT_TV_RETRY_MIN_SECONDS),
+        tv_retry_max_seconds=_seconds(env, "TV_RETRY_MAX_SECONDS", DEFAULT_TV_RETRY_MAX_SECONDS),
         tv_panel_width_px=_positive_int(env, "TV_PANEL_WIDTH_PX", DEFAULT_TV_PANEL_WIDTH_PX),
         tv_panel_height_px=_positive_int(env, "TV_PANEL_HEIGHT_PX", DEFAULT_TV_PANEL_HEIGHT_PX),
         tv_panel_diagonal_inches=_positive_float(env, "TV_PANEL_DIAGONAL_INCHES", DEFAULT_TV_PANEL_DIAGONAL_INCHES),
@@ -990,8 +1058,8 @@ def _location(env: dict[str, str]) -> Location | None:
     if not any(env.get(name) for name in _LOCATION_KEYS):
         return None
     return Location(
-        latitude=_float(env, "LATITUDE", None),
-        longitude=_float(env, "LONGITUDE", None),
+        latitude=_bounded_float(env, "LATITUDE", 90.0),
+        longitude=_bounded_float(env, "LONGITUDE", 180.0),
         name=_require(env, "LOCATION_NAME"),
         region=env.get("LOCATION_REGION") or "",
     )
@@ -1009,7 +1077,7 @@ def _screen_brightness(env: dict[str, str]) -> ScreenBrightnessSettings:
     if switch not in ("on", "off"):
         raise ConfigError(f"SCREEN_BRIGHTNESS is {switch!r}, and it must be on or off.")
     location = _location(env)
-    interval = _float(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS)
+    interval = _seconds(env, "BRIGHTNESS_INTERVAL_SECONDS", DEFAULT_BRIGHTNESS_INTERVAL_SECONDS)
     if switch == "off" or location is None:
         return ScreenBrightnessSettings(location=location, interval_seconds=interval, enabled=switch == "on")
     minimum = _int(env, "SCREEN_MIN_BRIGHTNESS", DEFAULT_SCREEN_MIN_BRIGHTNESS)
@@ -1092,9 +1160,36 @@ def _float(env: dict[str, str], name: str, default: float | None) -> float:
             raise ConfigError(f"{name} is not set. Copy .env.example to .env and fill it in.")
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ConfigError(f"{name} is {raw!r}, which is not a number.") from exc
+    # `float` reads "nan" and "inf" as numbers. No setting here means either:
+    # a NaN compares false with everything, so a check built on `<` passes it.
+    if not math.isfinite(value):
+        raise ConfigError(f"{name} is {raw!r}, which is not a finite number.")
+    return value
+
+
+def _seconds(env: dict[str, str], name: str, default: float) -> float:
+    """An interval or a timeout, refused by name at zero or below.
+
+    Zero is not "as fast as possible": `MANIFEST_POLL_SECONDS=0` spins the wall
+    loop and the pull against the server, and `TV_RETRY_MIN_SECONDS=0` turns the
+    reconnection backoff into none, against a set that refuses connections after
+    churn. Infinity and NaN are refused by `_float`.
+    """
+    value = _float(env, name, default)
+    if not value > 0:
+        raise ConfigError(f"{name} is {value:g}, and it must be a number of seconds above zero.")
+    return value
+
+
+def _bounded_float(env: dict[str, str], name: str, limit: float) -> float:
+    """A required coordinate in degrees, refused by name outside -limit to limit."""
+    value = _float(env, name, None)
+    if not -limit <= value <= limit:
+        raise ConfigError(f"{name} is {value:g}, and it must be between {-limit:g} and {limit:g} degrees.")
+    return value
 
 
 def _positive_int(env: dict[str, str], name: str, default: int) -> int:
