@@ -1709,6 +1709,58 @@ async def test_every_line_a_worker_logs_names_its_wall(monkeypatch, client, serv
     } <= seen
 
 
+async def test_every_line_a_player_drawing_to_files_logs_names_its_wall(client, server, drm, tmp_path):
+    """**The file screen and the file label, the kinds of worker chunk 05 added, held to the same rule.**
+
+    A Player with no hardware (`FILE_OUTPUT_DIR`): a wall (hall) on the file
+    screen, and the file label captioning it. Each line is judged by `_faults`
+    exactly as the hardware drive above judges it.
+    """
+    from arrt_player.config import FILE_LABEL_OUTPUT, FILE_SCREEN_OUTPUT, FileOutputSettings
+    from arrt_player.displays.file_output import RECORD_FILENAME
+
+    files = FileOutputSettings(directory=tmp_path / "drawn", screen=(640, 360), label=True)
+    settings = replace(client, frame=None, panel=replace(client.panel, epd_device=""), files=files, label_poll_seconds=0.02)
+    panels = entry.label_panels(settings)
+    assert set(panels) == {FILE_LABEL_OUTPUT}
+    # The double's own wall is on a Frame, which a Player drawing to files has not.
+    server.unassign("living-room")
+    server.publish("h1", "h2", wall_id="hall")
+    server.assign("hall", FILE_SCREEN_OUTPUT)
+    server.map_label("label-1", FILE_LABEL_OUTPUT, "hall", {**LABEL_DOCUMENT, "wall_id": "hall"})
+    journal = Journal()
+
+    def recorded(output: str) -> dict:
+        path = files.directory / output / RECORD_FILENAME
+        return json.loads(path.read_text()) if path.is_file() else {}
+
+    supervisor = supervisor_for(
+        settings,
+        drm,
+        outputs=partial(entry.player_outputs, settings),
+        label_worker=partial(entry.run_label, settings, panels, clock=Clock.system()),
+        label_outputs=lambda: [panel.report() for panel in panels.values()],
+        forget_labels=entry.LabelCacheSweep(settings),
+    )
+    async with Running(supervisor):
+        # Waited for by what the outputs wrote, never by the field under test.
+        await eventually(lambda: recorded(FILE_SCREEN_OUTPUT).get("outcome") == "picture", what="hall to be drawn")
+        await eventually(lambda: recorded(FILE_LABEL_OUTPUT).get("wall_id") == "hall", what="the label to be drawn")
+
+    lines = [line for line in journal.lines() if line["logger"].startswith("arrt_player")]
+    wrong = [fault for line in lines for fault in _faults(line, {"hall"}, settings.cache_dir)]
+
+    assert wrong == [], "\n".join(sorted({" ".join(map(str, fault)) for fault in wrong}))
+    seen = {(line.get("event"), line.get("wall_id"), line.get("label_id")) for line in lines}
+    assert {
+        ("pull.adopted", "hall", None),
+        ("compose.done", "hall", None),
+        ("screen.started", "hall", None),
+        ("label.drawn", "hall", "label-1"),
+        ("client.started", None, None),
+    } <= seen
+
+
 # -- a wall's directory goes a week after the wall does ------------------------------------------
 
 DAY = 24 * 60 * 60
