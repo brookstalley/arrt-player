@@ -208,6 +208,69 @@ class TestUploading:
         assert state.binding_for("w1").tv_content_id == first
         assert len(tv.holding) == 1
 
+    async def test_a_picture_composed_again_under_its_name_is_not_uploaded_again(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """A work leaving the feed loses its composed file, and gets the same pixels in a new file when it returns.
+
+        The file's stamp moves and its bytes do not, so the set's copy is still
+        the right one: re-sending it is the upload of several megabytes that a
+        theme hung for one evening would cost every other work the next morning.
+        """
+        publish(["w1", "w2"], interval_seconds=10)
+        await daemon.tick()
+        first = state.binding_for("w2").tv_content_id
+        picture = publish.picture("w2")
+        same = picture.read_bytes()
+        picture.unlink()
+        picture.write_bytes(same)
+
+        for _ in range(3):
+            clock.advance(10)
+            await daemon.tick()
+
+        assert state.binding_for("w2").tv_content_id == first, "a picture composed again with the same pixels was re-sent"
+        assert len(tv.uploaded) == 2
+
+    async def test_a_row_an_earlier_player_recorded_by_the_files_stamp_uploads_nothing_after_the_upgrade(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """A Player before schema 3 recorded the file's modification time and size; while the file keeps them, it is current."""
+        publish(["w1"], interval_seconds=10)
+        await daemon.tick()
+        first = state.binding_for("w1").tv_content_id
+        stat = publish.picture("w1").stat()
+        state._connection.execute(
+            "UPDATE tv_binding SET render_fingerprint = ? WHERE artwork_id = 'w1'", (f"{stat.st_mtime_ns}:{stat.st_size}",)
+        )
+        state._connection.commit()
+
+        for _ in range(3):
+            clock.advance(10)
+            await daemon.tick()
+        assert state.binding_for("w1").tv_content_id == first, "the upgrade re-sent a picture whose file had not changed"
+
+        Image.new("RGB", (8, 8), (255, 0, 0)).save(publish.picture("w1"), format="JPEG")
+        clock.advance(10)
+        await daemon.tick()
+        assert state.binding_for("w1").tv_content_id != first, "a file rewritten under an earlier Player's row was not re-sent"
+
+    def test_composing_a_work_again_gives_the_same_bytes(self, tmp_path: Path, settings):
+        """What the fingerprint above relies on: a picture removed and composed again under its key is the same file."""
+        from conftest import a_master
+
+        from arrt_player.compose import DEFAULT_MAT_MODE, compose
+
+        master = a_master(tmp_path / "master.jpg", size=(640, 480))
+        work = {"master_sha256": "ab" * 32, "mat_color": "#336699", "mode": DEFAULT_MAT_MODE, "geometry": settings.geometry}
+        first = compose(master, **work, directory=tmp_path)
+        before = first.read_bytes()
+        first.unlink()
+        again = compose(master, **work, directory=tmp_path)
+
+        assert again == first
+        assert again.read_bytes() == before, "composing the same work again gave different bytes"
+
     async def test_a_work_already_on_the_television_is_not_uploaded_again(self, daemon: Wall, tv: FakeTv, publish, clock):
         publish(["w1", "w2"], interval_seconds=10)
         await daemon.tick()

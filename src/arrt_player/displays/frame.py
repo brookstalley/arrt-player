@@ -42,6 +42,8 @@ cannot outlive. The heartbeat's `last_error` names it. Anything else the store
 raises is this code's mistake and still reaches the supervisor's restart.
 """
 
+import functools
+import hashlib
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -952,18 +954,38 @@ class FrameDisplay:
 
 
 def _fingerprint(render: Path) -> str | None:
-    """What this render file looks like right now, cheaply.
+    """What this picture's bytes are: their SHA-256, read once per change of the file.
 
-    **Modification time and size rather than a hash.** The wall reads this on
-    every pass over every picture; hashing forty 2 MB composites a second would be
-    real I/O on an SD card, to answer a question a `stat` answers. The pipeline
-    that writes these files always rewrites them wholesale, so a change that keeps
-    both the size and the nanosecond timestamp is not a case this deployment can
-    produce.
+    **The bytes, not the file's modification time.** A picture whose work left
+    the feed is removed from the composed directory, and composed again under
+    the same name when the work returns: the same pixels in a new file. Keyed on
+    the file's stamp, that read as a new picture and re-uploaded every work of a
+    theme hung again after an evening away. A file rewritten in place with
+    different pixels still reads as changed.
+
+    **Hashed only when the file's stamp moves** (`_digest` is cached on it), so a
+    pass over every picture costs a `stat` each, as it did; a hash is paid once
+    per file written, and the upload reads the same bytes anyway.
 
     None when the file cannot be read, which is treated as "unknown" and never as
     "unchanged" — see `_render_changed`.
     """
+    try:
+        stat = render.stat()
+        return _digest(render, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+@functools.lru_cache(maxsize=512)
+def _digest(render: Path, mtime_ns: int, size: int) -> str:  # noqa: ARG001 -- the stamp is the cache's key
+    """The file's SHA-256, cached on its stamp; a theme holds far fewer pictures than the cache."""
+    with render.open("rb") as picture:
+        return f"sha256:{hashlib.file_digest(picture, 'sha256').hexdigest()}"
+
+
+def _stamp(render: Path) -> str | None:
+    """The fingerprint a Player before schema 3 recorded: the file's modification time and size."""
     try:
         stat = render.stat()
     except OSError:
@@ -998,8 +1020,18 @@ def _render_changed(binding: Binding, render: Path) -> bool:
     A binding with no recorded fingerprint — every row written before the column
     existed — counts as changed. That costs one re-upload per work on the first
     pass after an upgrade, which is the honest price of never having looked.
+
+    **A row recorded by an earlier Player holds the file's stamp** (`_stamp`),
+    and is unchanged while the file still has it, so the upgrade itself uploads
+    nothing; once the file is written again, the stamp no longer matches and the
+    work is sent once, as that Player would have sent it.
     """
-    return binding.render_fingerprint != _fingerprint(render)
+    recorded = binding.render_fingerprint
+    if recorded is None:
+        return True
+    if recorded == _fingerprint(render):
+        return False
+    return recorded != _stamp(render)
 
 
 def _say_the_wall_recovered() -> None:
