@@ -60,7 +60,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 
 from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
-from arrt_player.config import _PLAIN_COMPONENT, CACHED_MANIFEST_FILENAME, ClientSettings, WallSettings
+from arrt_player.config import CACHED_MANIFEST_FILENAME, PLAIN_COMPONENT, ClientSettings, WallSettings
 from arrt_player.episodes import ReportOnce
 from arrt_player.heartbeat import path_in as heartbeat_path_in
 from arrt_player.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
@@ -888,7 +888,7 @@ class LabelPull:
         #: None for an id that is not a plain path component: put into the
         #: route, "../x" would ask for another route of the server's, so it is
         #: never asked for at all.
-        self._url = self._server + LABEL_ROUTE.format(label_id=label_id) if _PLAIN_COMPONENT.fullmatch(label_id) else None
+        self._url = self._server + LABEL_ROUTE.format(label_id=label_id) if PLAIN_COMPONENT.fullmatch(label_id) else None
         self._unusable = ReportOnce()
         self._etag: str | None = None
         self._session: aiohttp.ClientSession | None = None

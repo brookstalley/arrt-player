@@ -415,7 +415,9 @@ class WallIdUnusable(ValueError):
     """
 
 
-_PLAIN_COMPONENT: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)*")
+#: One plain path component: no `/`, no `..`, no leading dot. A wall id must be
+#: one to name a directory, and a label id one to be put into a route.
+PLAIN_COMPONENT: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)*")
 
 
 @dataclass(frozen=True)
@@ -736,7 +738,7 @@ class ClientSettings:
 
     def wall(self, wall_id: str) -> WallSettings:
         """One wall's settings, its directory derived from its id. Raises `WallIdUnusable`."""
-        if not _PLAIN_COMPONENT.fullmatch(wall_id):
+        if not PLAIN_COMPONENT.fullmatch(wall_id):
             raise WallIdUnusable(
                 f"the server named a wall {wall_id!r}, which is not a plain directory name; "
                 "this client keeps each wall's files in a directory named by its id, so it will not serve it"
