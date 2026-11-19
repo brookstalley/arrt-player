@@ -45,7 +45,6 @@ cookie, or waiting.
 import asyncio
 import hashlib
 import html
-import ipaddress
 import logging
 import re
 import socket
@@ -69,6 +68,7 @@ from aiohttp.web import (
 
 from arrt_player.client import OutputReport, hdmi_outputs, player_name
 from arrt_player.config import (
+    ALLOWED_HOSTS_SETTING,
     ARRT_MODE,
     DEFAULT_SLIDESHOW_MAX_SECONDS,
     DEFAULT_SLIDESHOW_MIN_SECONDS,
@@ -78,6 +78,8 @@ from arrt_player.config import (
     UiSettings,
     client_token_problem,
     dwell_problem,
+    is_ip_address,
+    normal_host_name,
     player_mode_problem,
     player_name_problem,
     server_url_problem,
@@ -132,9 +134,6 @@ def stylesheet_href(directory: Path = STATIC_DIRECTORY) -> str:
     return f"/static/settings.css?v={digest}"
 
 
-#: The setting a refused name is told to add itself to.
-ALLOWED_HOSTS_SETTING: Final[str] = "UI_ALLOWED_HOSTS"
-
 #: `421 Misdirected Request` for a name this page does not answer to, as Arrt's
 #: server answers the same case: the request reached the wrong server as far as
 #: this one is concerned.
@@ -174,10 +173,10 @@ def _split_authority(value: str) -> tuple[str, int | None]:
     else:
         name, port_text = value, ""
     if not port_text:
-        return name.rstrip(".").lower(), None
+        return normal_host_name(name), None
     if not (port_text.isascii() and port_text.isdigit()) or not 1 <= int(port_text) <= _LARGEST_PORT:
         return "", None
-    return name.rstrip(".").lower(), int(port_text)
+    return normal_host_name(name), int(port_text)
 
 
 def own_names(bind: str = "") -> frozenset[str]:
@@ -200,13 +199,7 @@ def name_allowed(name: str, allowed: frozenset[str]) -> bool:
     """Whether `name`, already reduced by `hostname`, is one this page answers to. Any IP address is."""
     if not name:
         return False
-    if name in allowed:
-        return True
-    try:
-        ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    return True
+    return name in allowed or is_ip_address(name)
 
 
 #: A refused name is said once, and again at most once in this long while it

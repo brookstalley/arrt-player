@@ -11,6 +11,7 @@ may not have, so the Frame's own required values are required only on a client
 configured with one.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from arrt_player.config import (
     CACHE_DIR_NAMES,
     DEFAULT_UI_BIND,
     DEFAULT_UI_PORT,
+    PLAIN_COMPONENT,
     RETIRED_SETTINGS,
     ConfigError,
     SetupRequired,
@@ -29,6 +31,7 @@ from arrt_player.config import (
     load,
     load_ui,
 )
+from arrt_player.settings_ui import server as settings_server
 from arrt_player.settings_ui import store
 
 FRAME = {
@@ -1012,3 +1015,111 @@ class TestAScreensBrightness:
 
         with pytest.raises(ConfigError, match="LATITUDE, LONGITUDE and LOCATION_NAME"):
             load(environment)
+
+
+# -- the names kept under CACHE_DIR, and the wall ids they forbid (review O-3) ------------
+
+#: The attribute or variable names that hold `CACHE_DIR` where a path is built on it.
+_CACHE_ROOTS = {"cache_dir", "_root"}
+
+
+def _string_constants(trees: dict[str, ast.Module]) -> dict[str, dict[str, str]]:
+    """Each module's names for text: its own module-level `NAME = "…"`, then what it imports from the package."""
+    own = {
+        dotted: {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)
+        }
+        for dotted, tree in trees.items()
+    }
+    names = {dotted: dict(table) for dotted, table in own.items()}
+    for dotted, tree in trees.items():
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module in own:
+                for alias in node.names:
+                    if alias.name in own[node.module]:
+                        names[dotted][alias.asname or alias.name] = own[node.module][alias.name]
+    return names
+
+
+def _names_kept_under_the_cache() -> dict[str, str]:
+    """Every name the Player's code puts directly under `CACHE_DIR`, with where it is built.
+
+    Read from the code that makes the paths (`<cache_dir> / NAME` and `<cache_dir> / f"{PREFIX}…"`), each
+    constant resolved from its module's source, never copied here and never imported (some modules load
+    drivers a test machine may not have).
+    """
+    package = Path(config.__file__).parent
+    trees = {
+        ".".join(("arrt_player", *source.relative_to(package).with_suffix("").parts)).removesuffix(".__init__"): ast.parse(
+            source.read_text(encoding="utf-8")
+        )
+        for source in sorted(package.rglob("*.py"))
+    }
+    constants = _string_constants(trees)
+    found: dict[str, str] = {}
+    for dotted, tree in trees.items():
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)):
+                continue
+            root = node.left.attr if isinstance(node.left, ast.Attribute) else getattr(node.left, "id", None)
+            if root not in _CACHE_ROOTS:
+                continue
+            right = node.right
+            if isinstance(right, ast.JoinedStr) and right.values:
+                right = right.values[0].value if isinstance(right.values[0], ast.FormattedValue) else right.values[0]
+            if isinstance(right, ast.Name) and right.id in constants[dotted]:
+                found[constants[dotted][right.id]] = f"{dotted}.{right.id}"
+            elif isinstance(right, ast.Constant) and isinstance(right.value, str):
+                found[right.value] = f"{dotted}: a literal"
+    return found
+
+
+class TestTheNamesUnderTheCache:
+    def test_the_scan_finds_the_names_it_was_written_for(self):
+        """Not vacuous: plain and dotted, from four modules, the label cache and the removal prefix among them."""
+        found = _names_kept_under_the_cache()
+
+        assert {
+            config.TV_TOKEN_FILENAME,
+            config.CLIENT_DOCUMENT_FILENAME,
+            store.SETTINGS_FILENAME,
+            pull.LABEL_CACHE_DIRNAME,
+            pull.CLIENT_ETAG_FILENAME,
+        } <= set(found)
+        assert any(name.startswith(".removing") for name in found)
+
+    def test_every_name_kept_under_the_cache_is_reserved_or_no_possible_wall_id(self):
+        """A plain name kept there and not in `CACHE_DIR_NAMES` is a wall id that would collide with it."""
+        colliding = {
+            name: where
+            for name, where in _names_kept_under_the_cache().items()
+            if name not in CACHE_DIR_NAMES and PLAIN_COMPONENT.fullmatch(f"{name}x")
+        }
+
+        assert colliding == {}
+
+
+# -- one host helper and one setting name for the page and the configuration (review O-10) --
+
+
+class TestThePageAndTheConfigurationReadNamesAlike:
+    @pytest.mark.parametrize("listed", ["Wall.LAN.", "wall.example.com", "WALL.EXAMPLE.COM.", "192.0.2.10", "::1"])
+    def test_a_name_listed_is_the_name_a_request_carrying_it_is_reduced_to(self, cache_dir: Path, listed: str):
+        """With a port and without, as a browser sends either: both go through the one helper."""
+        ui = load_ui(an_environment(cache_dir, frame=False, UI_ALLOWED_HOSTS=listed))
+        bracketed = f"[{listed}]" if ":" in listed else listed
+
+        assert {settings_server.hostname(host) for host in (bracketed, f"{bracketed}:8771")} <= ui.allowed_hosts
+
+    def test_the_setting_is_named_in_one_place(self):
+        literal = '"UI_ALLOWED_HOSTS"'
+        sources = {module.__name__: Path(module.__file__).read_text(encoding="utf-8") for module in (config, settings_server)}
+
+        assert {name: text.count(literal) for name, text in sources.items()} == {config.__name__: 1, settings_server.__name__: 0}
+        assert settings_server.ALLOWED_HOSTS_SETTING is config.ALLOWED_HOSTS_SETTING

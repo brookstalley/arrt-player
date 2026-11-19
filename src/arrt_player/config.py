@@ -267,6 +267,28 @@ DEFAULT_UI_BIND: Final[str] = "0.0.0.0"  # noqa: S104 -- the page is reached fro
 #: Beside the server's 8770, and distinct from it, so one host can run both.
 DEFAULT_UI_PORT: Final[int] = 8771
 
+#: The setting that lists the names the page answers to beyond its own, as
+#: `load_ui` reads it and as the page's refusal tells a person to add a name to.
+ALLOWED_HOSTS_SETTING: Final[str] = "UI_ALLOWED_HOSTS"
+
+#: A DNS name: dot-separated labels of letters, digits and inner hyphens.
+_HOST_NAME: Final = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def normal_host_name(value: str) -> str:
+    """A host name as the page compares names: lowercased, without a trailing dot. Nothing else is changed."""
+    return value.rstrip(".").lower()
+
+
+def is_ip_address(value: str) -> bool:
+    """Whether `value` is an IPv4 or IPv6 address as written, unbracketed."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 #: The keys without which there is no server to pull from. Missing either starts
 #: setup mode rather than refusing: the page is how they get set.
 SERVER_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN")
@@ -320,13 +342,22 @@ FILE_OUTPUT_KEYS: Final[tuple[str, ...]] = ("FILE_OUTPUT_DIR", "FILE_OUTPUT_SCRE
 _SIZE: Final = re.compile(r"([0-9]+)x([0-9]+)")
 
 
-#: Every name this Player keeps directly under `CACHE_DIR`, beside the walls'
-#: directories. **A wall id may take none of them** (`ClientSettings.wall`): a
-#: wall named `token_file` would put its manifest inside the television's pairing
-#: token, or its directory where the token is written. Built from the constants
-#: that name the files, so a file added later is reserved by naming it here.
-#: Those with a leading dot are refused by the rule against a leading dot too;
-#: listing them as well keeps the set true if that rule changes.
+#: **The names a wall id may not take** (`ClientSettings.wall`), because this
+#: Player keeps a file or directory by that name directly under `CACHE_DIR`,
+#: beside the walls' directories: a wall named `token_file` would put its
+#: manifest inside the television's pairing token, or its directory where the
+#: token is written. Built from the constants that name the files.
+#:
+#: **What it is not: a list of everything kept there.** A name with a leading
+#: dot can never be a wall id (`PLAIN_COMPONENT`), so the dotted names kept
+#: under `CACHE_DIR` by other modules (the label cache and the client document's
+#: ETag in `pull.py`, a wall's directory being removed in `client.py`, each
+#: file's write in progress) are not listed, and need not be. The dotted names
+#: this module defines are listed as well, so the set stays true of them if that
+#: rule ever loosens. `tests/test_config.py` holds every name kept under
+#: `CACHE_DIR` to be in this set or to be no possible wall id, read from the
+#: code that makes the paths, so a plain name added later and not listed here
+#: fails there.
 CACHE_DIR_NAMES: Final[frozenset[str]] = frozenset(
     {
         TV_TOKEN_FILENAME,
@@ -1041,7 +1072,7 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
     if not 0 < port < 65536:  # noqa: PLR2004 -- the range of a TCP port
         raise ConfigError(f"UI_PORT must be a TCP port, not {port}.")
     return UiSettings(
-        allowed_hosts=_host_names(env, "UI_ALLOWED_HOSTS"),
+        allowed_hosts=_host_names(env, ALLOWED_HOSTS_SETTING),
         cache_dir=cache_dir,
         bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
         port=port,
@@ -1052,10 +1083,6 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
     )
 
 
-#: A DNS name: dot-separated labels of letters, digits and inner hyphens.
-_HOST_NAME: Final = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
-
-
 def _host_names(env: dict[str, str], name: str) -> frozenset[str]:
     """Comma-separated host names, lowercased; a URL, a port or a path among them is refused by name.
 
@@ -1064,19 +1091,11 @@ def _host_names(env: dict[str, str], name: str) -> frozenset[str]:
     do, and quietly keeping half of it would hide that. An IP address is
     accepted, though the page answers to every one anyway.
     """
-    names = frozenset(part.strip().rstrip(".").lower() for part in (env.get(name) or "").split(",") if part.strip())
+    names = frozenset(normal_host_name(part.strip()) for part in (env.get(name) or "").split(",") if part.strip())
     for host in names:
-        if not (_HOST_NAME.fullmatch(host) or _is_ip_address(host)):
+        if not (_HOST_NAME.fullmatch(host) or is_ip_address(host)):
             raise ConfigError(f"{name} lists host names only, as in wall.lan,wall.example.com; got {host!r}, which is not one.")
     return names
-
-
-def _is_ip_address(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return True
 
 
 def _stored_values(cache_dir: Path) -> dict[str, str]:
