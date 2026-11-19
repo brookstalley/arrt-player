@@ -114,15 +114,21 @@ class JsonFormatter(logging.Formatter):
 #: rather than evicting handlers it knows nothing about.
 _INSTALLED: Final[str] = "_display_log_handler"
 
-#: The television client's logger, floored at WARNING in `configure` because it
-#: writes the pairing token at INFO. Named here rather than inline so the reason
-#: travels with the name.
-_TELEVISION_CLIENT: Final[str] = "samsungtvws"
+#: The loggers floored at WARNING in `configure`, because each writes the
+#: television's pairing token below it. Named here rather than inline so the
+#: reason travels with the name:
+#:
+#: - `samsungtvws`, the television client, writes `New token %s` at INFO on
+#:   every pairing.
+#: - `websockets`, which carries the art channel, writes `> GET %s HTTP/1.1` at
+#:   DEBUG through `websockets.client` (`ClientProtocol.send_request`), and the
+#:   path it names ends `&token=…`. Its request headers follow at the same level.
+_TELEVISION_LOGGERS: Final[tuple[str, ...]] = ("samsungtvws", "websockets")
 
-#: The level the client's own logging is held at or above. **WARNING, not INFO,
-#: and the difference is the whole point**: the token line is emitted at INFO, so
+#: The level those loggers are held at or above. **WARNING, not INFO, and the
+#: difference is the whole point**: the client's token line is emitted at INFO, so
 #: a floor of INFO permits exactly what it was written to prevent. Nothing below
-#: WARNING in that library says anything this plane's own events do not.
+#: WARNING in either library says anything this plane's own events do not.
 _TELEVISION_CLIENT_FLOOR: Final[int] = logging.WARNING
 
 
@@ -161,5 +167,8 @@ def configure(level: int = logging.INFO) -> None:
     # This floor read INFO until 2026-08-07, which permitted precisely the line it
     # was written to stop; the belief that the token was a DEBUG line was never
     # checked against the pinned fork. The lesson is cheap and general: a guard
-    # aimed at a specific line has to be verified against that line.
-    logging.getLogger(_TELEVISION_CLIENT).setLevel(max(level, _TELEVISION_CLIENT_FLOOR))
+    # aimed at a specific line has to be verified against that line. The
+    # websocket library's handshake line is the same leak one level lower, held
+    # only while nobody configured DEBUG.
+    for name in _TELEVISION_LOGGERS:
+        logging.getLogger(name).setLevel(max(level, _TELEVISION_CLIENT_FLOOR))

@@ -27,11 +27,12 @@ def _restore_root_logging():
     """
     root = logging.getLogger()
     handlers, level = list(root.handlers), root.level
-    fork_level = logging.getLogger("samsungtvws").level
+    floored = {name: logging.getLogger(name).level for name in ("samsungtvws", "websockets")}
     yield
     root.handlers[:] = handlers
     root.setLevel(level)
-    logging.getLogger("samsungtvws").setLevel(fork_level)
+    for name, floored_level in floored.items():
+        logging.getLogger(name).setLevel(floored_level)
 
 
 class TestTheTokenCannotReachTheJournal:
@@ -74,6 +75,30 @@ class TestTheTokenCannotReachTheJournal:
         logs.configure(logging.DEBUG)
 
         logging.getLogger("samsungtvws.connection").debug("Got token %s", "a-real-pairing-token")
+
+        assert "a-real-pairing-token" not in capsys.readouterr().err
+
+    def test_the_websocket_library_is_floored_at_warning_even_in_debug(self):
+        """**The art channel's URL carries the token**, and `websockets` logs it.
+
+        `websockets/client.py` `ClientProtocol.send_request` writes
+        `> GET <path> HTTP/1.1` at DEBUG, and the path is
+        `/api/v2/channels/…?name=…&token=…`, through the logger
+        `websockets.client`. Flooring only `samsungtvws` left that line one
+        `configure(logging.DEBUG)` away from the journal.
+        """
+        logs.configure(logging.DEBUG)
+
+        assert logging.getLogger("websockets").getEffectiveLevel() >= logging.WARNING
+        assert not logging.getLogger("websockets.client").isEnabledFor(logging.DEBUG)
+
+    def test_the_handshake_line_carrying_the_token_is_not_emitted_in_debug(self, capsys):
+        """Through the logger and level the library actually uses, so a floor on the wrong name still fails."""
+        logs.configure(logging.DEBUG)
+
+        logging.getLogger("websockets.client").debug(
+            "> GET %s HTTP/1.1", "/api/v2/channels/com.samsung.art-app?name=dHZwaQ==&token=a-real-pairing-token"
+        )
 
         assert "a-real-pairing-token" not in capsys.readouterr().err
 
