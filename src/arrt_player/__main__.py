@@ -48,6 +48,15 @@ supervisor, schedule and renderer as any other, so a real Player process can be
 tested against a real server where there is no screen, television or panel. It
 says so once at start, at WARNING, because on a wall it would be a fault.
 
+**systemd is told when the Player is up, and each time it makes progress**
+(`notify`), because the unit is `Type=notify` with a watchdog: `READY=1` once
+each mode is running, and `WATCHDOG=1` only for progress, never for the loop
+merely being alive. In Arrt mode, and with file outputs, progress is the
+supervisor finishing a cycle (`PettingSupervisor`); in slideshow mode, the
+programme reaching its next step (`petting`); in setup mode, the page still
+served by a loop that turns. A start refused by configuration sends nothing
+and exits 2. What a stuck Player then meets is in the unit's comment.
+
 **In slideshow mode there is no server, supervisor or pull** (`run_slideshow`).
 One programme plays a Reddit listing on one HDMI screen through mpv and
 captions it on the panel, beside the same page. Its parts are composed in
@@ -65,8 +74,9 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
+from typing import Any
 
-from arrt_player import logs
+from arrt_player import logs, notify
 from arrt_player.client import (
     FRAME_KIND,
     FrameIdentity,
@@ -108,7 +118,7 @@ from arrt_player.manifest import Watcher
 from arrt_player.mpv import MpvOutput, renderer_problems
 from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
 from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
-from arrt_player.programmes.slideshow import Screen, Slideshow
+from arrt_player.programmes.slideshow import Screen, Slideshow, Wait, wait_for_stop
 from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.pull import LABEL_CACHE_DIRNAME, ClientPull, LabelPull, Pull
 from arrt_player.settings_ui import auth, server, store
@@ -589,6 +599,49 @@ def _pull_ended(task: asyncio.Task[None], ending: asyncio.Event, wall_id: str) -
     ending.set()
 
 
+class PettingSupervisor(Supervisor):
+    """The supervisor, petting systemd's watchdog each time it finishes a cycle.
+
+    **A finished cycle is Arrt mode's progress**: the outputs reported, the
+    client document asked for and matched, the walls' directories swept. Each
+    step is bounded (the Frame's identity by its budget, each request by the
+    pull's session timeout), so a cycle that does not finish is a supervisor or
+    a loop that is stuck. A wall's own worker is not watched here: one stuck
+    wall is that wall's fault, and a restart would blank every other wall.
+    """
+
+    def __init__(
+        self,
+        *,
+        watchdog: notify.Watchdog,
+        **kwargs: Any,  # noqa: ANN401 -- passed through whole to Supervisor's own keywords
+    ) -> None:
+        super().__init__(**kwargs)
+        self._watchdog = watchdog
+
+    async def cycle(self) -> None:
+        await super().cycle()
+        self._watchdog.progress()
+
+
+def petting(watchdog: notify.Watchdog, wait: Wait = wait_for_stop) -> Wait:
+    """The slideshow's wait, petting the watchdog as each wait begins.
+
+    **The programme waits only between steps of its playback**: after a look at
+    the cache found nothing ready, after a load the screen answered, and after
+    each check of what is up. Each wait therefore follows a step that finished,
+    and a step that never finishes (a screen whose renderer stopped answering,
+    a brightness exchange that never returns) stops the pets. The listing and
+    the fill run on tasks of their own and never wait here.
+    """
+
+    async def waiting(stop: asyncio.Event, seconds: float) -> bool:
+        watchdog.progress()
+        return await wait(stop, seconds)
+
+    return waiting
+
+
 def settings_page(
     ui: UiSettings,
     *,
@@ -638,8 +691,14 @@ async def run_slideshow(
     screen: Callable[[SlideshowSettings], Screen] = slideshow_screen,
     problems: Callable[[], list[str]] = renderer_problems,
     clock: Clock | None = None,
+    watchdog: notify.Watchdog | None = None,
 ) -> int:
-    """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped."""
+    """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped.
+
+    `READY=1` goes once the page is started and the programme is built, as it
+    starts to play; each step of its playback pets `watchdog` (`petting`).
+    """
+    watchdog = watchdog if watchdog is not None else notify.Watchdog.silent()
     log.info("starting a slideshow", extra={"event": "slideshow.starting", **settings.startup_lines()})
     status = SlideshowStatus(renderer_problems=tuple(problems()))
     for problem in status.renderer_problems:
@@ -664,7 +723,9 @@ async def run_slideshow(
                 brightness=slideshow_brightness(settings, clock if clock is not None else Clock.system()),
                 listing_path=settings.listing_path,
                 status=status,
+                wait=petting(watchdog),
             )
+            watchdog.ready()
             await programme.run(stop)
     finally:
         if panel is not None:
@@ -718,6 +779,9 @@ async def _run() -> int:
         loop.add_signal_handler(received, stop.set)
 
     ui = load_ui()
+    # Before the settings are read, so that its one line about the socket comes
+    # first, and nothing is sent for a start refused by configuration below.
+    watchdog = notify.Watchdog.from_environment()
 
     try:
         settings = load()
@@ -728,11 +792,15 @@ async def _run() -> int:
             ", ".join(exc.missing),
             extra={"event": "daemon.setup_mode", "missing": list(exc.missing), "mode": exc.mode},
         )
-        served = await run_settings_page(settings_page(ui, missing=exc.missing, mode=exc.mode), stop)
-        return 0 if served else 1
+        page = asyncio.create_task(
+            run_settings_page(settings_page(ui, missing=exc.missing, mode=exc.mode), stop), name="settings-page"
+        )
+        watchdog.ready()
+        await watchdog.while_running(page)
+        return 0 if await page else 1
 
     if isinstance(settings, SlideshowSettings):
-        return await run_slideshow(settings, ui, stop)
+        return await run_slideshow(settings, ui, stop, watchdog=watchdog)
 
     if settings.files is not None:
         # Once, and loud: on a wall this would be a Player showing nothing.
@@ -744,7 +812,8 @@ async def _run() -> int:
     clock = Clock.system()
     identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
     panels = label_panels(settings)
-    supervisor = Supervisor(
+    supervisor = PettingSupervisor(
+        watchdog=watchdog,
         settings=settings,
         link=ClientPull(settings),
         worker=partial(run_wall, settings),
@@ -757,6 +826,9 @@ async def _run() -> int:
         frame_identity=identity,
     )
     page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
+    # Once the settings are read and the panels open, before the first poll: a
+    # server down at boot delays no start, and the walls start from the cache.
+    watchdog.ready()
     try:
         await supervisor.run(stop)
     finally:
