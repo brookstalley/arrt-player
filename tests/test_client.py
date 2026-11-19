@@ -1657,7 +1657,7 @@ async def test_every_line_a_worker_logs_names_its_wall(monkeypatch, client, serv
     surface = FakeSurface()
     monkeypatch.setattr(entry, "label_surface", lambda _settings: surface)
     settings = replace(client, panel=replace(client.panel, epd_device="omni_epd.mock"), label_poll_seconds=0.02)
-    panels = entry.label_panels(settings.panel)
+    panels = entry.label_panels(settings)
     server.publish("w1", "w2", wall_id="living-room")
     server.assign("hall", "hdmi-a-1")
     server.publish("h1", "h2", wall_id="hall")
