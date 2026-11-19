@@ -255,7 +255,7 @@ set that is not in art mode":
   `test_an_evening_of_television_ends_on_the_slots_work_in_one_selection`).
 - **A held write is retried, not failed.** `FrameDisplay` answers `TvNotOurs` as
   it answers a selection's no: said once (`tv.writes_held`), not recorded as a
-  failed upload, and tried again on one shared wait (`_writes_wait`) that a set
+  failed upload, and tried again on one shared wait (`FrameDisplay._writes`) that a set
   returning to art mode ends (`tv.writes_resumed`). So uploads wait while somebody
   watches television, and the wall catches up in art mode.
 - **Connecting is not gated.** It includes a REST read on every construction and,

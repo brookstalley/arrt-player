@@ -150,19 +150,34 @@ def hostname(value: str) -> str:
     return _split_authority(value)[0]
 
 
+#: The largest number a port can be.
+_LARGEST_PORT: Final[int] = 65535
+
+
 def _split_authority(value: str) -> tuple[str, int | None]:
-    """`host[:port]` as (name, port), the port None when absent or not a number."""
+    """`host[:port]` as (name, port), the port None when absent.
+
+    **A port that is not one makes the name empty**, which no check passes: it
+    is ASCII digits naming 1 to 65535, or nothing after the colon. `str.isdigit`
+    alone also says yes to digits `int` will not read (`'²'`), which raised in the
+    middleware and answered a refusal with a 500.
+    """
     value = value.strip()
     if value.startswith("["):
         end = value.find("]")
         name, rest = (value[1:end], value[end + 1 :]) if end >= 0 else (value[1:], "")
-        port_text = rest[1:] if rest.startswith(":") else ""
+        if rest and not rest.startswith(":"):
+            return "", None
+        port_text = rest[1:]
     elif value.count(":") == 1:
         name, _, port_text = value.partition(":")
     else:
         name, port_text = value, ""
-    port = int(port_text) if port_text.isdigit() else None
-    return name.rstrip(".").lower(), port
+    if not port_text:
+        return name.rstrip(".").lower(), None
+    if not (port_text.isascii() and port_text.isdigit()) or not 1 <= int(port_text) <= _LARGEST_PORT:
+        return "", None
+    return name.rstrip(".").lower(), int(port_text)
 
 
 def own_names(bind: str = "") -> frozenset[str]:
@@ -192,6 +207,88 @@ def name_allowed(name: str, allowed: frozenset[str]) -> bool:
     except ValueError:
         return False
     return True
+
+
+#: A refused name is said once, and again at most once in this long while it
+#: keeps arriving, with the count of refusals since; a name quiet this long is
+#: forgotten, its uncounted refusals said as it goes.
+REFUSED_HOST_WINDOW_SECONDS: Final[float] = 600.0
+
+#: How many refused names are counted one by one. The names are the caller's
+#: to choose, so past this many they are counted together, as one line a window.
+REFUSED_HOST_NAMES_KEPT: Final[int] = 32
+
+
+@dataclass
+class _Refusals:
+    """One refused name's episode: the refusals not yet said, when it was last said, and when it last arrived."""
+
+    unsaid: int
+    said_at: float
+    seen_at: float
+
+
+class RefusedHosts:
+    """When a refused name is said in the journal, and with what count.
+
+    **Anybody who can reach the port chooses how often a name is refused**: a
+    rebinding page in a browser on the LAN, or anything sending a made-up `Host`.
+    Access logging is off, so a line per refusal would let them set the journal's
+    rate and rotate out the ERRORs that are the Player's only failure channel
+    (`observability-strategy.md`, episodes, not repetition). So each name is said
+    when it is first refused; while it keeps arriving, at most once a window,
+    with how many refusals the line accounts for; and once it has been quiet a
+    window it is forgotten, with a last line if refusals went unsaid. Past
+    `REFUSED_HOST_NAMES_KEPT` names, the rest share one count, said the same
+    way under no name, so neither the journal nor this table grows with the
+    names a caller invents.
+
+    **Every line is written on a refusal, never on a timer**: "said as it is
+    forgotten" means at the next refusal of any name after the quiet window.
+    So if refusals stop altogether, the last count of each episode is never
+    written. That is chosen, not missed: the first refusal of every name is
+    always said, so what is lost is how many more came, and a timer would be a
+    task of its own in the page for a number nothing acts on.
+    """
+
+    def __init__(self, *, monotonic: Callable[[], float]) -> None:
+        self._monotonic = monotonic
+        self._names: dict[str, _Refusals] = {}
+        self._others: _Refusals | None = None
+
+    def refused(self, name: str) -> list[tuple[str | None, int]]:
+        """Count a refusal of `name`: the lines owed now, each (name, or None for the rest; refusals it accounts for)."""
+        now = self._monotonic()
+        lines = self._forget(now)
+        if name in self._names or len(self._names) < REFUSED_HOST_NAMES_KEPT:
+            refusals = self._names.get(name)
+            if refusals is None:
+                self._names[name] = _Refusals(unsaid=0, said_at=now, seen_at=now)
+                return [*lines, (name, 1)]
+            key: str | None = name
+        else:
+            refusals = self._others
+            if refusals is None:
+                self._others = _Refusals(unsaid=0, said_at=now, seen_at=now)
+                return [*lines, (None, 1)]
+            key = None
+        refusals.unsaid += 1
+        refusals.seen_at = now
+        if now - refusals.said_at >= REFUSED_HOST_WINDOW_SECONDS:
+            lines.append((key, refusals.unsaid))
+            refusals.unsaid, refusals.said_at = 0, now
+        return lines
+
+    def _forget(self, now: float) -> list[tuple[str | None, int]]:
+        """End the episodes of names quiet for a window, with a line for each that has refusals unsaid."""
+        quiet = [key for key, refusals in self._names.items() if now - refusals.seen_at >= REFUSED_HOST_WINDOW_SECONDS]
+        ended = [(name, self._names.pop(name).unsaid) for name in quiet]
+        lines: list[tuple[str | None, int]] = [(name, unsaid) for name, unsaid in ended if unsaid]
+        if self._others is not None and now - self._others.seen_at >= REFUSED_HOST_WINDOW_SECONDS:
+            if self._others.unsaid:
+                lines.append((None, self._others.unsaid))
+            self._others = None
+        return lines
 
 
 #: The port an `Origin` means when it names none.
@@ -248,6 +345,8 @@ class PageState:
     #: The names this machine goes by, read once at start (`own_names`).
     #: Injectable so a test can give the machine a name.
     machine_names: Callable[[str], frozenset[str]] = field(default=own_names)
+    #: When each refused name is said in the journal (`RefusedHosts`).
+    refused_hosts: RefusedHosts = field(default_factory=lambda: RefusedHosts(monotonic=time.monotonic))
 
     def stored(self) -> store.Stored:
         return store.read(self.ui.cache_dir)
@@ -346,11 +445,7 @@ async def _known_hosts(request: Request, handler: Handler) -> StreamResponse:
     """
     name = hostname(request.host)
     if not name_allowed(name, request.app[NAMES]):
-        log.warning(
-            "the settings page refused a request for the name %r; it is not one of this page's names",
-            name,
-            extra={"event": "settings_page.host_refused", "host": name, "setting": ALLOWED_HOSTS_SETTING},
-        )
+        _say_refused(_state(request).refused_hosts.refused(name))
         return _page(
             "Not this page's name",
             f"<p>This Player's settings page does not answer to the name {html.escape(repr(name))}. Open it by "
@@ -359,6 +454,17 @@ async def _known_hosts(request: Request, handler: Handler) -> StreamResponse:
             status=HOST_REFUSED,
         )
     return await handler(request)
+
+
+def _say_refused(lines: list[tuple[str | None, int]]) -> None:
+    for name, refused in lines:
+        named = repr(name) if name is not None else f"other than the {REFUSED_HOST_NAMES_KEPT} it counts by name"
+        log.warning(
+            "the settings page refused %d request(s) for the name %s; it is not one of this page's names",
+            refused,
+            named,
+            extra={"event": "settings_page.host_refused", "host": name, "refused": refused, "setting": ALLOWED_HOSTS_SETTING},
+        )
 
 
 @middleware
@@ -384,7 +490,16 @@ def _state(request: Request) -> PageState:
 
 
 def _signed_in(request: Request, stored: store.Stored) -> bool:
-    return auth.session_valid(request.cookies.get(auth.COOKIE_NAME), stored.session_secret, now=_state(request).now())
+    """Whether the request carries a valid session; one that does gives its address standing (`auth.Throttle.vouch`).
+
+    The standing a sign-in gave is in memory, and a save restarts the Player, so
+    a signed-in visit is what restores it for the owner's browser.
+    """
+    state = _state(request)
+    if not auth.session_valid(request.cookies.get(auth.COOKIE_NAME), stored.session_secret, now=state.now()):
+        return False
+    state.throttle.vouch(_source(request))
+    return True
 
 
 async def _home(request: Request) -> Response:
@@ -584,6 +699,9 @@ async def _change_password(request: Request) -> Response:
     encoded = await asyncio.to_thread(auth.hash_password, password)
     if not _wrote(state, state.stored().with_auth(password=encoded, session_secret=secret)):
         return _settings_page(state, stored, problem=_WRITE_FAILED, status=500)
+    # Every other session has ended, and so does every address's standing.
+    state.throttle.forget_standing()
+    state.throttle.vouch(source)
     log.info("the settings page's password is changed", extra={"event": "settings_page.password_changed"})
     return _signed_in_redirect(secret, state)
 
@@ -621,6 +739,8 @@ async def _setup(request: Request) -> Response:
         # told the link is not this start's until somebody restarted the Player.
         state.setup_code = code
         return _setup_page(code, problem=_WRITE_FAILED, status=500)
+    state.throttle.forget_standing()
+    state.throttle.vouch(_source(request))
     log.info("the settings page's password is set", extra={"event": "settings_page.password_set"})
     return _signed_in_redirect(secret, state)
 

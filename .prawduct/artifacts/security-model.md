@@ -132,9 +132,20 @@ sensitive as the token itself.
   wrong in any 10 minutes (`auth.Throttle`, `CEILING_FAILURES`,
   `CEILING_WINDOW_SECONDS`; `::test_wrong_passwords_are_throttled_and_the_right_one_waits_too`,
   `::TestAGuesserCannotLockTheOwnerOut`). One throttle for the process would let a
-  guesser delay the owner's right password with wrong ones; per address, the
-  owner's is not the one slowed, and the ceiling bounds a guesser with many
-  addresses at the price of making every address wait. Each attempt is charged before its password is checked, so concurrent attempts
+  guesser delay the owner's right password with wrong ones; per address, a
+  guesser at another address does not slow the owner, and the ceiling bounds a
+  guesser with many addresses. Two addresses reach the ceiling, so **it does not
+  hold an address that has signed in**: a right password, or a visit carrying a
+  valid session, gives the address standing for the session's 30 days, a new
+  password ends every standing (`Throttle.vouch`, `forget_standing`), and its
+  failures are not charged to the ceiling. Such an address is still held by its
+  own wait. A device that has never signed in, or not since the password
+  changed, is held whenever the ceiling is full, and two guessing addresses keep
+  it full for as long as they keep guessing: each slot that ages out goes to
+  whoever asks first. **Behind a reverse proxy** every
+  caller is the proxy's address: the owner and a guesser through it share one
+  wait, and once it has signed in the bound on guessing through it is that one
+  address's, about fifteen wrong in ten minutes. Each attempt is charged before its password is checked, so concurrent attempts
   cannot share one window (`::test_concurrent_wrong_passwords_share_one_window`),
   and scrypt runs on a thread, off the loop that drives the walls.
   To recover a forgotten one, delete `auth.password` from the file and restart.
@@ -149,7 +160,9 @@ sensitive as the token itself.
   whose `Host` is not an IP address, `localhost`, this machine's own name,
   `<name>.local`, the address the page is bound to or a name in `UI_ALLOWED_HOSTS`
   is refused with a 421 before any page is served (`server._known_hosts`,
-  `settings_page.host_refused`; `::TestTheNamesItAnswersTo`). **Upgrading:** a name only the
+  `settings_page.host_refused`, said once per name per episode, not per request,
+  since the caller chooses the rate; `::TestTheNamesItAnswersTo`). A `Host` whose
+  port is not ASCII digits naming 1 to 65535 is refused the same way. **Upgrading:** a name only the
   router's DNS gives the Player (`<name>.lan`, say) is refused until it is listed
   in `UI_ALLOWED_HOSTS`, and the refusal says so.
 - **Cross-site requests.** Every POST must carry an `Origin` equal to the page's
@@ -356,7 +369,7 @@ a hostile or broken peer on the LAN can do, and what bounds it:
 | Anything on the LAN | Impersonate the television (no certificate check) and receive uploads | The LAN boundary; the uploads are public artworks |
 | Anything on the LAN with the TV token | Drive the set | Arrt § Inventory ("LAN-scoped") |
 | Anything on the LAN | Reach the settings page before its owner, and set its password | The setup code, printed at start and spent on use |
-| Anything on the LAN | Guess the page's password | Length floor; a throttle per source address doubling to a minute per attempt, under a ceiling of 30 wrong in 10 minutes for all addresses |
+| Anything on the LAN | Guess the page's password | Length floor; a throttle per source address doubling to a minute per attempt, under a ceiling of 30 wrong in 10 minutes for all addresses that have not signed in |
 | A page elsewhere in the owner's browser | Post a form to the settings page | `Origin` check on every POST; `SameSite=Strict` cookie |
 | A page elsewhere in the owner's browser | Rebind its own name to the Player's address and use the page as same-origin | A `Host` that is not one of the page's names is refused with a 421 before any page (`server._known_hosts`) |
 | Anything on the LAN that sees the owner's traffic | Read the password or the cookie off the wire | Not bounded: plain HTTP, as for the server (Arrt § Trust Boundary) |

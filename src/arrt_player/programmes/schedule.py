@@ -157,6 +157,9 @@ class Schedule:
         self._failed: dict[Path, tuple[float, bool]] = {}
         #: Composed files found whole, by the file's size and modification time:
         #: each is read once, and again only if the file changes under its name.
+        #: An entry goes when this schedule removes its file (the tidy, or
+        #: `_intact` finding it damaged) or finds it gone, so the works a wall
+        #: rotates through do not each leave one behind.
         self._verified: dict[Path, tuple[int, int]] = {}
         #: Whether the composed directory owes a tidy, and the geometry it was last
         #: tidied for: a new feed or a new geometry owes one, done between
@@ -489,6 +492,9 @@ class Schedule:
             except OSError as exc:
                 self._say_tidy_failed(exc)
                 return
+            # Forgotten with the file: `_intact` is never asked about it again,
+            # so its entry would otherwise outlive it for the life of the process.
+            self._verified.pop(path, None)
             removed += 1
         if removed:
             log.info(

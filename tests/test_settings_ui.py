@@ -166,6 +166,24 @@ class TestTheCookie:
 GUESSER, OWNER = "192.0.2.66", "192.0.2.10"
 
 
+#: A third address, one that has never signed in.
+NEWCOMER = "192.0.2.77"
+#: Two addresses one guesser holds (IPv4 and an IPv6 privacy address, say).
+GUESSERS = ("192.0.2.66", "2001:db8::66")
+
+
+def _fill_the_ceiling_from_two_addresses(throttle: auth.Throttle, clock: Clock) -> None:
+    """Guess from two addresses as fast as each one's own doubling lets them, until the ceiling holds."""
+    for _ in range(10_000):
+        if len(throttle._recent) >= auth.CEILING_FAILURES:
+            return
+        for guesser in GUESSERS:
+            if throttle.wait_seconds(guesser) == 0:
+                throttle.failed(guesser)
+        clock.now += 1
+    raise AssertionError("two addresses never reached the ceiling")
+
+
 class TestTheThrottle:
     def test_each_failure_doubles_the_wait_up_to_a_minute_and_success_clears_it(self):
         clock = Clock()
@@ -216,6 +234,70 @@ class TestTheThrottle:
 
         assert throttle.wait_seconds(GUESSER) == 0
 
+    def test_an_address_that_signed_in_passes_the_ceiling_and_only_the_ceiling(self):
+        """Two guessing addresses reach the ceiling by their own doubling alone; the
+        owner's browser, which signed in before, must still be heard, and a guesser
+        sharing its address (a reverse proxy) is still held by the address's own wait."""
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.failed(OWNER)
+        throttle.succeeded(OWNER)
+        _fill_the_ceiling_from_two_addresses(throttle, clock)
+
+        assert throttle.wait_seconds(NEWCOMER) > 0, "the ceiling no longer holds an address that never signed in"
+        assert throttle.wait_seconds(OWNER) == 0, "the owner was held by guessers at two other addresses"
+        throttle.failed(OWNER)
+        assert throttle.wait_seconds(OWNER) == 1, "an address that signed in was let guess without its own wait"
+
+    def test_an_address_with_standing_neither_fills_the_ceiling_nor_empties_it(self):
+        """Its attempts are not held by the ceiling, so they must not be charged to it:
+        a guesser sharing it (a proxy) would fill the ceiling for every other
+        address, and a right password at a full ceiling gave back a charge some
+        other address made."""
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.vouch(OWNER)
+        _fill_the_ceiling_from_two_addresses(throttle, clock)
+        held_for = throttle.wait_seconds(NEWCOMER)
+        throttle.failed(OWNER)
+        throttle.succeeded(OWNER)
+        assert throttle.wait_seconds(NEWCOMER) == held_for, "the owner's sign-in let a guesser's failure go"
+
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.vouch(OWNER)
+        for n in range(auth.CEILING_FAILURES - 1):
+            throttle.failed(f"192.0.2.{n}")
+        throttle.failed(OWNER)
+        assert throttle.wait_seconds(NEWCOMER) == 0, "a failure at an address with standing filled the ceiling"
+
+    def test_a_signed_in_visit_gives_the_standing_a_sign_in_does(self):
+        """A save restarts the Player, so the standing a sign-in gave is gone; the owner's next visit restores it."""
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.vouch(OWNER)
+        _fill_the_ceiling_from_two_addresses(throttle, clock)
+
+        assert throttle.wait_seconds(OWNER) == 0
+
+    def test_the_standing_lasts_a_session_and_no_longer(self):
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.vouch(OWNER)
+        clock.now += auth.SESSION_SECONDS
+        _fill_the_ceiling_from_two_addresses(throttle, clock)
+
+        assert throttle.wait_seconds(OWNER) > 0, "a sign-in older than a session still passed the ceiling"
+        assert throttle._standing == {}, "an expired standing was kept"
+
+    def test_a_new_password_ends_every_standing(self):
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.vouch(OWNER)
+        throttle.forget_standing()
+        _fill_the_ceiling_from_two_addresses(throttle, clock)
+
+        assert throttle.wait_seconds(OWNER) > 0, "a standing from before the password changed survived it"
+
     def test_an_address_quiet_for_the_window_is_forgotten(self):
         """Otherwise every address that ever guessed is held for the life of the process."""
         clock = Clock()
@@ -247,6 +329,7 @@ def state(cache_dir: Path, clock: Clock) -> PageState:
         now=clock,
         throttle=auth.Throttle(monotonic=clock),
         missing=("SERVER_URL", "CLIENT_TOKEN"),
+        refused_hosts=server_module.RefusedHosts(monotonic=clock),
     )
 
 
@@ -439,6 +522,10 @@ REBOUND = "rebound.example"
 MACHINE = "wallpi"
 
 
+def _host_refusals(caplog) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if getattr(record, "event", None) == "settings_page.host_refused"]
+
+
 @pytest.fixture
 def machine(monkeypatch) -> str:
     """This machine called `MACHINE`, as `socket.gethostname` would say."""
@@ -488,6 +575,106 @@ class TestTheNamesItAnswersTo:
 
         refused = [record for record in caplog.records if getattr(record, "event", None) == "settings_page.host_refused"]
         assert [record.host for record in refused] == [REBOUND]
+
+    async def test_a_name_refused_again_and_again_is_one_line_with_a_count(self, page, clock, caplog):
+        """Anybody who can reach the port chooses how often a refusal happens, so
+        it is said once per name per window, and the next line counts the rest."""
+        caplog.set_level(logging.WARNING)
+        for _ in range(50):
+            await page.get("/", headers={"Host": REBOUND})
+            await page.get("/", headers={"Host": f"other.{REBOUND}"})
+        assert sorted(record.host for record in _host_refusals(caplog)) == sorted([REBOUND, f"other.{REBOUND}"])
+
+        for _ in range(2):  # the one name keeps arriving; the other has stopped
+            clock.now += server_module.REFUSED_HOST_WINDOW_SECONDS / 2
+            await page.get("/", headers={"Host": REBOUND})
+
+        said = [(record.host, record.refused) for record in _host_refusals(caplog)]
+        assert said[2:] == [(f"other.{REBOUND}", 49), (REBOUND, 51)]
+
+    async def test_a_name_refused_once_and_quiet_since_has_its_count_said_when_it_is_forgotten(self, page, clock, caplog):
+        caplog.set_level(logging.WARNING)
+        for _ in range(3):
+            await page.get("/", headers={"Host": REBOUND})
+        clock.now += server_module.REFUSED_HOST_WINDOW_SECONDS
+        await page.get("/", headers={"Host": f"other.{REBOUND}"})
+
+        said = {(record.host, record.refused) for record in _host_refusals(caplog)}
+        assert said == {(REBOUND, 1), (REBOUND, 2), (f"other.{REBOUND}", 1)}
+
+    async def test_names_chosen_by_the_caller_cannot_set_the_journals_rate_or_the_memory(self, page, state, caplog):
+        caplog.set_level(logging.WARNING)
+        names = server_module.REFUSED_HOST_NAMES_KEPT
+
+        for n in range(names * 4):
+            await page.get("/", headers={"Host": f"n{n}.{REBOUND}"})
+
+        refusals = _host_refusals(caplog)
+        assert len(refusals) == names + 1, "every new name the caller chose was a journal line"
+        assert refusals[-1].host is None, "the names past the table were not said together"
+        assert len(state.refused_hosts._names) <= names
+
+    async def test_the_names_past_the_table_share_one_count_said_once_a_window(self, page, clock, caplog):
+        caplog.set_level(logging.WARNING)
+        kept = [f"n{n}.{REBOUND}" for n in range(server_module.REFUSED_HOST_NAMES_KEPT)]
+
+        async def refuse(names: list[str]) -> None:
+            for name in names:
+                await page.get("/", headers={"Host": name})
+
+        await refuse(kept)
+        await refuse([f"past{n}.{REBOUND}" for n in range(5)])
+        for step in range(2):  # the table's names and the rest keep arriving
+            clock.now += server_module.REFUSED_HOST_WINDOW_SECONDS / 2
+            await refuse([*kept, f"later{step}.{REBOUND}"])
+
+        shared = [record.refused for record in _host_refusals(caplog) if record.host is None]
+        assert shared == [1, 6], "the names past the table were not counted together, once a window"
+
+    async def test_the_shared_count_is_said_as_it_is_forgotten(self, page, clock, caplog):
+        caplog.set_level(logging.WARNING)
+        for n in range(server_module.REFUSED_HOST_NAMES_KEPT + 5):
+            await page.get("/", headers={"Host": f"n{n}.{REBOUND}"})
+        clock.now += server_module.REFUSED_HOST_WINDOW_SECONDS
+
+        await page.get("/", headers={"Host": REBOUND})
+
+        said = [(record.host, record.refused) for record in _host_refusals(caplog)]
+        assert said[-2:] == [(None, 4), (REBOUND, 1)], "the names past the table took their count with them"
+
+    @pytest.mark.parametrize("port", ["\u00b2", "99999", "-1", "+80", " 80", "0x50", "8771x"])
+    async def test_a_host_whose_port_is_not_a_port_is_refused_and_not_an_error(self, page, cache_dir, port):
+        host = f"127.0.0.1:{port}"
+
+        response = await setup_as(page, host=host, origin_header=f"http://{host}")
+
+        assert response.status == server_module.HOST_REFUSED
+        assert store.read(cache_dir).password is None
+
+    @pytest.mark.parametrize("port", ["\u00b2", "99999"])
+    async def test_an_origin_whose_port_is_not_a_port_is_refused_and_not_an_error(self, page, cache_dir, port):
+        response = await setup_as(page, host=f"127.0.0.1:{port_of(page)}", origin_header=f"http://127.0.0.1:{port}")
+
+        assert response.status == 403
+        assert store.read(cache_dir).password is None
+
+    @pytest.mark.parametrize("after", ["x", "80", "]", "[::2]"])
+    async def test_a_bracketed_host_followed_by_anything_but_a_port_is_refused(self, page, cache_dir, after):
+        """`[::1]junk` once read as `::1` with no port, and was answered as this page."""
+        host = f"[::1]{after}"
+
+        response = await setup_as(page, host=host, origin_header=f"http://{host}")
+
+        assert response.status == server_module.HOST_REFUSED
+        assert store.read(cache_dir).password is None
+
+    @pytest.mark.parametrize("after", ["x", "80"])
+    async def test_a_bracketed_origin_followed_by_anything_but_a_port_is_refused(self, page, cache_dir, after):
+        """The Host is good and names no port, so the Origin's missing port would match it, but the Origin is not one."""
+        response = await setup_as(page, host="[::1]", origin_header=f"http://[::1]{after}")
+
+        assert response.status == 403
+        assert store.read(cache_dir).password is None
 
     @pytest.mark.parametrize(
         "host",
@@ -648,6 +835,42 @@ class TestAGuesserCannotLockTheOwnerOut:
         assert (await change(GUESSER, "wrong")).status == 403
         assert (await change(GUESSER, PASSWORD)).status == 429
         assert (await change(OWNER, PASSWORD)).status == 303
+
+    async def test_guessers_at_two_addresses_do_not_hold_out_an_owner_who_signed_in_before(self, from_addresses, state, clock):
+        """The ceiling bounds a guesser with many addresses; two are enough to reach
+        it, and from then on it held every address, the owner's included."""
+        assert (await login_from(from_addresses, OWNER, PASSWORD)).status == 303
+        _fill_the_ceiling_from_two_addresses(state.throttle, clock)
+        assert (await login_from(from_addresses, NEWCOMER, PASSWORD)).status == 429
+
+        owner = await login_from(from_addresses, OWNER, PASSWORD)
+
+        assert owner.status == 303, "the owner was held out by guessers at two other addresses"
+
+    async def test_after_a_restart_the_owners_signed_in_visit_restores_the_standing(self, from_addresses, state, clock):
+        """A save restarts the Player, and the standing is in memory; the owner's cookie outlives both."""
+        assert (await login_from(from_addresses, OWNER, PASSWORD)).status == 303
+        state.throttle = auth.Throttle(monotonic=clock)
+        assert (await from_addresses.get("/", headers={"X-Peer": OWNER}, allow_redirects=False)).status == 200
+        _fill_the_ceiling_from_two_addresses(state.throttle, clock)
+
+        assert (await login_from(from_addresses, OWNER, PASSWORD)).status == 303
+
+    async def test_the_address_that_set_the_password_has_standing(self, from_addresses, state, clock):
+        _fill_the_ceiling_from_two_addresses(state.throttle, clock)
+
+        assert (await login_from(from_addresses, "127.0.0.1", PASSWORD)).status == 303
+
+    async def test_a_password_changed_elsewhere_takes_the_owners_standing_with_it(self, from_addresses, state, clock):
+        assert (await login_from(from_addresses, OWNER, PASSWORD)).status == 303
+        from_addresses.session.cookie_jar.clear()
+        assert (await login_from(from_addresses, NEWCOMER, PASSWORD)).status == 303
+        form = {"current": PASSWORD, "password": "a new password", "again": "a new password"}
+        assert (await post(from_addresses, "/password", form, **{"X-Peer": NEWCOMER})).status == 303
+        _fill_the_ceiling_from_two_addresses(state.throttle, clock)
+
+        assert (await login_from(from_addresses, OWNER, "a new password")).status == 429
+        assert (await login_from(from_addresses, NEWCOMER, "a new password")).status == 303
 
     async def test_a_refused_login_names_its_address_in_the_journal(self, from_addresses, caplog):
         caplog.set_level(logging.WARNING)

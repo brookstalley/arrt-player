@@ -35,7 +35,7 @@ keeps a held change from reaching the seam at all.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -141,14 +141,13 @@ class FrameDisplay:
 
         self._last_error: str | None = None
 
-        #: The wall is taking selections and displaying none of them. A television
-        #: whose panel is dark stays dark for hours, and a line per rotation would
-        #: be a hundred a night saying the one thing that has not changed.
-        self._wall_unchanged = ReportOnce()
-
         #: Somebody is watching their own television. Reported at INFO rather than
         #: WARNING because that is not a fault — but still reported, because "the
         #: wall stopped" otherwise has no explanation in the journal at all.
+        #: **Moved only by `_learned_showing_art`**, from the same news that sets
+        #: `_showing_art`, so the episode ends whatever says the set is showing
+        #: art again, not only the gate's read (`is_ours`), which the schedule
+        #: consults only when it wants a different work up.
         self._not_our_wall = ReportOnce()
 
         #: When the wall may next be asked to change, once it has been found not
@@ -160,10 +159,18 @@ class FrameDisplay:
         #: It backs off on the same ladder as an unreachable
         #: television, because "the set is not doing what it is told" is that same
         #: situation arriving by a route that raises nothing.
-        self._wall_retry = Backoff(
-            minimum=settings.tv_retry_min_seconds,
-            maximum=settings.tv_retry_max_seconds,
-            monotonic=clock.monotonic,
+        #:
+        #: **Its episode is the wall taking selections and displaying none of
+        #: them** (`rotation.wall_unchanged`), said once: a panel dark for hours
+        #: would otherwise be a hundred lines a night. One object with the wait
+        #: (`_WaitedEpisode`), so whatever clears the wait ends the episode.
+        self._wall = _WaitedEpisode(
+            Backoff(
+                minimum=settings.tv_retry_min_seconds,
+                maximum=settings.tv_retry_max_seconds,
+                monotonic=clock.monotonic,
+            ),
+            ended=_say_the_wall_recovered,
         )
 
         #: Reconciling the binding table against the set is **owed until it is
@@ -201,20 +208,20 @@ class FrameDisplay:
         self._unavailable = ReportOnce()
 
         #: When a write the seam held may next be tried: an upload, a removal, a
-        #: brightness change or the slideshow switch, refused because the set was
-        #: lit and not showing art. **Each try costs two reads of the set**
-        #: (`get_artmode`, then `PowerState`), and a pending upload is retried on
-        #: every pass, so without this an evening of television is two requests a
-        #: second. The same ladder as the wall's, and cleared by the same news: the
-        #: set announcing a change of mode, or being read showing art.
-        self._writes_wait = Backoff(
-            minimum=settings.tv_retry_min_seconds,
-            maximum=settings.tv_retry_max_seconds,
-            monotonic=clock.monotonic,
+        #: brightness change or the slideshow switch, refused (`TvNotOurs`) while
+        #: the set is lit and not showing art. **Each try costs two reads of the
+        #: set** (`get_artmode`, then `PowerState`), and a pending upload is due on
+        #: every pass, so without the wait an evening of television is two
+        #: requests a second. Its episode is the hold (`tv.writes_held`, then
+        #: `tv.writes_resumed`), one object with the wait (`_WaitedEpisode`).
+        self._writes = _WaitedEpisode(
+            Backoff(
+                minimum=settings.tv_retry_min_seconds,
+                maximum=settings.tv_retry_max_seconds,
+                monotonic=clock.monotonic,
+            ),
+            ended=_say_the_writes_resumed,
         )
-        #: Writes are being held for somebody watching. Said once per episode, at
-        #: INFO, for the same reason a wall not ours is.
-        self._writes_held = ReportOnce()
 
     @property
     def last_error(self) -> str | None:
@@ -240,7 +247,7 @@ class FrameDisplay:
         # the writes' wait, and a set back in art mode should get them this pass.
         await self._take_the_sets_news()
         await self._switch_off_the_slideshow()
-        if self._reconciliation_owed and self._reconcile_wait.is_due() and self._writes_wait.is_due():
+        if self._reconciliation_owed and self._reconcile_wait.is_due() and self._writes.is_due():
             # Cleared only when the work actually settled: a set that goes
             # away halfway through raises, and one that cannot say what it
             # removed reports so — both leave the work owed for a later pass
@@ -329,7 +336,7 @@ class FrameDisplay:
         The clearing happens in `_take_the_sets_news`, at the top of every pass
         that reaches the set, so this only reads the wait.
         """
-        return self._wall_retry.is_due()
+        return self._wall.is_due()
 
     async def is_ours(self) -> bool:
         """Whether the set is showing art, and may therefore be asked to change it.
@@ -348,16 +355,8 @@ class FrameDisplay:
         then backs off on the shared ladder, so a whole evening of television costs
         a handful of reads rather than thousands.
         """
-        showing = await self._read_art_mode()
-        if showing:
-            if self._not_our_wall.end():
-                log.info(
-                    "the television is showing art again; resuming the rotation",
-                    extra={"event": "rotation.wall_returned"},
-                )
+        if await self._read_art_mode():
             return True
-
-        self._report_not_ours()
         self._hold_off_the_wall()
         return False
 
@@ -394,13 +393,8 @@ class FrameDisplay:
         self._wall_is_answering()
 
         self._wall_content_id = content_id
-        self._showing_art = True
+        self._learned_showing_art(showing=True)
         self.record.moved_to(ScreenState.SHOWING_ART, picture.work_id)
-        if self._wall_unchanged.end():
-            log.info(
-                "the television is changing what it displays again",
-                extra={"event": "rotation.wall_recovered"},
-            )
         log.info(
             "showing %s",
             picture.title,
@@ -422,29 +416,39 @@ class FrameDisplay:
         knows the panel is lit, or could not tell, which the display state
         reports as in use either way.
         """
-        self._showing_art = False
+        self._learned_showing_art(showing=False)
         if exc.verb == "show":
             await self._screen_is_not_ours()
         else:
             self._hold_the_writes(exc)
             self.record.moved_to(ScreenState.IN_USE)
-        self._report_not_ours()
         self._hold_off_the_wall()
 
-    def _report_not_ours(self) -> None:
-        if self._not_our_wall.begin():
-            # Said once for the same reason a dark wall is: somebody watches
-            # television for hours, and a line per attempt would bury the ERRORs
-            # that are the Player's only failure channel.
-            log.info(
-                "the television is not in art mode; leaving the wall alone until it is",
-                extra={"event": "rotation.wall_not_ours"},
-            )
+    def _learned_showing_art(self, *, showing: bool) -> None:
+        """Record what the set was found doing, and open or close the wall's not-ours episode with it.
+
+        The one place `_showing_art` is set, so the field and the episode cannot
+        disagree. It moves no wait: when the wall is asked again stays where it
+        was (`_hold_off_the_wall`, `_wall_is_answering`).
+        """
+        self._showing_art = showing
+        if not showing:
+            if self._not_our_wall.begin():
+                # Said once for the same reason a dark wall is: somebody watches
+                # television for hours, and a line per attempt would bury the
+                # ERRORs that are the Player's only failure channel.
+                log.info(
+                    "the television is not in art mode; leaving the wall alone until it is",
+                    extra={"event": "rotation.wall_not_ours"},
+                )
+        elif self._not_our_wall.end():
+            log.info("the television is showing art again; resuming the rotation", extra={"event": "rotation.wall_returned"})
 
     def _hold_the_writes(self, exc: TvNotOurs) -> None:
-        """The seam held a write for somebody watching: wait before trying any write again."""
-        self._writes_wait.hold()
-        if self._writes_held.begin():
+        """The seam held a write for somebody watching: wait before trying any write again, said once per hold."""
+        self._writes.hold()
+        if self._writes.begins():
+            # Said once, at INFO, for the same reason a wall not ours is.
             log.info(
                 "%s; holding the set's uploads, removals and brightness until it is showing art or switched off",
                 exc,
@@ -453,9 +457,7 @@ class FrameDisplay:
 
     def _write_went_through(self) -> None:
         """A write reached the set, so the set is taking them: end any hold."""
-        self._writes_wait.clear()
-        if self._writes_held.end():
-            log.info("the television is taking uploads again", extra={"event": "tv.writes_resumed"})
+        self._writes.clear()
 
     def _hold_off_the_wall(self) -> None:
         """Back off before asking again, and lengthen the wait each time.
@@ -464,12 +466,12 @@ class FrameDisplay:
         off costs a handful of attempts rather than one a second — and the wall
         resumes within that ceiling of somebody switching the set back on.
         """
-        self._wall_retry.hold()
+        self._wall.hold()
 
     def _wall_is_answering(self) -> None:
         """Forget the backoff, because the set is acting on what it is told."""
-        self._wall_retry.clear()
-        self._writes_wait.clear()
+        self._wall.clear()
+        self._writes.clear()
 
     async def _report_wall_unchanged(self, content_id: str) -> None:
         """Say once that the set is taking selections and displaying none of them.
@@ -481,7 +483,7 @@ class FrameDisplay:
         changing* for somebody reading the journal. This one costs a call on a
         rotation that has already failed, so it is free in the ordinary case.
         """
-        if not self._wall_unchanged.begin():
+        if not self._wall.begins():
             return
         mode = await self._tv.reported_art_mode()
         log.warning(
@@ -531,7 +533,7 @@ class FrameDisplay:
             self._announcement_taken = announcement
             if announcement.is_shown:
                 self._wall_content_id = announcement.content_id
-                self._showing_art = True
+                self._learned_showing_art(showing=True)
                 self.record.moved_to(ScreenState.SHOWING_ART, self._work_bound_to(announcement.content_id))
         if self._tv.art_mode_announcement_pending():
             # Clears the writes' wait too (`_wall_is_answering`): the set saying
@@ -554,10 +556,10 @@ class FrameDisplay:
         one, and only `PowerState` tells those apart — see `_screen_is_not_ours`.
         """
         showing = await self._tv.showing_art()
-        self._showing_art = showing
+        self._learned_showing_art(showing=showing)
         if showing:
             # Art on the wall admits every write, so nothing held need wait.
-            self._writes_wait.clear()
+            self._writes.clear()
             content_id = self._wall_content_id
             self.record.moved_to(ScreenState.SHOWING_ART, self._work_bound_to(content_id) if content_id is not None else None)
         else:
@@ -700,7 +702,7 @@ class FrameDisplay:
         uploaded the whole theme would hold the loop — and every slot change and
         republished schedule — for as long as the theme is long.
         """
-        if not self._writes_wait.is_due():
+        if not self._writes.is_due():
             return
         for picture in pictures:
             binding = self._state.binding_for(picture.work_id)
@@ -815,7 +817,7 @@ class FrameDisplay:
 
     async def _switch_off_the_slideshow(self) -> None:
         """Turn the set's own slideshow off, once, unless the seam is holding writes."""
-        if not self._state.native_slideshow_disabled and self._writes_wait.is_due():
+        if not self._state.native_slideshow_disabled and self._writes.is_due():
             try:
                 await self._tv.disable_native_slideshow()
             except TvNotOurs as exc:
@@ -848,7 +850,7 @@ class FrameDisplay:
             minimum=self._settings.tv_min_brightness,
             maximum=self._settings.tv_max_brightness,
         )
-        if value == self._brightness_value or not self._writes_wait.is_due():
+        if value == self._brightness_value or not self._writes.is_due():
             return
 
         try:
@@ -918,3 +920,57 @@ def _render_changed(binding: Binding, render: Path) -> bool:
     pass after an upgrade, which is the honest price of never having looked.
     """
     return binding.render_fingerprint != _fingerprint(render)
+
+
+def _say_the_wall_recovered() -> None:
+    log.info(
+        "the wall may be asked to change again: the television took a selection or said its mode changed",
+        extra={"event": "rotation.wall_recovered"},
+    )
+
+
+def _say_the_writes_resumed() -> None:
+    log.info("the television's uploads are no longer held", extra={"event": "tv.writes_resumed"})
+
+
+class _WaitedEpisode:
+    """A wait before trying again, and the journal's episode of the condition that set it: one object.
+
+    **Whatever clears the wait ends the episode**, once, and the next time the
+    condition arises it is said again. Kept as two fields, a wait cleared by the
+    set's news and an episode ended only by a write (or a selection that took)
+    disagreed: the set came back with nothing left to send, the episode stayed
+    open, and the next evening's line was never written. The wall's wait
+    (`rotation.wall_unchanged`) and the writes' (`tv.writes_held`) are both one
+    of these. The line that begins an episode is the caller's, because each needs
+    something only the caller has (the refused verb; a read of the set), so
+    `begins` answers whether to write it; the line that ends one is `ended`.
+
+    `hold` and `begins` are separate so a caller keeps the order it had: the
+    still wall's line reads the set before the wait is taken.
+    """
+
+    __slots__ = ("_ended", "_episode", "_wait")
+
+    def __init__(self, wait: Backoff, *, ended: Callable[[], None]) -> None:
+        self._wait = wait
+        self._ended = ended
+        self._episode = ReportOnce()
+
+    def is_due(self) -> bool:
+        """Whether the thing waited on may be tried now: no wait is on, or it is over."""
+        return self._wait.is_due()
+
+    def hold(self) -> None:
+        """Wait before trying again, and longer next time."""
+        self._wait.hold()
+
+    def begins(self) -> bool:
+        """True when this opens an episode, so the caller says it; False while one is open."""
+        return self._episode.begin()
+
+    def clear(self) -> None:
+        """Forget the wait, and end an episode that was said."""
+        self._wait.clear()
+        if self._episode.end():
+            self._ended()

@@ -279,6 +279,29 @@ async def test_the_wall_coming_back_is_reported_and_the_schedule_resumes(daemon:
     ), "the wall came back and nothing said so, so the WARNING above it stands unresolved in the log"
 
 
+async def test_a_second_still_wall_is_said_again_after_the_sets_news_ended_the_first(daemon: Wall, tv: FakeTv, publish, caplog):
+    """Whatever ends the wall's wait ends its episode, not only a selection that took.
+
+    The set ignores a selection, so the wall waits and says so. The feed is
+    republished back to the work already up, so no selection follows, and the
+    set announcing its mode clears the wait. The next ignored selection must be
+    said again, and the end between them said once."""
+    publish(["w1", "w2"], interval_seconds=3600)
+    await daemon.tick()  # w1 on the wall
+    with caplog.at_level(logging.INFO):
+        tv.displays_nothing_selected = True
+        publish(["w2", "w1"], interval_seconds=3600)
+        await daemon.tick()  # w2 is selected and not displayed
+        publish(["w1", "w2"], interval_seconds=3600)
+        tv.art_mode_announced = True
+        await daemon.tick()  # w1, up already, is wanted: nothing is selected
+        publish(["w2", "w1"], interval_seconds=3600)
+        await daemon.tick()  # w2 is ignored again
+
+    assert len(_events(caplog, "rotation.wall_unchanged")) == 2
+    assert len(_events(caplog, "rotation.wall_recovered")) == 1
+
+
 async def test_a_wall_that_comes_back_shows_the_slots_work_now(daemon: Wall, tv: FakeTv, publish, clock):
     """Neither the work it could not show nor a catch-up through the slots it missed.
 
@@ -401,6 +424,35 @@ async def test_it_says_the_wall_is_not_ours_once_not_once_a_slot(daemon: Wall, t
 
     reports = _events(caplog, "rotation.wall_not_ours")
     assert len(reports) == 1, f"a television in use was reported {len(reports)} times"
+
+
+async def test_a_second_programme_is_said_again_after_one_the_set_ended_on_its_own(daemon: Wall, tv: FakeTv, publish, caplog):
+    """The wall's episode ends whatever says the set is showing art, not only the gate's read.
+
+    A programme starts while the feed changes, so the gate is asked and says no.
+    The feed is republished back to the work already on the wall, so when the
+    set announces art mode the gate is never asked again. The set's own read
+    says it is ours; the next programme must be said again, and the return
+    between them said once."""
+    publish(["w1", "w2"], interval_seconds=3600)
+    await daemon.tick()  # w1 on the wall
+    with caplog.at_level(logging.INFO):
+        tv.art_mode = "off"
+        publish(["w2", "w1"], interval_seconds=3600)
+        await daemon.tick()  # w2 is wanted; the set is somebody's
+        publish(["w1", "w2"], interval_seconds=3600)
+        tv.art_mode = "on"
+        tv.art_mode_announced = True
+        await daemon.tick()  # w1, on the wall already, is wanted: the gate is not asked
+        selected = list(tv.selected)
+
+        tv.art_mode = "off"
+        publish(["w2", "w1"], interval_seconds=3600)
+        await daemon.tick()  # the next programme
+
+    assert tv.selected == selected, "a selection reached a set showing a programme"
+    assert len(_events(caplog, "rotation.wall_not_ours")) == 2
+    assert len(_events(caplog, "rotation.wall_returned")) == 1
 
 
 async def test_asking_whether_the_wall_is_ours_is_not_done_once_a_second(daemon: Wall, tv: FakeTv, publish, clock):
@@ -753,6 +805,34 @@ async def test_an_upload_held_for_a_programme_is_not_recorded_as_failed(
     await daemon.tick()
 
     assert len(tv.uploaded) == 3, "the held upload was not made once the set was showing art again"
+
+
+async def test_a_second_evening_of_television_is_said_again(daemon: Wall, tv: FakeTv, publish, caplog):
+    """Each hold on the writes is an episode with an end, even when no write ends it.
+
+    The first evening holds an upload; the set goes back to art mode with
+    nothing left to write (the feed dropped the held work), so no write follows.
+    The hold is still over, and the next evening's must be said again: the wait
+    was cleared by the set's news while the journal's episode waited for a write
+    that never came, so the second evening wrote nothing at all."""
+    publish(["w1", "w2", "w3"], interval_seconds=3600)
+    await daemon.tick()  # w1 up, w2 uploaded behind it; the slideshow, brightness and reconciliation done
+    with caplog.at_level(logging.INFO):
+        tv.art_mode = "off"
+        await daemon.tick()  # w3's upload is held
+        publish(["w1", "w2"], interval_seconds=3600)
+        tv.art_mode = "on"
+        tv.art_mode_announced = True
+        await daemon.tick()  # art again, and nothing owed: no write follows
+        uploads = len(tv.uploaded)
+
+        publish(["w1", "w2", "w4"], interval_seconds=3600)
+        tv.art_mode = "off"
+        await daemon.tick()  # w4's upload is held
+
+    assert len(tv.uploaded) == uploads == 2, "an upload reached a set showing a programme"
+    assert [record.verb for record in _events(caplog, "tv.writes_held")] == ["upload", "upload"]
+    assert len(_events(caplog, "tv.writes_resumed")) == 1
 
 
 async def test_held_writes_do_not_ask_the_set_once_a_second(daemon: Wall, tv: FakeTv, publish, clock):

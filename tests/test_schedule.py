@@ -605,6 +605,24 @@ async def test_pictures_no_work_composes_to_are_removed_and_so_is_a_half_written
     assert sorted(path.name for path in (media_root / "composed").iterdir()) == [composed(media_root, "w1").name]
 
 
+async def test_what_is_remembered_as_whole_does_not_outgrow_a_rotation_of_works(media_root, memory, clock, display):
+    """A picture found whole is remembered so it is not read again; one the tidy
+    removed is not, or the memory gains an entry for every work the wall has ever
+    composed, for the life of the process."""
+    schedule = a_schedule(media_root, memory, clock)
+    for round_ in range(4):
+        works = [f"r{round_}w{n}" for n in range(3)]
+        cache(media_root, *works)
+        schedule.adopt(_feed(feed_document(slots=[(works[0], "08:00", "13:00")], staging=works[1:])))
+        await step(schedule, display)
+        await step(schedule, display)
+
+    remembered = set(schedule._verified)
+    on_disk = set((media_root / "composed").iterdir())
+    assert remembered == on_disk, f"{len(remembered - on_disk)} removed picture(s) are still remembered as whole"
+    assert len(remembered) == 3
+
+
 async def test_with_no_screen_nothing_is_composed_or_shown(media_root, memory, clock, display):
     schedule = a_schedule(media_root, memory, clock, geometry=lambda: None)
     cache(media_root, "w1")

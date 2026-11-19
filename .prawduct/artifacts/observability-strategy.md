@@ -177,11 +177,11 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `compose.done` | INFO | `compose.compose` | A picture composed (`composed_path`) |
 | **The Frame** (`displays/frame.py:FrameDisplay`, `tv/samsung.py:SamsungTv`) | | | |
 | `tv.unavailable` / `tv.recovered` | WARNING / INFO | `FrameDisplay.went_away`, `answering` | The set cannot be reached; the wall holds |
-| `rotation.wall_not_ours` / `rotation.wall_returned` | INFO | `FrameDisplay.is_ours` | The set is not in art mode, so nothing is sent; then it is again |
-| `tv.writes_held` / `tv.writes_resumed` | INFO | `FrameDisplay._hold_the_writes`, `_write_went_through` | The seam refused an upload, removal, brightness change or slideshow switch-off (`TvNotOurs`, with the `verb`) because the set is lit and not showing art, or its power cannot be read; said once, then when a write goes through |
+| `rotation.wall_not_ours` / `rotation.wall_returned` | INFO | `FrameDisplay._learned_showing_art` | The set is not in art mode, so nothing is sent; then it is again, by whatever says so (the gate's read, a read after the set's announcement, a picture announced or a selection that took). Once per episode each |
+| `tv.writes_held` / `tv.writes_resumed` | INFO | `FrameDisplay._hold_the_writes`; `_writes`, a `frame._WaitedEpisode`, at `clear` | The seam refused an upload, removal, brightness change or slideshow switch-off (`TvNotOurs`, with the `verb`) because the set is lit and not showing art, or its power cannot be read; said once per hold, and the hold's end once: a write going through, the set read showing art, or the set announcing a change of mode |
 | `display.power_unreadable` / `display.power_readable` | INFO | `FrameDisplay._screen_is_not_ours` | `PowerState` could not be read; `in_use` is reported |
 | `rotation.selected` | INFO | `FrameDisplay.show` | A work is on the wall, confirmed by the set (`tv_content_id`, `theme_id`) |
-| `rotation.wall_unchanged` / `rotation.wall_recovered` | WARNING / INFO | `FrameDisplay._report_wall_unchanged`, `show` | The set accepted a selection and displayed nothing (`art_mode`) |
+| `rotation.wall_unchanged` / `rotation.wall_recovered` | WARNING / INFO | `FrameDisplay._report_wall_unchanged`; `_wall`, a `frame._WaitedEpisode`, at `clear` | The set accepted a selection and displayed nothing (`art_mode`); said once, and its end once, whenever the wall's wait is cleared: a selection that took, or the set announcing a change of mode |
 | `binding.uploaded`, `binding.upload_failed` | INFO, WARNING | `FrameDisplay._upload` | A work uploaded to the set, or not |
 | `binding.orphaned` | WARNING | `FrameDisplay._rebind_or_reraise`, `_reconcile_with_the_set` | The set no longer lists a content id the store has |
 | `tv.orphans_removed`, `tv.orphan_removal_unconfirmed` | INFO, WARNING | `FrameDisplay._remove_orphans` | Unaccounted images removed from the set, or the outcome unknown |
@@ -231,7 +231,7 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `settings_page.unavailable` | ERROR | `__main__.run_settings_page` | The page cannot listen (address in use); the walls run on |
 | `settings_page.password_set`, `settings_page.password_changed` | INFO | `server._setup`, `_change_password` | The first password set from the setup link; a password changed |
 | `settings_page.login_refused`, `settings_page.password_refused` | WARNING | `server._login`, `_change_password` | A wrong password at sign-in; a wrong current password when changing it. Each carries `remote`, the source address the throttle charges |
-| `settings_page.host_refused` | WARNING | `server._known_hosts` | A request for a name the page does not answer to was refused with a 421 before any page (`host`, `setting`: the `.env` key that lists more) |
+| `settings_page.host_refused` | WARNING | `server._known_hosts`, `RefusedHosts` | Requests for a name the page does not answer to were refused with a 421 before any page. Said when a name is first refused, then at most once in 10 minutes while it keeps arriving, and once more, at the next refusal of any name, when it has been quiet 10 minutes with refusals unsaid (no timer: if refusals stop, that last count is not written); `refused` is how many refusals the line accounts for. Past 32 names the rest are counted together, with `host` null (`host`, `refused`, `setting`: the `.env` key that lists more) |
 | `settings_page.saved` | INFO | `server._save` | Settings saved (`changed`: the keys, never the values); the Player restarts onto them |
 | `settings_page.write_failed` | ERROR | `server._wrote` | The settings file could not be written (full disk, permission) |
 | **Slideshow mode: the programme** (`__main__.run_slideshow`, `programmes/slideshow.py:Slideshow`) | | | |
