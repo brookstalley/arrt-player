@@ -1129,12 +1129,7 @@ class LabelPull:
                 _discard(path)
             self._report_uncacheable(exc)
             return False
-        if self._uncacheable.end():
-            log.info(
-                "the document for label %s is cached again",
-                self._label_id,
-                extra={"event": "label.cache_writable", "label_id": self._label_id},
-            )
+        self._report_cacheable()
         return True
 
     def _stamp(self) -> None:
@@ -1152,11 +1147,23 @@ class LabelPull:
             return
         except OSError as exc:
             self._report_uncacheable(exc)
+            return
+        # A refused stamp began the episode too, and a 304 a minute may be all
+        # the server sends for as long as its document stands.
+        self._report_cacheable()
 
     def _set_stamp(self, path: Path) -> None:
         instant = self._now().timestamp()
         os.utime(path, (instant, instant))
         self._stamped = self._monotonic()
+
+    def _report_cacheable(self) -> None:
+        if self._uncacheable.end():
+            log.info(
+                "the document for label %s is cached again",
+                self._label_id,
+                extra={"event": "label.cache_writable", "label_id": self._label_id},
+            )
 
     def _report_uncacheable(self, exc: OSError) -> None:
         if self._uncacheable.begin():

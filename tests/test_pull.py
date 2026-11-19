@@ -1250,6 +1250,47 @@ async def test_the_cached_document_is_stamped_as_answered_once_a_minute_while_th
     assert stamped_later.answered_at == clock.as_clock().now(), "a 304 a minute on did not stamp the cached document"
 
 
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_stamp_that_succeeds_after_a_refused_one_says_the_label_is_cached_again(
+    stub, client_settings, clock, monkeypatch, caplog, code
+):
+    """A refused stamp began the episode and only a fresh document's write ended it,
+    so a label the server kept answering 304 stayed reported unwritable after its
+    cache could be stamped again."""
+    stub.map_label("l-hall", "epd-0", WALL_ID, _showing_art())
+    real_utime = os.utime
+    refused: list = []
+
+    def utime(path, times=None):
+        if refusing and Path(path).is_relative_to(client_settings.cache_dir):
+            refused.append(path)
+            raise OSError(code, os.strerror(code))
+        real_utime(path, times)
+
+    refusing = False
+    monkeypatch.setattr(pull_module.os, "utime", utime)
+    link = _label_link(stub, client_settings, clock)
+    try:
+        with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+            await link.fetch()
+            refusing = True
+            clock.advance(LABEL_STAMP_SECONDS + 1)
+            refused_answer = await link.fetch()
+            refusing = False
+            stamped_answer = await link.fetch()
+    finally:
+        await link.close()
+
+    assert refused_answer == LabelAnswer(reachable=True), "the refused stamp was not on a 304"
+    assert stamped_answer == LabelAnswer(reachable=True), "the stamp after it was not on a 304"
+    assert len(refused) == 1, "the stamp was not refused once"
+    stamped = _label_link(stub, client_settings, clock).cached()
+    assert stamped is not None
+    assert stamped.answered_at == clock.as_clock().now(), "the stamp after the refused one did not move the stamp"
+    assert _events(caplog).count("label.cache_unwritable") == 1, _events(caplog)
+    assert _events(caplog).count("label.cache_writable") == 1, _events(caplog)
+
+
 async def test_a_document_this_reader_refuses_leaves_the_cached_one(stub, client_settings, clock):
     answer, _ = await _cache_one_label(stub, client_settings, clock)
     stub.label_documents["l-hall"] = {**_showing_art(), "schema": {"major": 2, "minor": 0}}
