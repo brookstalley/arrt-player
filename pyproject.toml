@@ -227,6 +227,12 @@ arrt-contract = { git = "https://github.com/brookstalley/arrt", tag = "contract-
 # dependency.
 override-dependencies = [
     "IT8951[rpi] @ git+https://github.com/GregDMeyer/IT8951.git@9f136139378f74e17d9972d7165dc6ae53a2568e",
+    # **The third unpinned axis: `omni_epd` names the Waveshare sample with no
+    # commit either**, so the lock holds a commit and a re-lock would move it to
+    # that repository's default branch. This is the commit the lock already
+    # recorded when the pin was added (audit-8 F22), so adding it changed no
+    # resolved version.
+    "waveshare-epd @ git+https://github.com/mendhak/waveshare-epaper-sample.git@2587516a8ad32b3ef4f7829212d962eb0679006b#subdirectory=RaspberryPi_JetsonNano/python",
     "jetson-gpio; sys_platform == 'never'",
 ]
 
