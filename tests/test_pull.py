@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from dataclasses import replace
 
 import aiohttp
@@ -31,6 +32,8 @@ from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import screen_wall
 from arrt_player.manifest import REQUESTED_MAJORS, Feed, Watcher, media_name
 from arrt_player.pull import (
+    BACKOFF_START_SECONDS,
+    CLIENT_ETAG_FILENAME,
     CLIENT_HEARTBEAT_ROUTE,
     CLIENT_ROUTE,
     ETAG_FILENAME,
@@ -39,8 +42,17 @@ from arrt_player.pull import (
     LABEL_ROUTE,
     MANIFEST_MAJOR_ROUTE,
     MEDIA_DIRNAME,
+    ClientPull,
+    LabelAnswer,
+    LabelPull,
     Pull,
 )
+
+#: How long a feed is held while a master fails for a reason that may clear:
+#: ten minutes, the plan's decision, stated here rather than read from the module.
+HOLD_SECONDS = 10 * 60
+#: The most of a client or label document the Player reads: 1 MiB, likewise.
+DOCUMENT_CAP_BYTES = 1024 * 1024
 
 
 @pytest.fixture
@@ -93,6 +105,30 @@ def _cached(settings) -> dict | None:
 
 def _held(settings) -> set[str]:
     return {path.name for path in (settings.wall_dir / MEDIA_DIRNAME).iterdir()}
+
+
+#: A wall heartbeat the contract's schema accepts, which is the only kind the double takes.
+_A_HEARTBEAT = json.loads((CONTRACT / "fixtures" / "heartbeat.v1" / "valid" / "fresh-start-no-panel.json").read_text())
+
+
+def _heartbeat(reported_at: str, **changes: object) -> str:
+    """A wall heartbeat file's text: a valid report made at `reported_at`."""
+    return json.dumps({**_A_HEARTBEAT, "reported_at": reported_at, **changes})
+
+
+def _heartbeat_posts(stub) -> int:
+    """How many wall heartbeats reached the double, accepted or not."""
+    return stub.requests.count(("POST", HEARTBEAT_ROUTE.format(wall_id=WALL_ID)))
+
+
+async def _until(done, *, within: float = 5.0) -> None:
+    """Wait for `done` on a running loop, failing rather than passing on the budget."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + within
+    while not done():
+        if loop.time() > deadline:
+            raise AssertionError(f"not done after {within} s")
+        await asyncio.sleep(0.01)
 
 
 # -- the contract's routes ------------------------------------------------------------
@@ -496,7 +532,7 @@ async def test_a_master_that_keeps_failing_is_said_once_and_backed_off(pull, stu
     stub.publish("w2")
     stub.media_status = 503
     heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}))
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
 
     with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
         for _ in range(3):
@@ -511,6 +547,339 @@ async def test_a_master_that_keeps_failing_is_said_once_and_backed_off(pull, stu
     assert len([message for message in messages if "could not be fetched" in message]) == 1
     assert len([message for message in messages if "arrive again" in message]) == 1
     assert _works(http_settings) == ["w2"]
+
+
+# -- what a restarted Player asks with ---------------------------------------------------
+
+
+def _truncated(path) -> None:
+    whole = path.read_bytes()
+    path.write_bytes(whole[: len(whole) // 2])
+
+
+def _not_utf8(path) -> None:
+    path.write_bytes(b"\xff\xfe" + path.read_bytes())
+
+
+def _a_feed_the_watcher_refuses(path) -> None:
+    """JSON, so only a reader that runs the watcher's own parser refuses it."""
+    document = json.loads(path.read_text())
+    document["schedule"]["slots"][0]["work_id"] = "a-work-the-feed-does-not-carry"
+    path.write_text(json.dumps(document))
+
+
+@pytest.mark.parametrize("spoil", [_truncated, _not_utf8, _a_feed_the_watcher_refuses], ids=["truncated", "not-utf8", "refused"])
+async def test_a_cached_manifest_the_watcher_cannot_read_is_not_asked_for_with_its_etag(
+    pull, stub, session, http_settings, spoil
+):
+    """Sent beside a manifest the watcher refuses, the ETag gets a 304, and the wall has no feed until the server's changes."""
+    published = stub.publish("w1", "w2")
+    await pull.cycle(session)
+    assert (http_settings.wall_dir / ETAG_FILENAME).is_file(), "the feed was not cached with its ETag"
+    spoil(http_settings.manifest_path)
+    assert _watcher(http_settings).poll() is None, "the spoiled manifest is still one the watcher reads"
+
+    restarted = Pull(http_settings)
+    assert await restarted.cycle(session) is True
+
+    assert _cached(http_settings) == published, "the restarted Player kept the manifest the watcher refuses"
+    assert list(_watcher(http_settings).poll().works) == ["w1", "w2"]
+
+
+def _client_truncated(path) -> None:
+    _truncated(path)
+
+
+def _client_refused(path) -> None:
+    """JSON, so only a reader that runs `parse_client_document` refuses it."""
+    path.write_text(json.dumps({"client_id": "c-the-pi", "name": "The Pi in the hall", "walls": "not a list"}))
+
+
+@pytest.fixture
+async def client_link(client_settings, stub):
+    links = []
+
+    def make() -> ClientPull:
+        links.append(ClientPull(replace(client_settings, server_url=stub.url)))
+        return links[-1]
+
+    yield make
+    for link in links:
+        await link.close()
+
+
+@pytest.mark.parametrize("spoil", [_client_truncated, _client_refused], ids=["truncated", "refused"])
+async def test_a_cached_client_document_that_cannot_be_read_is_not_asked_for_with_its_etag(client_link, client_settings, spoil):
+    """Sent beside a document the Player refuses, the ETag gets a 304, and no wall starts until a curator changes it."""
+    first = await client_link().fetch()
+    assert first is not None
+    assert (client_settings.cache_dir / CLIENT_ETAG_FILENAME).is_file(), "the document was not cached with its ETag"
+    spoil(client_settings.client_document_path)
+
+    restarted = client_link()
+    assert restarted.cached() is None, "the spoiled document is still one the Player reads"
+
+    assert await restarted.fetch() == first, "the restarted Player was answered 304 for a document it cannot read"
+    assert restarted.cached() == first
+
+
+# -- a master that keeps failing ------------------------------------------------------------
+
+
+async def test_a_failing_master_does_not_hold_the_heartbeat_back_to_the_backoff(stub, http_settings):
+    """The manifest poll backs off while a master fails; the heartbeat still goes every poll interval."""
+    published = stub.publish("w1", "w2")
+    stub.media_status_by_sha[published["works"]["w2"]["media"]["sha256"]] = 500
+    heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
+    manifest_route = MANIFEST_MAJOR_ROUTE.format(wall_id=WALL_ID, major=2)
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    running = asyncio.create_task(Pull(http_settings, interval_seconds=0.05).run(stop))
+    try:
+        await _until(lambda: len(stub.heartbeats) == 1)
+        heartbeat.write_text(_heartbeat("2026-09-30T12:00:01+00:00"))
+        changed_at = loop.time()
+        await _until(lambda: len(stub.heartbeats) == 2)
+        took = loop.time() - changed_at
+        polls = stub.requests.count(("GET", manifest_route))
+    finally:
+        stop.set()
+        await asyncio.wait_for(running, timeout=5)
+
+    assert took < BACKOFF_START_SECONDS / 2, f"the changed heartbeat took {took:.2f} s, the manifest's backoff"
+    assert polls == 1, "the heartbeat was carried by polling the manifest more often, not beside it"
+
+
+async def test_the_heartbeat_waits_while_the_server_does_not_answer(stub, http_settings):
+    """Posting to a server that just failed the manifest poll would hammer it at the poll's pace."""
+    stub.publish("w1")
+    stub.manifest_status = 503
+    heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
+    stop = asyncio.Event()
+    running = asyncio.create_task(Pull(http_settings, interval_seconds=0.02).run(stop))
+    try:
+        await _until(lambda: len(stub.majors_requested) == 1)
+        await asyncio.sleep(0.3)
+        posted_while_failing = _heartbeat_posts(stub)
+    finally:
+        stop.set()
+        await asyncio.wait_for(running, timeout=5)
+
+    assert posted_while_failing == 0
+
+
+async def test_a_heartbeat_loop_that_crashes_ends_the_pull(stub, http_settings):
+    """A pull that goes on polling without being heard is a wall the health panel calls silent, for no reason it can see."""
+    stub.publish("w1")
+    heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
+    heartbeat.mkdir(parents=True)
+    stop = asyncio.Event()
+    running = asyncio.create_task(Pull(http_settings, interval_seconds=0.02).run(stop))
+    try:
+        # Not `wait_for`: cancelling the pull would surface the same error on the way out, ended or not.
+        await asyncio.wait({running}, timeout=2)
+        ended = running.done()
+    finally:
+        stop.set()
+        await asyncio.wait({running}, timeout=5)
+
+    assert ended, "the pull went on polling after its heartbeat loop crashed"
+    assert isinstance(running.exception(), IsADirectoryError)
+
+
+def _with_a_scene(document: dict, work_id: str) -> dict:
+    document["scene"] = {"id": "scene-1", "work_id": work_id, "from": "2026-06-21T11:00:00+00:00", "until": None}
+    return document
+
+
+async def test_a_feed_whose_master_keeps_failing_is_adopted_without_it_after_the_hold(
+    http_settings, stub, session, tv, state, clock
+):
+    """One master that will not download must not freeze the wall's schedule, scene and staging for good."""
+    elapsed = _Ticking()
+    pull = Pull(http_settings, monotonic=elapsed)
+    (http_settings.wall_dir / MEDIA_DIRNAME).mkdir(parents=True)
+    stub.publish("w0")
+    assert await pull.cycle(session) is True
+    published = _with_a_scene(
+        stub.publish_feed(
+            [("w2", "2026-06-21T08:00:00+00:00", "2026-06-21T18:00:00+00:00")],
+            staging=("w1",),
+        ),
+        "w1",
+    )
+    failing = published["works"]["w2"]["media"]["sha256"]
+    stub.media_status_by_sha[failing] = 500
+    fetches = ("GET", f"/media/sha256-{failing}")
+
+    assert await pull.cycle(session) is False
+    elapsed.now += HOLD_SECONDS - 1
+    assert await pull.cycle(session) is False
+    assert _works(http_settings) == ["w0"], "the feed was adopted before the hold ran out"
+
+    elapsed.now += 2
+    assert await pull.cycle(session) is False, "a master still failing was not backed off"
+    assert _cached(http_settings) == published, "the feed was still held past the hold"
+    assert _held(http_settings) >= {_media(published, "w1")}
+    assert media_name(failing) not in _held(http_settings)
+    assert not (http_settings.wall_dir / ETAG_FILENAME).exists(), "an ETag written now would stop the failing master's retries"
+    daemon = frame_wall(settings=http_settings, tv=tv, state=state, watcher=_watcher(http_settings), clock=clock.as_clock())
+    await tick_until(daemon.tick, lambda: tv.on_the_wall is not None)
+    shown = json.loads((http_settings.wall_dir / f"display-heartbeat-{WALL_ID}.json").read_text())
+    assert (shown["current_work_id"], shown["scene_id"]) == ("w1", "scene-1"), "the scene did not reach the wall"
+
+    adopted_at = http_settings.manifest_path.stat().st_mtime_ns
+    tried = stub.requests.count(fetches)
+    elapsed.now += 1
+    await pull.cycle(session)
+    assert stub.requests.count(fetches) == tried + 1, "the failing master was not asked for again"
+    assert http_settings.manifest_path.stat().st_mtime_ns == adopted_at, "the same feed was written again"
+
+    del stub.media_status_by_sha[failing]
+    elapsed.now += 1
+    assert await pull.cycle(session) is True
+    assert media_name(failing) in _held(http_settings)
+    assert (http_settings.wall_dir / ETAG_FILENAME).is_file()
+
+    # The hold is the episode's, not the process's: the next master to fail is held its own ten minutes.
+    later = stub.publish("w3")
+    stub.media_status_by_sha[later["works"]["w3"]["media"]["sha256"]] = 500
+    elapsed.now += 1
+    await pull.cycle(session)
+    assert _cached(http_settings) == published, "a new failure was not held"
+
+
+async def test_a_304_ends_the_hold_so_the_next_failure_is_held_its_own_ten_minutes(http_settings, stub, session, caplog):
+    """The server going back to the feed already cached is the end of the wait for the one it had moved to."""
+    caplog.set_level(logging.INFO, logger="arrt_player.pull")
+    elapsed = _Ticking()
+    pull = Pull(http_settings, monotonic=elapsed)
+    (http_settings.wall_dir / MEDIA_DIRNAME).mkdir(parents=True)
+    first = stub.publish("w0")
+    await pull.cycle(session)
+    second = stub.publish("w1")
+    stub.media_status_by_sha[second["works"]["w1"]["media"]["sha256"]] = 500
+    assert await pull.cycle(session) is False
+
+    stub.manifests[WALL_ID] = first
+    elapsed.now += HOLD_SECONDS / 2
+    assert await pull.cycle(session) is True
+    third = stub.publish("w3")
+    stub.media_status_by_sha[third["works"]["w3"]["media"]["sha256"]] = 500
+    elapsed.now += HOLD_SECONDS / 2 + 1
+    await pull.cycle(session)
+
+    assert _works(http_settings) == ["w0"], "a new failure inherited the wait of one the server had already withdrawn"
+    events = [record.__dict__.get("event") for record in caplog.records]
+    assert events.count("pull.media_failing") == 2, "the second failure was not said"
+    assert events.count("pull.media_ok") == 1
+
+
+async def test_a_server_gone_mid_poll_is_not_asked_for_the_rest_and_a_failing_master_is_asked_for_last(
+    pull, stub, session, http_settings
+):
+    """Asking every master of a server that has gone costs a timeout each; and a failing master must not keep the rest out."""
+    published = stub.publish("w-dropped", "w1")
+    dropped = published["works"]["w-dropped"]["media"]["sha256"]
+    stub.media_dropped.add(dropped)
+    w1 = ("GET", f"/media/sha256-{published['works']['w1']['media']['sha256']}")
+
+    assert await pull.cycle(session) is False
+    assert w1 not in stub.requests, "a master was asked for after the server dropped the connection"
+
+    assert await pull.cycle(session) is False
+    assert _media(published, "w1") in _held(http_settings), "the master that failed kept the next one out"
+    assert stub.requests.index(w1) < len(stub.requests) - 1, "the failing master was not asked for after the rest"
+
+
+async def test_a_master_that_runs_past_its_declared_size_is_stopped_and_skipped(pull, stub, session, http_settings, caplog):
+    """Its hash is right; its manifest says it is a thousand bytes. Read whole, it would be cached."""
+    big = os.urandom(32 * 1024 * 1024)
+    published = stub.publish("w1", "w2", media={"w2": big})
+    published["works"]["w2"]["media"]["bytes"] = 1000
+    sha = published["works"]["w2"]["media"]["sha256"]
+
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+        assert await pull.cycle(session) is True
+
+    assert _cached(http_settings) == published
+    assert _held(http_settings) == {_media(published, "w1")}, "the oversized master, or a piece of it, was kept"
+    (sent,) = stub.media_sent[sha]
+    assert sent < len(big), "the Player read the whole master before judging its size"
+    (skipped,) = [record for record in caplog.records if record.__dict__.get("event") == "pull.work_skipped"]
+    assert "w2" in skipped.getMessage()
+    assert "1000" in skipped.getMessage()
+
+
+@pytest.mark.parametrize("declared", [None, 0, "1000", True], ids=["absent", "zero", "text", "boolean"])
+async def test_a_master_with_no_usable_declared_size_is_skipped_without_asking(pull, stub, session, http_settings, declared):
+    """The declared size is the bound on the download, so a master without one is not downloaded."""
+    published = stub.publish("w1", "w2")
+    media = published["works"]["w2"]["media"]
+    if declared is None:
+        del media["bytes"]
+    else:
+        media["bytes"] = declared
+
+    assert await pull.cycle(session) is True
+
+    assert _cached(http_settings) == published
+    assert _held(http_settings) == {_media(published, "w1")}
+    assert ("GET", f"/media/sha256-{media['sha256']}") not in stub.requests
+
+
+# -- documents read with a cap --------------------------------------------------------------
+
+
+async def test_a_client_document_larger_than_the_cap_is_refused_and_not_cached(client_link, client_settings, stub):
+    """Additive keys are allowed, so only the size makes this one wrong."""
+    stub.client_body = json.dumps(
+        {"client_id": "c-the-pi", "name": "The Pi in the hall", "walls": [], "padding": "x" * DOCUMENT_CAP_BYTES}
+    ).encode()
+
+    assert await client_link().fetch() is None
+
+    assert not client_settings.client_document_path.exists()
+
+
+async def test_a_label_document_larger_than_the_cap_is_refused(stub, client_settings):
+    document = json.loads((CONTRACT / "fixtures" / "label.v1" / "valid" / "showing-art.json").read_text())
+    stub.map_label("l-hall", "epd-0", WALL_ID, {**document, "padding": "x" * DOCUMENT_CAP_BYTES})
+    link = LabelPull(replace(client_settings, server_url=stub.url), "l-hall")
+    try:
+        answer = await link.fetch()
+        stub.label_documents["l-hall"] = document
+        fits = await link.fetch()
+    finally:
+        await link.close()
+
+    assert answer == LabelAnswer(reachable=True), "a document over the cap was read"
+    assert fits.document is not None, "the cap refused a document under it"
+
+
+# -- the label's id ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("label_id", ["../x", "..", "a/b", "x?y=1", "x#y", "%2e%2e", ""])
+async def test_a_label_id_that_is_not_a_plain_path_component_is_refused_by_name_and_never_requested(
+    stub, client_settings, caplog, label_id
+):
+    link = LabelPull(replace(client_settings, server_url=stub.url), label_id)
+    try:
+        with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
+            first = await link.fetch()
+            second = await link.fetch()
+    finally:
+        await link.close()
+
+    assert stub.seen == [], "a request went out for a label id that is not a path component"
+    assert first == second == LabelAnswer(reachable=True)
+    (refused,) = [record for record in caplog.records if record.__dict__.get("event") == "label.id_unusable"]
+    assert repr(label_id) in refused.getMessage()
 
 
 # -- the token -------------------------------------------------------------------------------
@@ -566,18 +935,18 @@ async def test_the_heartbeat_file_is_posted_when_it_holds_a_new_report_and_not_o
     heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
     assert heartbeat.parent == http_settings.wall_dir, "the wall's heartbeat file is in its own directory"
     stub.publish("w1")
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}))
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
 
     await pull.cycle(session)
     await pull.cycle(session)
-    assert [json.loads(body) for body in stub.heartbeats] == [{"reported_at": "2026-09-30T12:00:00+00:00"}]
+    assert [json.loads(body) for body in stub.heartbeats] == [json.loads(_heartbeat("2026-09-30T12:00:00+00:00"))]
 
     # Rewritten with the same report: not a new heartbeat.
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}, indent=2))
+    heartbeat.write_text(json.dumps(json.loads(_heartbeat("2026-09-30T12:00:00+00:00")), indent=2))
     await pull.cycle(session)
     assert len(stub.heartbeats) == 1
 
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:01:00+00:00", "schema": {"major": 1, "minor": 1}}))
+    heartbeat.write_text(_heartbeat("2026-09-30T12:01:00+00:00", schema={"major": 1, "minor": 1}))
     await pull.cycle(session)
     assert len(stub.heartbeats) == 2
     assert json.loads(stub.heartbeats[-1])["reported_at"] == "2026-09-30T12:01:00+00:00"
@@ -591,15 +960,77 @@ async def test_a_server_that_writes_the_heartbeat_into_the_shared_tree_causes_no
     shared = tmp_path / "art" / f"display-heartbeat-{WALL_ID}.json"
     stub.echo_heartbeats_to = shared
     stub.publish("w1")
-    (http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json").write_text(
-        json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"})
-    )
+    (http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json").write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
 
     for _ in range(5):
         await pull.cycle(session)
 
     assert len(stub.heartbeats) == 1, "each echo was posted again"
     assert json.loads(shared.read_text())["reported_at"] == "2026-09-30T12:00:00+00:00"
+
+
+async def test_a_refused_heartbeat_is_posted_again_only_when_it_changes(pull, stub, session, http_settings, caplog):
+    """A 4xx is the server's word on this report: posting it again each second changes nothing."""
+    stub.publish("w1")
+    heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
+    stub.heartbeat_status = 400
+
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+        await pull.cycle(session)
+        await pull.cycle(session)
+        assert _heartbeat_posts(stub) == 1, "an unchanged, refused heartbeat was posted again"
+
+        heartbeat.write_text(_heartbeat("2026-09-30T12:00:01+00:00"))
+        await pull.cycle(session)
+    assert _heartbeat_posts(stub) == 2, "a changed heartbeat was not posted after a refusal"
+    (refused,) = [record for record in caplog.records if record.__dict__.get("event") == "pull.heartbeat_refused"]
+    assert refused.status == 400
+
+
+async def test_a_heartbeat_the_server_failed_is_posted_again_on_the_next_poll(pull, stub, session, http_settings):
+    """A 5xx is the server's trouble, not the report's: the same report goes again."""
+    stub.publish("w1")
+    heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
+    stub.heartbeat_status = 503
+
+    await pull.cycle(session)
+    await pull.cycle(session)
+    assert _heartbeat_posts(stub) == 2
+
+    stub.heartbeat_status = None
+    await pull.cycle(session)
+    await pull.cycle(session)
+    assert [json.loads(body)["reported_at"] for body in stub.heartbeats] == ["2026-09-30T12:00:00+00:00"]
+
+
+def _heartbeat_fixtures(kind: str) -> list:
+    folder = CONTRACT / "fixtures" / "heartbeat.v1" / kind
+    return [pytest.param(path, id=path.stem) for path in sorted(folder.glob("*.json"))]
+
+
+@pytest.mark.parametrize("fixture", _heartbeat_fixtures("invalid"))
+async def test_the_double_refuses_a_wall_heartbeat_the_contract_refuses(stub, session, fixture):
+    """So a Player that writes a bad heartbeat fails against the double as it would against Arrt."""
+    async with session.post(
+        stub.url + HEARTBEAT_ROUTE.format(wall_id=WALL_ID),
+        data=fixture.read_bytes(),
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+    ) as response:
+        assert response.status == 400
+    assert stub.heartbeats == []
+
+
+@pytest.mark.parametrize("fixture", _heartbeat_fixtures("valid"))
+async def test_the_double_takes_a_wall_heartbeat_the_contract_takes(stub, session, fixture):
+    async with session.post(
+        stub.url + HEARTBEAT_ROUTE.format(wall_id=WALL_ID),
+        data=fixture.read_bytes(),
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+    ) as response:
+        assert response.status == 204
+    assert stub.heartbeats == [fixture.read_bytes()]
 
 
 async def test_the_pull_stops_when_asked(stub, http_settings):
