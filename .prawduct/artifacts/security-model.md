@@ -102,7 +102,7 @@ The Player authenticates outward to two peers, the server and the television, or
   and its DEBUG sibling. A library failure that quotes the token (in the URL or
   in a reply's `token` field) is written with the value withheld before it is
   logged or kept as the wall's `last_error`, which the heartbeat carries to the
-  server (`tv/samsung.py:_TOKEN`, `_describe`; `tests/test_samsung_client.py`).
+  server (`tv/samsung.py:_TOKEN`, `_named`; `tests/test_samsung_client.py`).
   The startup line names the token's path, never its contents
   (`config.py:FrameSettings.frame_lines`).
 
