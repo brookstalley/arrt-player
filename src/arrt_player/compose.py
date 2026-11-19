@@ -20,6 +20,7 @@ any Player composing a major 2 work draws the same mat.
 import hashlib
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,9 +59,22 @@ _HEX: Final = re.compile(r"^#[0-9a-f]{6}$")
 _QUARTER_TURNS: Final[frozenset[int]] = frozenset({5, 6, 7, 8})
 _ORIENTATION_TAG: Final[int] = 0x0112
 
+#: The two bytes every whole JPEG ends with.
+_JPEG_END: Final[bytes] = b"\xff\xd9"
+
 
 class Uncomposable(Exception):
-    """The master could not be read as an image. It costs this work, never the wall."""
+    """The master could not be read as an image. It costs this work, never the wall.
+
+    `transient` is true when the read itself failed (an `OSError` that carries
+    an errno: EIO, a master the pull replaced mid-read), which the same bytes
+    may not do twice. A master whose bytes do not decode is not: they are
+    verified against their hash, so they decode the same way every time.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -213,6 +227,11 @@ def compose(
     staged = destination.with_name(f"{destination.name}.composing")
     try:
         canvas.save(staged, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+        # Flushed to the disk before the rename, so power lost after it cannot
+        # leave an empty file under the final name, which `is_file` would take
+        # for a picture for ever (`is_intact` finds one that did anyway).
+        with staged.open("rb") as written:
+            os.fsync(written.fileno())
         staged.replace(destination)
     finally:
         # Gone already when the write succeeded; on any failure, never left for
@@ -228,6 +247,31 @@ def compose(
         extra={"event": "compose.done", "composed_path": str(destination)},
     )
     return destination
+
+
+def is_intact(picture: Path) -> bool:
+    """Whether `picture` is a JPEG that ends where a JPEG ends and decodes through.
+
+    The check for a composed file found on disk, which a power loss can leave
+    empty, cut short or zero-filled under its final name. **The end marker is
+    checked first, because a decoder forgives its absence**: a file whose tail
+    is zeros reads as more of the same picture. The decode is at one eighth of
+    the scale, which still reads every byte of the file but costs a fraction of
+    a full decode on a Pi; a caller asks once per file, not on every pass.
+    """
+    try:
+        with picture.open("rb") as handle:
+            handle.seek(-2, os.SEEK_END)
+            if handle.read(2) != _JPEG_END:
+                return False
+        with Image.open(picture) as image:
+            if image.format != "JPEG":
+                return False
+            image.draft("RGB", (1, 1))
+            image.load()
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return False
+    return True
 
 
 def _drawn(mode: str, mat_color: object) -> tuple[str, tuple[int, int, int] | None]:
@@ -252,8 +296,14 @@ def _draw(master: Path, *, geometry: Geometry, mode: str, rgb: tuple[int, int, i
             upright = (ImageOps.exif_transpose(image) or image).convert("RGB")
             if upright.size != (placed.work.width, placed.work.height):
                 upright = upright.resize((placed.work.width, placed.work.height), Image.Resampling.LANCZOS)
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+    except (UnidentifiedImageError, ValueError, Image.DecompressionBombError) as exc:
         raise Uncomposable(f"{master.name} could not be read as an image ({exc})") from exc
+    except OSError as exc:
+        # An errno means the read failed, not that the bytes are wrong; Pillow's
+        # own "truncated" and "cannot identify" errors carry none.
+        if exc.errno is None:
+            raise Uncomposable(f"{master.name} could not be read as an image ({exc})") from exc
+        raise Uncomposable(f"{master.name} could not be read ({exc})", transient=True) from exc
 
     canvas = Image.new("RGB", geometry.screen, (0, 0, 0))
     if placed.mat is not None and rgb is not None:
@@ -288,6 +338,7 @@ __all__ = [
     "compose",
     "composed_path",
     "composition_key",
+    "is_intact",
     "layout",
     "mat_mode",
     "mat_rgb",
