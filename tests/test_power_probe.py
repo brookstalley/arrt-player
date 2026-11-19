@@ -767,7 +767,7 @@ class TestItReportsWhatATransitionDid:
         """Three states, not two: alive, dead, and never asked.
 
         The sweep found this one undefended, and it is the same
-        two-meanings-in-one-value fault this plane has paid for before: collapsing
+        two-meanings-in-one-value fault the Player has paid for before: collapsing
         "never opened" into "dead" would answer the *does the art channel survive a
         power transition* question with a confident no, on a run that never opened a
         channel to find out.

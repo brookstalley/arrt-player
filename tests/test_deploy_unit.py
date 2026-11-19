@@ -168,3 +168,106 @@ def test_the_bus_the_brightness_needs_is_loaded_at_boot():
     shipped = UNIT.parent / "modules-load.d" / "arrt-player.conf"
     lines = [line.strip() for line in shipped.read_text().splitlines()]
     assert "i2c-dev" in [line for line in lines if line and not line.startswith("#")]
+
+
+def _uv_run_options() -> list[str]:
+    """What `ExecStart` passes `uv run`, up to the command it runs."""
+    (exec_start,) = _directives()["ExecStart"]
+    words = exec_start.split()
+    assert words[1] == "run", f"ExecStart= must be `uv run …`, got {exec_start!r}"
+    return words[2 : words.index("python")]
+
+
+def test_the_unit_starts_frozen_and_without_the_dev_tools():
+    """`uv run` without `--frozen` checks the lock against `pyproject.toml` and
+    re-resolves over the network when they differ, so an offline boot fails every
+    `RestartSec` while the wall holds a good cache; without `--no-dev` it installs
+    pytest and the linters on the Pi. The flags go before `python`, where uv reads
+    them, and the two groups are the ones the runbook syncs, without which a start
+    would leave the label with no typesetter or driver."""
+    options = _uv_run_options()
+    assert "--frozen" in options, options
+    assert "--no-dev" in options, options
+    groups = {options[i + 1] for i, word in enumerate(options) if word == "--group"}
+    assert groups == {"raster", "epaper"}, options
+
+
+def test_the_unit_bounds_its_memory_below_the_pis():
+    """Without a bound, a Player that exhausts the Pi takes sshd and the journal
+    with it. A share of RAM fits every Pi, and `MemoryHigh` below `MemoryMax`
+    reclaims and slows the Player before the kernel kills it."""
+    directives = _directives()
+    (high,) = directives.get("MemoryHigh", [None])
+    (most,) = directives.get("MemoryMax", [None])
+    assert str(most).endswith("%"), f"MemoryMax= must be a share of the Pi's RAM, got {most!r}"
+    assert str(high).endswith("%"), f"MemoryHigh= must be a share of the Pi's RAM, got {high!r}"
+    assert int(high[:-1]) < int(most[:-1]) < 100, (high, most)
+
+
+def test_the_unit_is_sandboxed_as_far_as_tvpi_owning_the_checkout_allows():
+    """The slideshow's mpv decodes strangers' posts in this unit. These are the
+    lines that hold while the checkout is tvpi's and `uv run` syncs it at start;
+    `ProtectSystem=strict` waits on making it root's. The address families are an
+    allowlist of what the Player and mpv open, so a family added to the list is a
+    decision rather than a default."""
+    directives = _directives()
+    assert directives.get("NoNewPrivileges") == ["yes"]
+    assert directives.get("PrivateTmp") == ["yes"]
+    assert directives.get("ProtectSystem") == ["full"], "strict would make the checkout uv syncs read-only"
+    assert directives.get("ProtectHome") == ["yes"]
+    (families,) = directives.get("RestrictAddressFamilies", [""])
+    assert not families.startswith("~"), "RestrictAddressFamilies= must be an allowlist"
+    assert set(families.split()) == {"AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"}, families
+
+
+def test_the_sandbox_leaves_the_devices_the_walls_draw_through():
+    """The display card, the render node, SPI, GPIO and the DDC bus are reached
+    through `SupplementaryGroups=`. Each of these would hide or forbid one of them,
+    and the wall would go dark at the next restart with the unit `active`."""
+    directives = _directives()
+    present = sorted(
+        {"PrivateDevices", "DevicePolicy", "DeviceAllow", "ProtectKernelModules", "ProtectKernelTunables"} & directives.keys()
+    )
+    assert not present, f"display.service must not restrict the devices: {present}"
+
+
+def test_the_directives_the_sandbox_must_not_move_are_as_they_were():
+    """Each of these was a failure on a real machine before it was a line here
+    (the tests above say which), and hardening the unit is not a reason to touch
+    any of them."""
+    directives = _directives()
+    kept = {name: directives.get(name) for name in ("KillSignal", "TimeoutStopSec", "UMask", "StartLimitIntervalSec")}
+    assert kept == {
+        "KillSignal": ["SIGTERM"],
+        "TimeoutStopSec": ["90"],
+        "UMask": ["0077"],
+        "StartLimitIntervalSec": ["0"],
+    }
+    assert directives.get("SupplementaryGroups") == ["spi gpio video render i2c"]
+
+
+#: The two documents the operator follows on the Pi.
+DOCUMENTS = (
+    UNIT.parent / "README.md",
+    UNIT.parents[1] / ".prawduct" / "runbooks" / "moving-the-pi-player-to-a-new-revision.md",
+)
+
+
+def _uv_commands(document: pathlib.Path) -> list[str]:
+    """Each `uv sync`, and each `uv run` as the service account, in a document, with continued lines joined."""
+    joined = document.read_text().replace("\\\n", " ")
+    lines = [" ".join(line.split()) for line in joined.splitlines()]
+    return [line for line in lines if "uv sync" in line or ("uv run" in line and "sudo -u tvpi" in line)]
+
+
+def test_every_sync_the_operator_runs_on_the_pi_is_frozen():
+    """A sync that is not frozen re-resolves the lock over the network when it
+    disagrees with `pyproject.toml`, and may rewrite `uv.lock` in the checkout,
+    which the runbook's next `git checkout` then refuses. The Player's syncs also
+    leave out the dev group, as the unit does."""
+    commands = [(document.name, line) for document in DOCUMENTS for line in _uv_commands(document)]
+    assert any(name.endswith("revision.md") for name, _ in commands), "the runbook's sync was not found"
+    unfrozen = [line for _, line in commands if "--frozen" not in line]
+    assert not unfrozen, unfrozen
+    with_dev = [line for _, line in commands if "--group raster" in line and "--no-dev" not in line]
+    assert not with_dev, with_dev

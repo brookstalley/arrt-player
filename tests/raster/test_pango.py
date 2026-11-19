@@ -2,7 +2,7 @@
 
 **Its own directory because it is the one part of this suite that needs something
 a default install does not provide.** Pango arrives through PyGObject in the
-`raster` dependency group; the rest of this plane installs and tests without it,
+`raster` dependency group; the rest of the Player installs and tests without it,
 so these are collected only where that group is present — the Pi, and the CI leg
 that installs it. `tests/test_default_suite_ci_scope.py` at the repo root is what
 keeps the workflow and this directory agreeing about that.

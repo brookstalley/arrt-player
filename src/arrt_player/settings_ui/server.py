@@ -1,7 +1,7 @@
 """The settings page: a first-run password, a login, and the settings themselves.
 
 **The one module in the Player that listens on a socket.** It takes only
-`aiohttp.web` from aiohttp, and never a client: the plane-isolation guard allows
+`aiohttp.web` from aiohttp, and never a client: the isolation guard allows
 this file `aiohttp.web` and nothing else, so the Player's one channel to the
 server stays the pull (`tests/test_plane_isolation.py`).
 
@@ -15,10 +15,25 @@ else on the LAN (`security-model.md`). So every page but the setup and login
 forms needs a session; a session is a cookie signed under a secret stored with
 the settings, HttpOnly and `SameSite=Strict`; every POST must carry an `Origin`
 naming this page, which with `SameSite=Strict` closes cross-site form posts; wrong
-passwords are throttled; and nothing secret is ever written into a page, a log
-line or a header. It is plain HTTP, as the Arrt server is: the password crosses
-the LAN in the clear, which is the trust boundary Arrt's `security-model.md`
-already accepts.
+passwords are throttled, per address; and nothing secret is ever written into a
+page, a log line or a header.
+
+**It answers only to its own names, which closes DNS rebinding.** A web page open
+in a browser on the LAN can point its own domain at this Player's address after
+loading, and from then on its requests reach this page as same-origin requests:
+its `Origin` and its `Host` both name the rebound domain, so comparing the one
+with the other passes it. What gives it away is the name. So a request whose
+`Host` is not one of this page's names is refused before any page is served
+(`_known_hosts`). Its names are an IP address, which a rebinding page's requests
+cannot carry, `localhost`, this machine's own name and `<name>.local`, the
+address it is bound to, and whatever `UI_ALLOWED_HOSTS` lists. **The ways a
+fresh Player is reached stay open by default**: the address it prints at start
+is an IP address, or this machine's own name when it has none to print. A name
+only a router's DNS gives it (`<name>.lan`, say) is refused until it is listed,
+and the refusal says so.
+
+It is plain HTTP, as the Arrt server is: the password crosses the LAN in the
+clear, which is the trust boundary Arrt's `security-model.md` already accepts.
 
 **It also sets the mode, and in slideshow mode the slideshow.** The Reddit cookie
 is held as the client token is: taken, never shown back, its expiry read from it
@@ -30,7 +45,9 @@ cookie, or waiting.
 import asyncio
 import hashlib
 import html
+import ipaddress
 import logging
+import re
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -56,6 +73,7 @@ from arrt_player.config import (
     DEFAULT_SLIDESHOW_MAX_SECONDS,
     DEFAULT_SLIDESHOW_MIN_SECONDS,
     DEFAULT_SLIDESHOW_OUTPUT,
+    FRAME_OUTPUT,
     SLIDESHOW_MODE,
     UiSettings,
     client_token_problem,
@@ -114,6 +132,190 @@ def stylesheet_href(directory: Path = STATIC_DIRECTORY) -> str:
     return f"/static/settings.css?v={digest}"
 
 
+#: The setting a refused name is told to add itself to.
+ALLOWED_HOSTS_SETTING: Final[str] = "UI_ALLOWED_HOSTS"
+
+#: `421 Misdirected Request` for a name this page does not answer to, as Arrt's
+#: server answers the same case: the request reached the wrong server as far as
+#: this one is concerned.
+HOST_REFUSED: Final[int] = 421
+
+
+def hostname(value: str) -> str:
+    """The name in a `Host` header, without its port, lowercased and without a trailing dot.
+
+    An IPv6 address arrives bracketed (`[::1]:8771`), and its colons are part of
+    the address, not a port separator.
+    """
+    return _split_authority(value)[0]
+
+
+#: The largest number a port can be.
+_LARGEST_PORT: Final[int] = 65535
+
+
+def _split_authority(value: str) -> tuple[str, int | None]:
+    """`host[:port]` as (name, port), the port None when absent.
+
+    **A port that is not one makes the name empty**, which no check passes: it
+    is ASCII digits naming 1 to 65535, or nothing after the colon. `str.isdigit`
+    alone also says yes to digits `int` will not read (`'²'`), which raised in the
+    middleware and answered a refusal with a 500.
+    """
+    value = value.strip()
+    if value.startswith("["):
+        end = value.find("]")
+        name, rest = (value[1:end], value[end + 1 :]) if end >= 0 else (value[1:], "")
+        if rest and not rest.startswith(":"):
+            return "", None
+        port_text = rest[1:]
+    elif value.count(":") == 1:
+        name, _, port_text = value.partition(":")
+    else:
+        name, port_text = value, ""
+    if not port_text:
+        return name.rstrip(".").lower(), None
+    if not (port_text.isascii() and port_text.isdigit()) or not 1 <= int(port_text) <= _LARGEST_PORT:
+        return "", None
+    return name.rstrip(".").lower(), int(port_text)
+
+
+def own_names(bind: str = "") -> frozenset[str]:
+    """The names this machine goes by without being told: `localhost`, its host name, and `<name>.local`.
+
+    The host name as `socket.gethostname` gives it, its first label (a Mac's is
+    often already `<name>.local`), and that label under `.local`, which is what
+    mDNS answers for on a Pi. And the address the page is bound to, when it is
+    bound to one: that is what the startup line prints.
+    """
+    full = hostname(socket.gethostname())
+    short = full.split(".", 1)[0]
+    names = {"localhost", full, short, f"{short}.local"} if short else {"localhost"}
+    if bind not in {"0.0.0.0", "::", ""}:  # noqa: S104 -- recognising the wildcard, not binding it
+        names.add(hostname(bind))
+    return frozenset(name for name in names if name)
+
+
+def name_allowed(name: str, allowed: frozenset[str]) -> bool:
+    """Whether `name`, already reduced by `hostname`, is one this page answers to. Any IP address is."""
+    if not name:
+        return False
+    if name in allowed:
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+#: A refused name is said once, and again at most once in this long while it
+#: keeps arriving, with the count of refusals since; a name quiet this long is
+#: forgotten, its uncounted refusals said as it goes.
+REFUSED_HOST_WINDOW_SECONDS: Final[float] = 600.0
+
+#: How many refused names are counted one by one. The names are the caller's
+#: to choose, so past this many they are counted together, as one line a window.
+REFUSED_HOST_NAMES_KEPT: Final[int] = 32
+
+
+@dataclass
+class _Refusals:
+    """One refused name's episode: the refusals not yet said, when it was last said, and when it last arrived."""
+
+    unsaid: int
+    said_at: float
+    seen_at: float
+
+
+class RefusedHosts:
+    """When a refused name is said in the journal, and with what count.
+
+    **Anybody who can reach the port chooses how often a name is refused**: a
+    rebinding page in a browser on the LAN, or anything sending a made-up `Host`.
+    Access logging is off, so a line per refusal would let them set the journal's
+    rate and rotate out the ERRORs that are the Player's only failure channel
+    (`observability-strategy.md`, episodes, not repetition). So each name is said
+    when it is first refused; while it keeps arriving, at most once a window,
+    with how many refusals the line accounts for; and once it has been quiet a
+    window it is forgotten, with a last line if refusals went unsaid. Past
+    `REFUSED_HOST_NAMES_KEPT` names, the rest share one count, said the same
+    way under no name, so neither the journal nor this table grows with the
+    names a caller invents.
+
+    **Every line is written on a refusal, never on a timer**: "said as it is
+    forgotten" means at the next refusal of any name after the quiet window.
+    So if refusals stop altogether, the last count of each episode is never
+    written. That is chosen, not missed: the first refusal of every name is
+    always said, so what is lost is how many more came, and a timer would be a
+    task of its own in the page for a number nothing acts on.
+    """
+
+    def __init__(self, *, monotonic: Callable[[], float]) -> None:
+        self._monotonic = monotonic
+        self._names: dict[str, _Refusals] = {}
+        self._others: _Refusals | None = None
+
+    def refused(self, name: str) -> list[tuple[str | None, int]]:
+        """Count a refusal of `name`: the lines owed now, each (name, or None for the rest; refusals it accounts for)."""
+        now = self._monotonic()
+        lines = self._forget(now)
+        if name in self._names or len(self._names) < REFUSED_HOST_NAMES_KEPT:
+            refusals = self._names.get(name)
+            if refusals is None:
+                self._names[name] = _Refusals(unsaid=0, said_at=now, seen_at=now)
+                return [*lines, (name, 1)]
+            key: str | None = name
+        else:
+            refusals = self._others
+            if refusals is None:
+                self._others = _Refusals(unsaid=0, said_at=now, seen_at=now)
+                return [*lines, (None, 1)]
+            key = None
+        refusals.unsaid += 1
+        refusals.seen_at = now
+        if now - refusals.said_at >= REFUSED_HOST_WINDOW_SECONDS:
+            lines.append((key, refusals.unsaid))
+            refusals.unsaid, refusals.said_at = 0, now
+        return lines
+
+    def _forget(self, now: float) -> list[tuple[str | None, int]]:
+        """End the episodes of names quiet for a window, with a line for each that has refusals unsaid."""
+        quiet = [key for key, refusals in self._names.items() if now - refusals.seen_at >= REFUSED_HOST_WINDOW_SECONDS]
+        ended = [(name, self._names.pop(name).unsaid) for name in quiet]
+        lines: list[tuple[str | None, int]] = [(name, unsaid) for name, unsaid in ended if unsaid]
+        if self._others is not None and now - self._others.seen_at >= REFUSED_HOST_WINDOW_SECONDS:
+            if self._others.unsaid:
+                lines.append((None, self._others.unsaid))
+            self._others = None
+        return lines
+
+
+#: The port an `Origin` means when it names none.
+_DEFAULT_PORTS: Final[dict[str, int]] = {"http": 80, "https": 443}
+
+
+def origin_allowed(origin: str, *, scheme: str, host: str, listed: frozenset[str]) -> bool:
+    """Whether a POST's `Origin` is this page: a listed name on any scheme or port, or the request's own address.
+
+    A listed name passes whatever its scheme and port, because a reverse proxy
+    in front of the page changes both. Anything else must be the request's own
+    origin: its scheme, and the same name and port as its `Host`, a missing port
+    being the scheme's default. `null` and any other shape never pass.
+    """
+    offered, separator, authority = origin.strip().partition("://")
+    if not separator or not authority or "/" in authority or "@" in authority:
+        return False
+    name, port = _split_authority(authority)
+    default = _DEFAULT_PORTS.get(offered.lower())
+    if not name or default is None:
+        return False
+    if name in listed:
+        return True
+    host_name, host_port = _split_authority(host)
+    return offered.lower() == scheme and name == host_name and (port or default) == (host_port or default)
+
+
 #: An address no packet is sent to (TEST-NET-1, RFC 5737). Connecting a UDP
 #: socket to it only asks the kernel which local address would route there.
 _ROUTE_PROBE: Final[tuple[str, int]] = ("192.0.2.1", 9)
@@ -140,18 +342,26 @@ class PageState:
     slideshow: SlideshowStatus | None = None
     #: The HDMI connectors a slideshow may be put on, read when the page is drawn.
     outputs: Callable[[], list[OutputReport]] = field(default=hdmi_outputs)
+    #: The names this machine goes by, read once at start (`own_names`).
+    #: Injectable so a test can give the machine a name.
+    machine_names: Callable[[str], frozenset[str]] = field(default=own_names)
+    #: When each refused name is said in the journal (`RefusedHosts`).
+    refused_hosts: RefusedHosts = field(default_factory=lambda: RefusedHosts(monotonic=time.monotonic))
 
     def stored(self) -> store.Stored:
         return store.read(self.ui.cache_dir)
 
 
 STATE: Final = AppKey("state", PageState)
+#: Every name the page answers to, fixed when it is built.
+NAMES: Final = AppKey("names", frozenset)
 
 
 def build(state: PageState) -> Application:
     """The page's application, ready for a runner or a test client."""
-    app = Application(middlewares=[_headers, _same_origin_posts])
+    app = Application(middlewares=[_headers, _known_hosts, _same_origin_posts])
     app[STATE] = state
+    app[NAMES] = state.machine_names(state.ui.bind) | state.ui.allowed_hosts
     app.router.add_get("/", _home)
     app.router.add_get("/setup", _setup_form)
     app.router.add_post("/setup", _setup)
@@ -216,7 +426,9 @@ async def _headers(request: Request, handler: Handler) -> StreamResponse:
         raised.headers.update(SECURITY_HEADERS)
         raise
     response.headers.update(SECURITY_HEADERS)
-    if request.path.startswith("/static/"):
+    # Only a file actually served may be kept: a refusal kept a day would go on
+    # refusing after the reason for it was fixed.
+    if request.path.startswith("/static/") and response.status == 200:  # noqa: PLR2004 -- HTTP's OK
         response.headers["Cache-Control"] = STATIC_CACHE_CONTROL
         kind = STATIC_TYPES.get(Path(request.path).suffix)
         if kind is not None:
@@ -225,11 +437,49 @@ async def _headers(request: Request, handler: Handler) -> StreamResponse:
 
 
 @middleware
+async def _known_hosts(request: Request, handler: Handler) -> StreamResponse:
+    """Refuse, before any page, a request by a name this page does not answer to.
+
+    `request.host` is the `Host` header as sent, port and all, or, when there is
+    none, the local address the request arrived on, which is an IP address.
+    """
+    name = hostname(request.host)
+    if not name_allowed(name, request.app[NAMES]):
+        _say_refused(_state(request).refused_hosts.refused(name))
+        return _page(
+            "Not this page's name",
+            f"<p>This Player's settings page does not answer to the name {html.escape(repr(name))}. Open it by "
+            "its address, as the Player printed when it started, or by this machine's own name. If that name "
+            f"is how you reach it, add it to {ALLOWED_HOSTS_SETTING} in .env and restart.</p>",
+            status=HOST_REFUSED,
+        )
+    return await handler(request)
+
+
+def _say_refused(lines: list[tuple[str | None, int]]) -> None:
+    for name, refused in lines:
+        named = repr(name) if name is not None else f"other than the {REFUSED_HOST_NAMES_KEPT} it counts by name"
+        log.warning(
+            "the settings page refused %d request(s) for the name %s; it is not one of this page's names",
+            refused,
+            named,
+            extra={"event": "settings_page.host_refused", "host": name, "refused": refused, "setting": ALLOWED_HOSTS_SETTING},
+        )
+
+
+@middleware
 async def _same_origin_posts(request: Request, handler: Handler) -> StreamResponse:
     """Refuse a POST whose `Origin` is not this page. A browser sends one on every form POST."""
-    if request.method == "POST" and request.headers.get("Origin") != f"{request.scheme}://{request.host}":
+    if request.method == "POST" and not origin_allowed(
+        request.headers.get("Origin", ""), scheme=request.scheme, host=request.host, listed=_state(request).ui.allowed_hosts
+    ):
         return _page("Refused", "<p>This form must be submitted from the settings page itself.</p>", status=403)
     return await handler(request)
+
+
+def _source(request: Request) -> str:
+    """The address a request came from, for the throttle. Empty when the transport has none to give."""
+    return request.remote or ""
 
 
 # -- pages -----------------------------------------------------------------------
@@ -240,7 +490,16 @@ def _state(request: Request) -> PageState:
 
 
 def _signed_in(request: Request, stored: store.Stored) -> bool:
-    return auth.session_valid(request.cookies.get(auth.COOKIE_NAME), stored.session_secret, now=_state(request).now())
+    """Whether the request carries a valid session; one that does gives its address standing (`auth.Throttle.vouch`).
+
+    The standing a sign-in gave is in memory, and a save restarts the Player, so
+    a signed-in visit is what restores it for the owner's browser.
+    """
+    state = _state(request)
+    if not auth.session_valid(request.cookies.get(auth.COOKIE_NAME), stored.session_secret, now=state.now()):
+        return False
+    state.throttle.vouch(_source(request))
+    return True
 
 
 async def _home(request: Request) -> Response:
@@ -424,14 +683,15 @@ async def _change_password(request: Request) -> Response:
     form = await request.post()
     current, password, again = (str(form.get(name, "")) for name in ("current", "password", "again"))
     # The current password is a guess like any login's, so it is throttled like one.
-    wait = state.throttle.wait_seconds()
+    source = _source(request)
+    wait = state.throttle.wait_seconds(source)
     if wait > 0:
         return _settings_page(state, stored, problem=f"Too many wrong passwords. Try again in {int(wait) + 1} s.", status=429)
-    state.throttle.failed()
+    state.throttle.failed(source)
     if not await asyncio.to_thread(auth.password_matches, current, stored.password):
-        log.warning("a wrong current password was offered", extra={"event": "settings_page.password_refused"})
+        log.warning("a wrong current password was offered", extra={"event": "settings_page.password_refused", "remote": source})
         return _settings_page(state, stored, problem="The current password is not right.", status=403)
-    state.throttle.succeeded()
+    state.throttle.succeeded(source)
     problem = _password_problem(password, again)
     if problem:
         return _settings_page(state, stored, problem=problem, status=400)
@@ -439,6 +699,9 @@ async def _change_password(request: Request) -> Response:
     encoded = await asyncio.to_thread(auth.hash_password, password)
     if not _wrote(state, state.stored().with_auth(password=encoded, session_secret=secret)):
         return _settings_page(state, stored, problem=_WRITE_FAILED, status=500)
+    # Every other session has ended, and so does every address's standing.
+    state.throttle.forget_standing()
+    state.throttle.vouch(source)
     log.info("the settings page's password is changed", extra={"event": "settings_page.password_changed"})
     return _signed_in_redirect(secret, state)
 
@@ -476,6 +739,8 @@ async def _setup(request: Request) -> Response:
         # told the link is not this start's until somebody restarted the Player.
         state.setup_code = code
         return _setup_page(code, problem=_WRITE_FAILED, status=500)
+    state.throttle.forget_standing()
+    state.throttle.vouch(_source(request))
     log.info("the settings page's password is set", extra={"event": "settings_page.password_set"})
     return _signed_in_redirect(secret, state)
 
@@ -495,18 +760,22 @@ async def _login(request: Request) -> Response:
     # Checked and charged with no await between, so concurrent attempts cannot
     # all pass the check before any is counted: each is a failure until proven
     # otherwise, and a right password clears the charge below.
-    wait = state.throttle.wait_seconds()
+    source = _source(request)
+    wait = state.throttle.wait_seconds(source)
     if wait > 0:
         return _login_page(problem=f"Too many wrong passwords. Try again in {int(wait) + 1} s.", status=429)
-    state.throttle.failed()
+    state.throttle.failed(source)
     # scrypt is tenths of a second and 16 MiB on a Pi, so it runs on a thread
     # rather than on the loop that drives the walls.
     offered = str(form.get("password", ""))
     matched = await asyncio.to_thread(auth.password_matches, offered, stored.password)
     if stored.session_secret is None or not matched:
-        log.warning("a wrong password was offered to the settings page", extra={"event": "settings_page.login_refused"})
+        log.warning(
+            "a wrong password was offered to the settings page",
+            extra={"event": "settings_page.login_refused", "remote": source},
+        )
         return _login_page(problem="That is not the password.", status=403)
-    state.throttle.succeeded()
+    state.throttle.succeeded(source)
     return _signed_in_redirect(stored.session_secret, state)
 
 
@@ -573,12 +842,13 @@ def _settings_page(
         + _mode_section(state, stored)
         + '<section class="panel"><h2>Server</h2>'
         + _field(
-            "Address",
+            "Server address",
             "server_url",
             _shown(state, stored, "SERVER_URL"),
             locked="SERVER_URL" in locked,
             pinned="SERVER_URL" in state.ui.pinned,
-            hint="For example http://arrt.local:8770. Changing it clears the token unless you enter one with it.",
+            hint="For example http://arrt.local:8770. Changing it clears the token unless you enter one with it. "
+            "In .env, SERVER_URL.",
         )
         + _token_field(locked="CLIENT_TOKEN" in locked, pinned="CLIENT_TOKEN" in state.ui.pinned, token_set=token_set)
         + "</section>"
@@ -810,14 +1080,32 @@ def _output_field(state: PageState, stored: store.Stored) -> str:
 _ONE_SCREEN: Final[str] = "One screen: both of a Pi's HDMI ports are on one display device, which one program drives."
 
 
+#: A connector's name as the kernel's DRM names it, with the port's number.
+_CONNECTOR: Final = re.compile(r"hdmi-[a-z]-(\d+)")
+
+
+def screen_name(output: str) -> str:
+    """An output as a person names it, by the server's rule: *HDMI 1* for `hdmi-a-1`, *Samsung Frame* for the Frame.
+
+    Arrt's browser interface names screens the same way (its `core/outputs.js`,
+    `screenName`), so the two pages never call one screen by two names. The
+    connector's own name stays in the form's value, which is what is saved.
+    """
+    if output == FRAME_OUTPUT:
+        return "Samsung Frame"
+    connector = _CONNECTOR.fullmatch(output)
+    return f"HDMI {connector.group(1)}" if connector else output
+
+
 def _output_words(name: str, report: OutputReport | None) -> str:
+    shown = screen_name(name)
     if report is None:
-        return f"{name} (not found on this machine)"
+        return f"{shown} (not found on this machine)"
     if not report.connected:
-        return f"{name} (no screen connected)"
+        return f"{shown} (no screen connected)"
     if report.screen is not None:
-        return f"{name} (a screen at {report.screen[0]}×{report.screen[1]})"
-    return f"{name} (a screen)"
+        return f"{shown} (a screen at {report.screen[0]}×{report.screen[1]})"
+    return f"{shown} (a screen)"
 
 
 _PINNED_HINT: Final[str] = "Set in the environment or .env, which wins over this page. Remove it there to manage it here."
@@ -852,11 +1140,16 @@ def _token_field(*, locked: bool, pinned: bool, token_set: bool) -> str:
     note = _PINNED_HINT if pinned else _PAIR_HINT if locked else "Leave empty to keep the current one."
     disabled = " disabled" if locked else ""
     return (
-        '<div class="field"><label for="client_token">Client token</label>'
+        '<div class="field"><label for="client_token">Token</label>'
         '<input class="secret" id="client_token" type="password" name="client_token" value="" autocomplete="off"'
         f'{disabled} aria-describedby="client_token-hint">'
-        f'<p class="hint" id="client_token-hint">{html.escape(said)} {html.escape(note)}</p></div>'
+        f'<p class="hint" id="client_token-hint">{html.escape(said)} {html.escape(note)} '
+        f"{html.escape(_ISSUED_BY_THE_SERVER)}</p></div>"
     )
+
+
+#: Where the token comes from, in the server's words, and its name in `.env`.
+_ISSUED_BY_THE_SERVER: Final[str] = "The server shows it once, when this Player is added there. In .env, CLIENT_TOKEN."
 
 
 def _password_input(name: str, label: str, autocomplete: str, *, hint: str | None = None) -> str:

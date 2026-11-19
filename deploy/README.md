@@ -20,6 +20,13 @@ records that.
 > deploy), it is there for the order the two had to go in. Arrt's deployment
 > record carries the same section for the server's half.
 
+> **Every `uv` command below that runs on the Pi is written `--frozen`, and the
+> Player's are written `--no-dev` as well (2026-11-19), though the dated runs
+> were made without either.** A sync that is not frozen checks the lock against
+> `pyproject.toml` and re-resolves over the network when they differ, and may
+> rewrite `uv.lock` in the checkout; one that keeps the dev group installs pytest
+> and the linters on the Pi. Repeat the commands as they are written now.
+
 > **Since 2026-10-02 the Pi is a client of the Arrt
 > server on the NAS** (§ The Player as a client of the NAS, below). Its
 > `curation.service` is stopped and disabled. The sections after that one
@@ -64,7 +71,7 @@ Then deploy (`bin/arrt-app.sh` in the homelab repo) and confirm `/healthz`.
 
     cd /opt/samsung-frame-art-loader
     sudo -u tvpi git fetch origin <branch or tag> && sudo -u tvpi git checkout -B <branch> FETCH_HEAD
-    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
+    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
     sudo cp -p ../.env ../.env.pre-clients-<date>      # the way back starts here
     # in .env: set SERVER_URL, CLIENT_TOKEN and CACHE_DIR; remove WALL_ID,
     # WALL_TOKEN and MANIFEST_SOURCE, which the client Player refuses by name
@@ -109,7 +116,7 @@ the television.
    (`pre-clients-<timestamp>.sqlite` in the backups directory). It cannot use
    the migrated catalogue.
 2. On the Pi: `sudo systemctl stop display.service`, check out the release the
-   Pi ran before (`7e211f1`), `uv sync` as above, restore
+   Pi ran before (`7e211f1`), sync as above, restore
    `.env.pre-clients-<date>`, install that revision's `deploy/display.service`,
    and start it again.
 
@@ -157,7 +164,7 @@ one is removed and the new directory gets a fresh one. That also clears the
     find postarr -type f -not -path '*/.venv/*' -not -path '*/__pycache__/*' \
         -not -path '*/.pytest_cache/*' -not -path '*/.ruff_cache/*' -not -path '*/.hypothesis/*'
     sudo rm -rf postarr
-    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
+    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
     cd /opt/samsung-frame-art-loader
     sudo cp deploy/display.service /etc/systemd/system/
     sudo systemctl daemon-reload
@@ -165,7 +172,7 @@ one is removed and the new directory gets a fresh one. That also clears the
 
 Logger names now start `arrt_player.`, so a saved journal filter on `postarr.`
 stops matching. **To go back**, stop the unit, check out the commit you wrote
-down, remove `arrt-player/`, run `uv sync --group raster --group epaper` in `postarr/`, copy that commit's
+down, remove `arrt-player/`, run `uv sync --frozen --no-dev --group raster --group epaper` in `postarr/`, copy that commit's
 `display.service` in, reload and start.
 
 ## The panel's GPIO package (2026-10-08, #181)
@@ -175,7 +182,7 @@ rpi-gpio`.** `jetson-gpio` and `rpi-gpio` both installed `RPi/GPIO/__init__.py`;
 the sync removes `jetson-gpio`, and with it that file, so `rpi-gpio` has to be
 installed again to put the real one back:
 
-    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper --reinstall-package rpi-gpio
+    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper --reinstall-package rpi-gpio
 
 ## Wave 4g: the walls move to manifest major 2 alone (2026-10-10)
 
@@ -216,7 +223,7 @@ wall goes on showing the work it has. Then check, in this order:
 **Settings.** The server no longer reads `TV_PANEL_*`, `MAT_WIDTH_INCHES` or
 `MAT_BOTTOM_WEIGHT`; they are the Player's, under the same names, and stay in the
 Pi's `.env`. The Player no longer reads `ROTATION_INTERVAL_SECONDS` or
-`ROTATION_SHUFFLE`; they are the server's. Neither plane refuses the other's
+`ROTATION_SHUFFLE`; they are the server's. Neither the Player nor the server refuses the other's
 keys, so a shared `.env` needs no edit.
 
 **The way back** is the catalogue copy and the previous image together on the
@@ -266,7 +273,7 @@ its name. Nothing changes on the server, and the walls run as before.
 naming the key) a `SERVER_URL` that is not an http(s) address with a host, or
 that carries a user name, password, query or fragment; a `CLIENT_TOKEN` with
 whitespace in it; and a `PLAYER_NAME` over 64 characters. Check it before
-switching revisions: on the new revision, `uv run python -c 'from
+switching revisions: on the new revision, `uv run --frozen --no-dev python -c 'from
 arrt_player.config import load; load()'` as `tvpi` prints nothing when the
 values are accepted, and names the key when one is not. The reference Pi's
 `.env` passed this on 2026-11-10, when it moved to this release.
@@ -417,10 +424,81 @@ delete the keys `PLAYER_MODE`, `SLIDESHOW_URL`, `REDDIT_SESSION`,
 `SLIDESHOW_MIN_SECONDS`, `SLIDESHOW_MAX_SECONDS` and `SLIDESHOW_OUTPUT` from
 `values`, and set `version` to `1`. The `.slideshow*` and `.mpv` entries can stay.
 
+## The unit is frozen, bounded and partly sandboxed (2026-11-19, audit wave 1)
+
+`deploy/display.service` changes in four ways. The runbook's step 9 shows the
+unit differing, and steps 10–11 install it.
+
+- **It starts frozen and without the dev group:** `uv run --frozen --no-dev
+  --group raster --group epaper`. A start no longer re-resolves the lock, so an
+  offline boot with a synced venv comes up from its cache. The runbook's step 8
+  is the matching sync; the first one after this release removes the dev tools,
+  so expect `Uninstalled` lines naming pytest, ruff and black.
+- **Its memory is bounded:** `MemoryHigh=60%` and `MemoryMax=75%` of the Pi's
+  RAM. Past the second, the kernel kills inside this unit only, and the Player
+  restarts as it does from any crash.
+- **It is sandboxed as far as tvpi owning the checkout allows:**
+  `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=full` (`/usr`, `/boot`,
+  `/efi` and `/etc` read-only), `ProtectHome=yes` (`/home`, `/root` and
+  `/run/user` unreachable) and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+  AF_NETLINK`. The devices are untouched. The unit's comments say what each line
+  was checked against.
+- **mpv's environment holds none of `.env`.** The slideshow's mpv is started
+  with `PATH`, `HOME`, `XDG_CACHE_HOME`, `LANG` and `LC_ALL` from the Player's
+  environment and nothing else (`mpv.MPV_ENVIRONMENT`), so the client token and
+  the Reddit cookie are not handed to the program that decodes strangers' posts.
+  mpv still runs as `tvpi`, and `tvpi` can read `.env` and `.settings.json`;
+  closing that waits on running mpv under an account of its own.
+
+**What the Pi needs:** `.env` must name no path under `/home`, `/root` or
+`/run/user`, which the Player can no longer reach (the runbook's step 9a). After
+the start, the runbook's step 14a checks that the sandbox let the Player draw and
+that the kernel enforces the memory bound. Neither can be checked off the Pi.
+
+**The way back** is the previous revision, whose unit the runbook's *Going back*
+puts back. That unit's `uv run` installs the dev group again at its first start,
+from uv's cache or from PyPI.
+
+## Two things that can stop an upgrade, and a name to list (2026-11-19, audit wave 1)
+
+**Any `*_SECONDS` in `.env` that is 0, negative, `nan` or `inf` now refuses the
+start** (exit 2, `daemon.misconfigured` naming the variable), and so does a
+`LATITUDE` or `LONGITUDE` outside its range. `.env.example` never gave zero a
+meaning (an interval left unset takes its default), but an earlier Player took
+`MANIFEST_POLL_SECONDS=0` or `BRIGHTNESS_INTERVAL_SECONDS=0` and ran, and a zero
+is a loop that never waits. Under `Restart=always` an `.env` that still holds one
+restarts every 5 s with every wall dark until it is fixed, so look before
+installing the release:
+
+    sudo grep -nEi '^[A-Z_]+_SECONDS=["'"'"']?(0+(\.0*)?|-.*|nan|inf.*)["'"'"']?[[:space:]]*$' /opt/arrt-player/.env
+
+**Expected:** nothing printed. A line it prints is a value to change to the
+number of seconds meant, or to delete so the default applies. The check under
+*The settings page* (`load()` as `tvpi`) names any other key the new revision
+refuses.
+
+**The settings page answers only to its own names.** A request whose `Host` is
+not an IP address, `localhost`, this machine's own name, `<name>.local` or the
+address the page is bound to is refused with a 421 before any page, and the
+journal says `settings_page.host_refused` with the name. The address the Player
+prints at start, and the machine's name, need nothing. **A name only the
+router's DNS gives the Player (`<name>.lan`, say), or a reverse proxy's, must be
+listed in `.env`, comma-separated, then the Player restarted:**
+
+    UI_ALLOWED_HOSTS=wall.lan
+
+Names only, with no `http://` and no port.
+
+**Wrong passwords at the page are now throttled per source address**, with a
+ceiling of 30 wrong in 10 minutes for all addresses together; the owner's own
+sign-in is not slowed by somebody else's guesses.
+
+**The way back** is the previous revision, which ignores `UI_ALLOWED_HOSTS`.
+
 ## The two new units, and where everything they name now lives
 
-`display.service` and `curation.service` are the planes this product is being
-rebuilt onto. Three paths they depend on were unsettled until the cutover and are
+`display.service` and `curation.service` were the two units this product was
+rebuilt onto; the Pi now runs the first alone. Three paths they depend on were unsettled until the cutover and are
 settled now; Arrt's `operational-spec.md` § Where the two trees live records why each one
 won, and this is the short form:
 
@@ -485,8 +563,8 @@ There is no current procedure for installing a new Pi from this repository.
     sudo chown -R tvpi:tvpi /srv/art
 
     # dependencies, as the account that will run them
-    cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
-    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv sync
+    cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
+    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv sync --frozen
 
     # the environment file: 0640, owned by tvpi, because it carries API keys
     sudo install -m 0640 -o tvpi -g tvpi <your .env> /opt/samsung-frame-art-loader/.env
@@ -520,11 +598,11 @@ correctly do nothing, which looks like a fault and is not one. Seeding is a
 separate hand-run step and it neither spends nor renders — it carries the mat
 colour from the 2024 index and adopts the renders already in the tree:
 
-    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run python -m arrt.seed <path to all.json>
+    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run --frozen python -m arrt.seed <path to all.json>
 
 Then create a theme and activate it, over the JSON API or the browser interface —
 **activation is what publishes the manifest**, and until one is published the
-display plane has nothing to rotate and says so.
+Player has nothing to rotate and says so.
 
 **Re-run the same command on a machine that is already seeded, whenever the
 catalogue gains a field.** It creates no works the second time; what it does is
@@ -532,7 +610,7 @@ carry across what an earlier run could not, and it is the only step that does.
 The catalogue *file* upgrades itself — the store adds nullable columns on open —
 but a column is not the same as a value, and the two arrive by different roads:
 
-    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run python -m arrt.seed <path to all.json>
+    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run --frozen python -m arrt.seed <path to all.json>
     # Re-activate the live theme — this, and nothing else, republishes the manifest:
     curl -s localhost:"$CURATION_PORT"/api/walls                       # read WALL_ID and the active theme
     curl -sX POST localhost:"$CURATION_PORT"/api/themes/"$THEME_ID"/activate \
@@ -546,7 +624,7 @@ units after a seed re-run saw the old label text and had no reason to suspect th
 instructions. The § Moving a running deployment section below states the same rule
 from the other direction; the two now agree.
 
-**Then restart the display plane, and this step is not optional if the wall is
+**Then restart the Player, and this step is not optional if the wall is
 sitting on one work.** The republished manifest is adopted on the next poll, but
 the *label already drawn* is not redrawn with it: the panel captions what the set
 announces, and it skips the draw while the announced work is the one it last
@@ -589,7 +667,7 @@ say.** Checking out a newer revision on a machine that is already serving a wall
 is not the same act as the first cutover above, and it took the wall down for the
 better part of an hour.
 
-**Settings arrive with revisions, and an unset one refuses to start the plane.**
+**Settings arrive with revisions, and an unset one refuses to start the Player.**
 `.env` is not in the repository, so nothing carries a new key onto the machine and
 nothing warns that one is owed. Diff before restarting:
 
@@ -599,13 +677,13 @@ nothing warns that one is owed. Diff before restarting:
 **A wall has to exist before `WALL_ID` can name one.** The revision that made
 manifests per-wall also made `WALL_ID` required, and the id is a UUID minted when
 the wall is created — so there is an ordering: set `WALL_NAME` and start the
-curation plane, which establishes the wall and carries whatever theme was active
+the server, which establishes the wall and carries whatever theme was active
 onto it; read the id back from `curl -s localhost:"$CURATION_PORT"/api/walls`; put
-it in `.env`; then start the display plane. Starting the display plane first gets
+it in `.env`; then start the Player. Starting the Player first gets
 a refusal naming the variable, which is correct and is not a fault to debug.
 
 **Activate the theme again after any upgrade that changes what the label
-carries.** The manifest is written at activation, not at startup, so a plane that
+carries.** The manifest is written at activation, not at startup, so a Player that
 restarts against an existing manifest serves the old label text — including after
 a seed re-run that has just filled in new fields. **The block above this one is a
 read** — it recovers `WALL_ID` from `/api/walls`. The activation is this `POST`:
@@ -623,7 +701,7 @@ source file:
 
     sudo systemctl stop display.service
     cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi env HOME=/var/lib/tvpi \
-        /usr/local/bin/uv run --group raster --group epaper \
+        /usr/local/bin/uv run --frozen --no-dev --group raster --group epaper \
         python tools/label_preview.py --panel --record hokusai
     sudo systemctl start display.service
 
@@ -667,7 +745,7 @@ above:
 
     sudo systemctl stop display.service
     cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi env HOME=/var/lib/tvpi \
-        /usr/local/bin/uv run python tools/power_probe.py
+        /usr/local/bin/uv run --frozen --no-dev python tools/power_probe.py
     # then, with somebody watching the set:
     ... python tools/power_probe.py --click --i-am-at-the-set
     ... python tools/power_probe.py --hold 3 --i-am-at-the-set
@@ -698,16 +776,16 @@ the sitting costs one more prompt next time and nothing else.
 
 Read as evidence that the arrangement works, not as a promise about your machine:
 
-- The curation plane marked the art root on its own — it holds a catalogue but had
+- The server marked the art root on its own — it holds a catalogue but had
   no marker, and a directory holding a catalogue is an art root by the only
   evidence that matters.
-- The display plane adopted the 40-entry manifest, **disabled the television's own
+- The Player adopted the 40-entry manifest, **disabled the television's own
   slideshow**, and **removed 40 images the binding table could not account for**.
   That last one is startup reconciliation working as designed: this device had no
   prior state, so nothing on the set was accounted for, and it re-uploaded all 40.
   **Expect a fresh device to re-upload the whole theme**, which took about three
   and a half minutes for 40 works.
-- The set was in standby, and the plane logged *"the television is not in art
+- The set was in standby, and the Player logged *"the television is not in art
   mode; leaving the wall alone until it is"* rather than acting. The heartbeat said
   `television_reachable: true`, `television_showing_art: false`,
   `label_surface_working: null` — which is the honest reading of a device that has
@@ -716,7 +794,7 @@ Read as evidence that the arrangement works, not as a promise about your machine
 ### How to tell your own install worked
 
 > *2026-09-30: every check below reads files under `/srv/art`, meaning the
-> manifest, the heartbeat and the catalogue, because both planes share that
+> manifest, the heartbeat and the catalogue, because the Player and the server share that
 > directory today. From wave 3 the Pi holds none of them. The equivalent checks
 > become an HTTP `GET` of the wall's manifest from the server, the server's
 > health view for the heartbeat, and a listing of the Player's cache. Rewrite
@@ -747,14 +825,14 @@ differently from the others, which is the point of having four rather than one.
     sudo -u tvpi test -r /opt/samsung-frame-art-loader/.env && echo ".env readable"
     sudo -u tvpi test -w /srv/art && echo "/srv/art writable"
 
-    # 4. The display plane's own account of itself. This is the honest one: it
+    # 4. The Player's own account of itself. This is the honest one: it
     #    distinguishes a device with no panel from one whose panel will not open,
     #    and a set that is unreachable from one that is simply not showing art.
     sudo cat /srv/art/display-heartbeat-"$WALL_ID".json
 
 **Read the heartbeat rather than the wall.** `television_reachable: false` is a
 network or pairing problem; `television_showing_art: false` with the set awake
-means somebody is watching television and the plane is correctly leaving it alone;
+means somebody is watching television and the Player is correctly leaving it alone;
 the wall heartbeat says nothing about the label panel any more
 (`has_label_surface: false`, `label_surface_working: null` on every wall): the panel
 is a label output of the client, reported in the client heartbeat on the server's
@@ -772,14 +850,14 @@ only that the file parses:
     sudo journalctl -b -u systemd-journald | grep -i 'Journal.*max'
     # expect: "Runtime Journal (...) is 8M, max 256M, 248M free."
 
-**The display plane's panel needs two optional dependency groups, and a default
-`uv sync` installs neither.** They are separate because they install on different
+**The Player's panel needs two optional dependency groups, and a sync
+that does not name them installs neither.** They are separate because they install on different
 machines: `raster` is the label's text stack (PyGObject and pycairo, which build
 or wheel on any modern Linux), and `epaper` is the panel driver (`omni_epd`, which
 compiles Cython against the Broadcom SPI and GPIO libraries and installs on a
 Raspberry Pi and nowhere else). On the Pi:
 
-    cd arrt-player && uv sync --group raster --group epaper
+    cd arrt-player && uv sync --frozen --no-dev --group raster --group epaper
 
 **A device with a television and no panel installs neither, and that is a
 supported deployment** — leave `EPD_DEVICE` empty in `.env` and the wall rotates
@@ -816,7 +894,7 @@ missing `.env` stops the unit with the path it wanted (Arrt's `operational-spec.
 
 ## The dependency moves the television has confirmed
 
-Two pin moves are described here, made while the 2024 plane still ran the wall
+Two pin moves are described here, made while the 2024 installation still ran the wall
 from `requirements.txt` (retired with it, 2026-10-26). This one is the more
 recent; both have now been exercised against the real television.
 
@@ -834,7 +912,7 @@ the parse was verified against 6.1.1 without it.
 transport — so what was owed was a measurement on the set rather than an argument
 from a resolver. `tv_api_check.py` passed 9 checks and 0 failures against the real
 television on 2026-08-06 on `aiohttp` 3.14.3, `websockets` 16.1.1, `requests`
-2.34.2 and the pinned fork. **The display plane then drove that transport hard on
+2.34.2 and the pinned fork. **The Player then drove that transport hard on
 2026-08-07** — 39 uploads, 41 deletions, brightness writes and confirmed
 selections, unattended, across several hours. `pi-freeze-2024.txt` records the
 pre-move version of all five and remains the rollback.
@@ -850,7 +928,7 @@ pre-move version of all five and remains the rollback.
 > been seen with the set **in art mode and healthy**, after heavy connection churn
 > and a SIGKILLed client that never closed its socket, so it reads as a
 > concurrent-client limit rather than a power state. If you meet it, wait a couple
-> of minutes rather than reconnecting harder, and stop this plane with SIGTERM so
+> of minutes rather than reconnecting harder, and stop the Player with SIGTERM so
 > it closes its own socket.
 >
 > `PowerState` is worth reading as the cheapest thing that separates a dark panel
@@ -860,13 +938,13 @@ pre-move version of all five and remains the rollback.
 >
 > **It cannot tell art mode from somebody watching television** — it reads `on`
 > for both. Only `get_artmode` does that, over the art websocket rather than this
-> REST endpoint, which is why there is no one-liner for it here; the display
-> plane asks it before every selection.
+> REST endpoint, which is why there is no one-liner for it here; the Player
+> asks it before every selection.
 >
 > The bumped set was exercised as far as the wire in the process: a clean 3.12
 > interpreter carrying exactly these pins built the client, reached the set over
 > the LAN, and failed only at pairing. **Everything past the handshake is proven
-> now** — the display plane drove these pins through 39 uploads, 41 deletions and
+> now** — the Player drove these pins through 39 uploads, 41 deletions and
 > confirmed selections against the real television on 2026-08-07.
 
 `samsungtvws` and `websockets` moved together on 2026-08-01 — a two-year-old fork
@@ -950,6 +1028,6 @@ check**: confirm the installed `it8951` is `9f13613` before looking anywhere els
 A `pip freeze` of the environment the 2024 loader was running on the Pi, captured
 during the 2026-07-19 archaeology. **Nothing installs from it.** It is kept as
 evidence of which versions the recovered code actually ran against — the frozen
-`samsungtvws` in it is what dictated that plane's interpreter, and the record is
+`samsungtvws` in it is what dictated that installation's interpreter, and the record is
 what makes that traceable rather than remembered. It is also the rollback target
 for the dependency move described above.

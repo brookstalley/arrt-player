@@ -41,7 +41,7 @@ by one shared helper, and the helper is where such an import would actually land
 Third-party packages are not followed, and that is what makes the television
 exemption structural rather than a special case — `samsungtvws` reaches the set
 over a websocket and drags `aiohttp` in behind it, and neither is display's
-import to answer for. Talking to the television is this plane's whole job.
+import to answer for. Talking to the television is the Player's whole job.
 
 **Narrowed again 2026-11-10, for the settings page, and only for a server.** The
 Player now listens for one thing, its own settings page
@@ -131,9 +131,9 @@ CURATION_PACKAGE = "arrt"
 
 #: HTTP clients, by the name a module would import them under. **`websockets` and
 #: `samsungtvws` are deliberately absent**: the television is reached over a
-#: websocket on the LAN, which is this plane's purpose and the one exemption the
-#: norm names. What is banned is a *general* client, because the only thing this
-#: plane could reach with one is the curation process — the second channel the
+#: websocket on the LAN, which is the Player's purpose and the one exemption the
+#: norm names. What is banned is a *general* client, because the only thing the
+#: Player could reach with one is the server — the second channel the
 #: norm exists to prevent.
 HTTP_CLIENTS: frozenset[str] = frozenset(
     {
@@ -157,7 +157,7 @@ def test_the_display_plane_has_modules_to_check():
     """The guard's own vacuity check.
 
     Everything below passes trivially over an empty package, so this is the
-    assertion that says the subject exists. If the plane is ever restructured out
+    assertion that says the subject exists. If the Player is ever restructured out
     from under this path, this fails loudly rather than the suite going quietly
     green over nothing.
     """
@@ -545,7 +545,7 @@ class Offence:
 
     def __str__(self) -> str:
         route = " -> ".join(_relative(path) for path in self.chain)
-        subject = "the curation plane" if self.kind == "curation" else "an HTTP client"
+        subject = "the server" if self.kind == "curation" else "an HTTP client"
         return f"{route} imports {self.name!r}, which is {subject}"
 
 
@@ -617,5 +617,5 @@ def _plant(directory: pathlib.Path, filename: str, source: str) -> pathlib.Path:
 
 @pytest.fixture(autouse=True)
 def _guard_is_pointed_at_something_real():
-    """Fails the whole module if the plane moves, rather than passing over nothing."""
+    """Fails the whole module if the Player moves, rather than passing over nothing."""
     assert DISPLAY_PACKAGE.is_dir(), f"{DISPLAY_PACKAGE} does not exist; this guard has lost its subject"

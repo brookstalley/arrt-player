@@ -7,6 +7,10 @@ second the renderer asks for its label document (`pull.LabelPull`, through the
 one module allowed to talk to the server), applies the label rule (`label_rule.py`) at
 its own clock, and redraws only when what the panel would show changes.
 
+**A renderer starts from the document its link cached** (`LabelRenderer._seed`),
+so a Player restarted while the server is down captions for what is left of the
+rule's hold, as its walls go on showing their cached art, rather than blanking.
+
 **Two objects, because they live for different lengths of time.** `LabelPanel`
 is the panel: opened once per process, reported in the client heartbeat whether
 or not anything is mapped to it, and it keeps the draw gate and the panel's own
@@ -21,16 +25,19 @@ posture the label had while the Frame loop drew it, kept now that it does not.
 import asyncio
 import contextlib
 import logging
+import threading
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import Final, Protocol
 
 from arrt_player.client import EPAPER_KIND, LabelAssignment, LabelOutputReport
 from arrt_player.episodes import ReportOnce
 from arrt_player.label_rule import Drawing, LabelDocument, Outcome, drawing_for, offline
 from arrt_player.logs import work_context
-from arrt_player.panel import Candidate, LabelSurface, Layout, Run, Tier, lay_out, read_label
+from arrt_player.panel import Candidate, LabelSurface, Layout, Run, SurfaceUnavailable, Tier, lay_out, read_label
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +88,16 @@ class LabelPanel:
         #: it cannot stop the thread, and a renderer restarted for a new mapping
         #: must not dispatch a second draw into a driver the first is still in.
         self._draw: asyncio.Future[Layout] | None = None
+        #: **Held by a worker for as long as it is inside the driver**, which is
+        #: what `close` waits on. The asyncio future above cannot be waited on
+        #: from `close` (a plain function, called on the loop's own thread), and
+        #: it does not cover a draw still *queued* for a thread; this does both,
+        #: because a worker takes it before it touches the surface and not after.
+        self._in_driver = threading.Lock()
+        #: Set by `close`, read by a worker once it holds the lock: a draw that
+        #: was queued behind the one `close` waited for finds the panel gone and
+        #: puts nothing on it.
+        self._closed = False
 
     def report(self) -> LabelOutputReport:
         """This panel as the client heartbeat states it."""
@@ -92,9 +109,33 @@ class LabelPanel:
         )
 
     def close(self) -> None:
-        """Release the panel. **On e-paper this is the sleep/power-down**, not bookkeeping."""
-        if self.surface is not None:
-            self.surface.close()
+        """Release the panel. **On e-paper this is the sleep/power-down**, not bookkeeping.
+
+        **Waits for a draw in flight, up to the label budget.** Powering a panel
+        down under a transaction is the one way this call could do harm, and a
+        draw is left running past its budget on purpose (`draw`), so "no draw is
+        in flight" is the caller's hope and not a fact. Past the budget it says so
+        once and leaves the panel open: a thread parked in the driver cannot be
+        stopped from here, and the unit's stop window already covers that case.
+        The wait blocks the caller's thread, which is the loop's at shutdown, for
+        at most the budget and with every wall already stopped.
+        """
+        surface = self.surface
+        if surface is None or self._closed:
+            return
+        if not self._in_driver.acquire(timeout=LABEL_DRAW_BUDGET_SECONDS):
+            self._closed = True
+            log.warning(
+                "the label panel was left open: a draw was still in the driver after the %gs label budget",
+                LABEL_DRAW_BUDGET_SECONDS,
+                extra={"event": "label.close_abandoned"},
+            )
+            return
+        try:
+            self._closed = True
+            surface.close()
+        finally:
+            self._in_driver.release()
 
     async def draw(  # noqa: C901, PLR0912 -- every way a draw can fail is answered in place
         self, drawing: Drawing, *, label_id: str
@@ -116,7 +157,7 @@ class LabelPanel:
         # the thread never starts, so a flag cleared inside it would close the
         # gate for good. Asking the task whether it is finished is right for both
         # the queued case and the running one.
-        draw = asyncio.ensure_future(asyncio.to_thread(_lay_out_and_show, surface, drawing))
+        draw = asyncio.ensure_future(asyncio.to_thread(self._lay_out_and_show, surface, drawing))
         self._draw = draw
         finished, _ = await asyncio.wait({draw}, timeout=LABEL_DRAW_BUDGET_SECONDS)
         if not finished:
@@ -220,17 +261,19 @@ class LabelPanel:
                 extra={"event": "label.failed", "label_id": label_id},
             )
 
+    def _lay_out_and_show(self, surface: LabelSurface, drawing: Drawing) -> Layout:
+        """Lay a drawing out and put it on the surface. **Runs on a worker thread.**
 
-def _lay_out_and_show(surface: LabelSurface, drawing: Drawing) -> Layout:
-    """Lay a drawing out and put it on the surface. **Runs on a worker thread.**
-
-    Measuring and drawing are one unit of work because both reach the same text
-    stack. Nothing here touches shared state; the caller reads the outcome
-    through the task it holds.
-    """
-    layout = lay_out(_facts(drawing), surface.geometry, surface.measure, surface.type_scale)
-    surface.show(layout)
-    return layout
+        Measuring and drawing are one unit of work because both reach the same text
+        stack. The panel's own state it touches is the lock `close` waits on and the
+        flag `close` sets; the caller reads the outcome through the task it holds.
+        """
+        with self._in_driver:
+            if self._closed:
+                raise SurfaceUnavailable("the panel was closed before this draw began")
+            layout = lay_out(_facts(drawing), surface.geometry, surface.measure, surface.type_scale)
+            surface.show(layout)
+            return layout
 
 
 def _facts(drawing: Drawing) -> tuple[Candidate, ...]:
@@ -250,6 +293,8 @@ def _title(drawing: Drawing) -> str | None:
 class LabelLink(Protocol):
     """A label's document, as a renderer needs it. `pull.LabelPull` is the real one."""
 
+    def cached(self) -> "CachedLabelLike | None": ...
+
     async def fetch(self) -> "LabelAnswerLike": ...
 
     async def close(self) -> None: ...
@@ -258,6 +303,12 @@ class LabelLink(Protocol):
 class LabelAnswerLike(Protocol):
     reachable: bool
     document: LabelDocument | None
+
+
+class CachedLabelLike(Protocol):
+    document: LabelDocument
+    #: When the server last answered, by the wall clock, never later than it did.
+    answered_at: datetime
 
 
 class LabelRenderer:
@@ -271,17 +322,35 @@ class LabelRenderer:
         panel: LabelPanel,
         now: Callable[[], datetime],
         poll_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._assignment = assignment
         self._link = link
         self._panel = panel
         self._now = now
+        #: **The offline hold's clock.** Thirty minutes is an interval, so it is
+        #: measured on the clock that cannot step (`wall.Clock`'s rule): a Pi with
+        #: no RTC comes up believing it is 1970 and is corrected by NTP mid-hold,
+        #: and wall time would then blank the caption at once or never. `now` is
+        #: still the sun's and the server's `since`'s clock, which the contract
+        #: accepts unreconciled (`player-contract.md` § Transport).
+        self._monotonic = monotonic
         self._poll = poll_seconds
         #: The last document the server sent, kept through every failure.
         self._document: LabelDocument | None = None
-        #: When the server last answered at all; the hold runs from here once it
-        #: stops answering.
-        self._last_answer: datetime | None = None
+        #: When the server last answered at all, on the monotonic clock; the hold
+        #: runs from here once it stops answering.
+        self._last_answer: float | None = None
+        #: Whether the cached document has been looked for: once, before the first poll.
+        self._seeded = False
+        #: When the server last answered before this renderer started, by the wall
+        #: clock, while the document is the cached one and the server has not
+        #: answered since; None otherwise. A monotonic reading does not survive a
+        #: restart, so this is the only clock the hold can run on until it does.
+        self._cached_answer: datetime | None = None
+        #: When this renderer started, on the monotonic clock: what bounds a hold
+        #: run from `_cached_answer`.
+        self._started: float = 0.0
         #: What the panel was last asked to show. **Recorded on the attempt
         #: rather than the success**, so a refusing panel is not re-asked every
         #: second: it gets its next chance when the drawing next changes.
@@ -316,16 +385,84 @@ class LabelRenderer:
 
     async def tick(self) -> None:
         """One poll: ask for the document, decide, and draw if the decision changed."""
+        if not self._seeded:
+            self._seed()
         answer = await self._link.fetch()
         now = self._now()
+        elapsed = self._monotonic()
         if answer.reachable:
-            self._last_answer = now
+            self._last_answer = elapsed
             if answer.document is not None:
                 self._document = answer.document
+            elif self._cached_answer is not None:
+                # **The cached document stands in for a server that cannot be
+                # reached, and for nothing else.** A server that answers and sends
+                # no document (a refusal, or one this reader cannot use) has said
+                # nothing this renderer heard, and a renderer that never heard
+                # from it draws blank.
+                self._document = None
+            self._cached_answer = None
             reading = self._document
+        elif self._last_answer is not None:
+            # The rule compares `since` with `now`, so the last answer is handed
+            # over as the wall-clock instant that is as far behind `now` as the
+            # answer is behind on the monotonic clock: one clock, however the
+            # wall clock has moved in between.
+            reading = offline(self._document, now - timedelta(seconds=max(0.0, elapsed - self._last_answer)))
         else:
-            reading = offline(self._document, self._last_answer)
+            reading = self._held_from_the_cache(now, elapsed)
         await self._show(drawing_for(reading, now))
+
+    def _seed(self) -> None:
+        """Start from the document the link cached, if it is for the wall this renderer captions."""
+        self._seeded = True
+        self._started = self._monotonic()
+        cached = self._link.cached()
+        if cached is None:
+            return
+        extra = {"label_id": self._assignment.label_id, "wall_id": self._assignment.wall_id}
+        if cached.document.wall_id != self._assignment.wall_id:
+            # A label moved to another wall: what it cached says nothing of this one.
+            log.info(
+                "the cached document for label %s is for wall %s, not %s; it is not used",
+                self._assignment.label_id,
+                cached.document.wall_id,
+                self._assignment.wall_id,
+                extra={"event": "label.cache_other_wall", "cached_wall_id": cached.document.wall_id, **extra},
+            )
+            return
+        self._document = cached.document
+        self._cached_answer = cached.answered_at
+        log.info(
+            "label %s starts from the document cached when the server last answered, at %s",
+            self._assignment.label_id,
+            cached.answered_at.isoformat(),
+            extra={"event": "label.cache_seeded", **extra},
+        )
+
+    def _held_from_the_cache(self, now: datetime, elapsed: float) -> LabelDocument | None:
+        """The cached document as the rule reads it before the server has answered this renderer at all.
+
+        **The hold runs from the server's last answer before the restart**, by the
+        wall clock (`_cached_answer`), so a restart never lengthens it: a caption
+        already held for 29 minutes is held for one more, not thirty. **And never
+        for more than the rule's hold from this renderer's start, by the monotonic
+        clock**, whatever the wall clock does meanwhile. A last answer the wall
+        clock puts in the future is one it cannot place, so nothing is held: the
+        Player cannot say how long the wall has been silent. Every outcome but a
+        caption reads offline as it does without a restart, so a document saying
+        the screen is in use or dark stays blank.
+        """
+        if self._cached_answer is None or self._cached_answer > now:
+            return None
+        started = now - timedelta(seconds=max(0.0, elapsed - self._started))
+        since = min(self._cached_answer, started)
+        reading = offline(self._document, since)
+        if reading is not None and reading.since is not None and reading.since > since:
+            # A document already in a held state keeps its own since, and the
+            # bound applies to that one too.
+            reading = replace(reading, since=since)
+        return reading
 
     async def _show(self, drawing: Drawing) -> None:
         if drawing == self._attempted:

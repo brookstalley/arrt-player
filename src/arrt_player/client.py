@@ -14,7 +14,7 @@ keyed on the output, and stops it when the mapping goes. A label's wall need not
 be one this client shows.
 
 **This module speaks no HTTP.** The two requests are made by `pull.py`, the one
-module the plane-isolation guard lets hold a client, and handed in by the entry
+module the isolation guard lets hold a client, and handed in by the entry
 point as a `ClientLink`. So is the worker itself: what runs a wall on the Frame
 names the television's library, and only the composition root may.
 
@@ -24,6 +24,19 @@ or sends a document this reader cannot use changes nothing: the walls already
 running go on rotating their caches. The last good document is kept on disk
 (`ClientLink.cached`), so a client restarted while the server is down starts
 the walls it last knew rather than none.
+
+**The walls follow the outputs as well as the document.** A card the kernel
+enumerates after the Player starts, or a connector it stops listing, changes
+which walls this client can place while the server, which has nothing new to
+say, answers 304. So the last document is kept, and the walls are matched to it
+again whenever the outputs differ from the ones it was last matched against.
+
+**A wall that leaves its screen leaves it dark; a client that stops does not.**
+A worker is told why it was stopped (`WallStop`): retired, when the document no
+longer places its wall on that output, so a screen wall draws black there rather
+than going on showing a work the server now says nobody shows; or merely
+stopped, when the client is going down or the output itself is gone, which
+leave the screen as it is.
 
 **A worker that fails is restarted here rather than taking the process down.**
 One process drives every wall this client has, so a fault in one wall's worker
@@ -377,6 +390,24 @@ def client_heartbeat(
 # -- the supervisor --------------------------------------------------------------------
 
 
+def _why_stopped(output: str, placed_on: str | None, available: dict[str, Any], claimed: dict[str, str]) -> tuple[bool, str]:
+    """Whether a wall's worker on `output` is retired, and why it is stopped, for the journal.
+
+    **Retired only when the document moves the wall off this output.** One it
+    still places here (`placed_on`) is stopped and its screen left as it is:
+    either the output is gone from this client, and the wall starts there again
+    when it comes back, or another wall the server also put there is about to
+    draw on it.
+    """
+    if placed_on is None:
+        return True, "no longer assigned to this client"
+    if placed_on != output:
+        return True, f"moved to {placed_on}"
+    if output not in available:
+        return False, f"on {output}, which this client no longer lists"
+    return False, f"on {output}, where wall {claimed[output]} is shown"
+
+
 class ClientLink(Protocol):
     """The two client routes, as the supervisor needs them. `pull.ClientPull` is the real one."""
 
@@ -392,20 +423,50 @@ class ClientLink(Protocol):
     async def close(self) -> None: ...
 
 
+class WallStop(asyncio.Event):
+    """The event that stops a wall's worker, and why it was set.
+
+    **The reason rides on the event**, so a worker stays a three-argument
+    callable and one that has no use for the reason need not take it. `retired`
+    is true when the document no longer places the wall on the output its worker
+    runs on (taken away, or moved to another), and false when the client is
+    stopping or the document still places the wall there (an output gone from
+    this client, or one the server also gave another wall).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.retired = False
+
+    def retire(self) -> None:
+        """Stop the worker because its wall has left its output."""
+        self.retired = True
+        self.set()
+
+
+def wall_retired(stop: asyncio.Event) -> bool:
+    """Whether `stop` stopped a worker because its wall left its output. False for a plain event."""
+    return isinstance(stop, WallStop) and stop.retired
+
+
 #: What runs one wall: given its settings, the output it is on, and the event
-#: that stops it, run until stopped. It may raise; the supervisor restarts it.
+#: that stops it (a `WallStop`), run until stopped. It may raise; the supervisor
+#: restarts it. **Called once more with the event already set** when the wall is
+#: retired while the worker waits to be restarted after a failure, so that it can
+#: leave its output as retirement asks; it must then do only that, and return.
 Worker = Callable[[WallSettings, OutputReport, asyncio.Event], Awaitable[None]]
 
 #: What runs one label output: given its assignment, the event that stops it and
 #: the event set beside it when the mapping went (rather than the client
-#: stopping), run until stopped. It may raise; the supervisor restarts it.
+#: stopping), run until stopped. It may raise; the supervisor restarts it. Called
+#: once more, already stopped and retired, as a `Worker` is.
 LabelWorker = Callable[[LabelAssignment, asyncio.Event, asyncio.Event], Awaitable[None]]
 
 
 @dataclass
 class _Running:
     assignment: Assignment
-    stop: asyncio.Event
+    stop: WallStop
     task: asyncio.Task[None]
 
 
@@ -460,6 +521,10 @@ class Supervisor:
         self._reported_unplaceable_labels: set[tuple[str, str]] = set()
         self._reported_outputs: tuple[list[OutputReport], list[LabelOutputReport]] | None = None
         self._reported_at: float | None = None
+        #: The document the workers were last matched to, and the outputs they
+        #: were matched against, so a change in either is a reason to match again.
+        self._document: ClientDocument | None = None
+        self._reconciled_outputs: tuple[list[OutputReport], list[LabelOutputReport]] | None = None
 
     @property
     def running(self) -> dict[str, str]:
@@ -500,17 +565,30 @@ class Supervisor:
             log.info("client stopped", extra={"event": "client.stopped"})
 
     async def cycle(self) -> None:
-        """One poll: the outputs reported if they are due, then the walls."""
+        """One poll: the outputs reported if they are due, then the walls.
+
+        The walls are matched to a new document when the server sends one, and to
+        the last one again when this client's outputs are not the ones it was
+        last matched against.
+        """
         await self._report_outputs()
         document = await self._link.fetch()
         if document is not None:
             self.reconcile(document)
+        elif self._document is not None and self._current_outputs() != self._reconciled_outputs:
+            self.reconcile(self._document)
+
+    def _current_outputs(self) -> tuple[list[OutputReport], list[LabelOutputReport]]:
+        return (self._outputs(), self._label_outputs())
 
     # -- the walls ------------------------------------------------------------------
 
     def reconcile(self, document: ClientDocument) -> None:
         """Make the running workers match the document: start, stop, move."""
-        available = {output.name: output for output in self._outputs()}
+        outputs = self._current_outputs()
+        self._document, self._reconciled_outputs = document, outputs
+        available = {output.name: output for output in outputs[0]}
+        placed = {assignment.wall_id: assignment.output for assignment in document.walls}
         wanted: dict[str, Assignment] = {}
         claimed: dict[str, str] = {}
         for assignment in document.walls:
@@ -529,8 +607,10 @@ class Supervisor:
 
         for wall_id, running in list(self._running.items()):
             target = wanted.get(wall_id)
-            if target is None or target.output != running.assignment.output:
-                self._stop(wall_id, moved_to=target.output if target is not None else None)
+            if target is not None and target.output == running.assignment.output:
+                continue
+            retire, why = _why_stopped(running.assignment.output, placed.get(wall_id), available, claimed)
+            self._stop(wall_id, retire=retire, why=why)
 
         for wall_id, assignment in wanted.items():
             if wall_id in self._running:
@@ -542,11 +622,11 @@ class Supervisor:
                 continue
             self._start(wall, assignment, available[assignment.output])
 
-        self._reconcile_labels(document)
+        self._reconcile_labels(document, {output.name for output in outputs[1]})
 
     # -- the labels -----------------------------------------------------------------
 
-    def _reconcile_labels(self, document: ClientDocument) -> None:
+    def _reconcile_labels(self, document: ClientDocument, available: set[str]) -> None:
         """Make the running label renderers match the document's labels.
 
         A renderer is restarted when its output's label changes (another wall, or
@@ -556,7 +636,6 @@ class Supervisor:
         """
         if self._label_worker is None:
             return
-        available = {output.name for output in self._label_outputs()}
         wanted: dict[str, LabelAssignment] = {}
         for label in document.labels:
             if label.output not in available:
@@ -591,6 +670,7 @@ class Supervisor:
                 event="client.label",
                 extra={"label_id": label.label_id, "output": label.output, "wall_id": label.wall_id},
                 after=stopping,
+                is_retired=retired.is_set,
             ),
             name=f"label:{label.output}",
         )
@@ -641,7 +721,7 @@ class Supervisor:
     # -- starting and stopping --------------------------------------------------------
 
     def _start(self, wall: WallSettings, assignment: Assignment, output: OutputReport) -> None:
-        stop = asyncio.Event()
+        stop = WallStop()
         # **After every worker still stopping has finished.** A wall moved to
         # another output would otherwise run two workers on its one directory for
         # a moment, and an output handed from one wall to another two workers on
@@ -656,6 +736,7 @@ class Supervisor:
                 event="client.worker",
                 extra={"wall_id": wall.wall_id, "output": assignment.output},
                 after=stopping,
+                is_retired=lambda: stop.retired,
             ),
             name=f"wall:{wall.wall_id}",
         )
@@ -669,18 +750,30 @@ class Supervisor:
             extra={"event": "client.wall_started", "wall_id": wall.wall_id, "output": assignment.output},
         )
 
-    def _stop(self, wall_id: str, *, moved_to: str | None) -> None:
-        """Ask a worker to stop. Its task finishes on its own; `stop_all` waits for every one."""
+    def _stop(self, wall_id: str, *, retire: bool, why: str) -> None:
+        """Ask a worker to stop, retired when its wall has left its output. `why` completes "wall X is …".
+
+        The task finishes on its own; `stop_all` waits for every one.
+        """
         running = self._running.pop(wall_id)
-        running.stop.set()
+        output = running.assignment.output
+        if retire:
+            running.stop.retire()
+        else:
+            running.stop.set()
         self._stopping.add(running.task)
         running.task.add_done_callback(self._stopping.discard)
         log.info(
             "wall %s is %s; stopping its worker on %s",
             wall_id,
-            f"moved to {moved_to}" if moved_to is not None else "no longer assigned to this client",
-            running.assignment.output,
-            extra={"event": "client.wall_stopped", "wall_id": wall_id, "output": running.assignment.output},
+            why,
+            output,
+            extra={
+                "event": "client.wall_stopped",
+                "wall_id": wall_id,
+                "output": output,
+                "retired": running.stop.retired,
+            },
         )
 
     def _unplaceable(self, assignment: Assignment, why: str) -> None:
@@ -724,16 +817,42 @@ class Supervisor:
         event: str,
         extra: dict[str, str],
         after: tuple[asyncio.Task[None], ...] = (),
+        is_retired: Callable[[], bool] = lambda: False,
     ) -> None:
         """Run one worker or renderer until stopped, starting it again whenever it fails.
 
-        `what` names it in the journal and `event` is the prefix of its two
-        events, `_crashed` and `_ended`.
+        `what` names it in the journal and `event` is the prefix of its events,
+        `_crashed`, `_ended` and `_retire_failed`.
+
+        **A stop that lands between runs, while the wait before a restart is
+        under way, finds nothing running to see it.** When that stop is a
+        retirement, the worker is called once more with its stop already set, so
+        that what it does on leaving its output (a screen drawn black, a label
+        left blank) still happens; it returns without running. A stop during a
+        run is seen by that run, and a stop before the first run has nothing of
+        this worker's on the output to leave.
         """
         if after:
             await asyncio.gather(*after, return_exceptions=True)
+        if stop.is_set():
+            return
+        if not await self._restart_until_stopped(run, stop, what=what, event=event, extra=extra) or not is_retired():
+            return
+        try:
+            await run()
+        except Exception:  # prawduct:allow prawduct/broad-except -- the wall is gone; its leaving costs only a line
+            log.exception(
+                "%s could not leave its output after it was taken away",
+                what,
+                extra={"event": f"{event}_retire_failed", **extra},
+            )
+
+    async def _restart_until_stopped(
+        self, run: Callable[[], Awaitable[None]], stop: asyncio.Event, *, what: str, event: str, extra: dict[str, str]
+    ) -> bool:
+        """`_keep_running`'s loop. True when the stop landed in a wait between runs, False when a run saw it."""
         wait = Backoff(minimum=self._restart_min, maximum=self._restart_max, monotonic=self._monotonic)
-        while not stop.is_set():
+        while True:
             started = self._monotonic()
             try:
                 await run()
@@ -744,19 +863,22 @@ class Supervisor:
                     extra={"event": f"{event}_crashed", **extra},
                 )
             else:
-                if stop.is_set():
-                    return
-                log.error(
-                    "%s ended without being asked to; starting it again",
-                    what,
-                    extra={"event": f"{event}_ended", **extra},
-                )
+                if not stop.is_set():
+                    log.error(
+                        "%s ended without being asked to; starting it again",
+                        what,
+                        extra={"event": f"{event}_ended", **extra},
+                    )
+            if stop.is_set():
+                return False
             if self._monotonic() - started > self._restart_max:
                 # A worker that ran for longer than the longest wait has earned a
                 # fresh ladder: this failure is a new one, not the next in a loop.
                 wait.clear()
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=wait.hold())
+            if stop.is_set():
+                return True
 
     # -- the outputs ----------------------------------------------------------------
 

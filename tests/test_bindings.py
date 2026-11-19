@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from fakes import FakeTv
+from PIL import Image
 
 from arrt_player.displays.frame import frame_wall
 from arrt_player.manifest import Watcher
@@ -182,13 +183,14 @@ class TestUploading:
         await daemon.tick()
         first = state.binding_for("w1").tv_content_id
 
-        publish.picture("w1").write_bytes(b"a different composition entirely")
+        Image.new("RGB", (8, 8), (255, 0, 0)).save(publish.picture("w1"), format="JPEG")
+        different = publish.picture("w1").read_bytes()
         clock.advance(10)
         await daemon.tick()
 
         rebound = state.binding_for("w1")
         assert rebound.tv_content_id != first, "the television was never told the render changed"
-        assert tv.holding[rebound.tv_content_id].read_bytes() == b"a different composition entirely"
+        assert tv.holding[rebound.tv_content_id].read_bytes() == different
 
     async def test_a_work_whose_render_is_untouched_is_not_sent_again(
         self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
@@ -336,7 +338,7 @@ class TestOrphans:
         assert "MY-LEGACY-1" not in tv.holding, "the next adoption did not try again"
 
 
-async def test_a_store_from_a_newer_plane_is_refused_rather_than_opened(tmp_path: Path):
+async def test_a_store_from_a_newer_player_is_refused_rather_than_opened(tmp_path: Path):
     """The same rule as a manifest major from the future, and for the same reason.
 
     A reader that guesses at a shape it does not know writes damage, and this is
@@ -356,7 +358,7 @@ async def test_a_store_from_a_newer_plane_is_refused_rather_than_opened(tmp_path
     with pytest.raises(StateSchemaTooNew) as refusal:
         DisplayState(path).__enter__()
 
-    assert str(SCHEMA_VERSION) in str(refusal.value), "the refusal does not say which schema this plane understands"
+    assert str(SCHEMA_VERSION) in str(refusal.value), "the refusal does not say which schema the Player understands"
 
 
 async def test_a_store_written_by_a_player_that_read_major_1_still_opens_and_the_wall_carries_on(settings, tv, clock, publish):

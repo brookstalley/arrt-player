@@ -13,7 +13,7 @@ import pytest
 from arrt_contract import validator
 from fakes import RecordingOutput
 
-from arrt_player.displays.screen import screen_wall
+from arrt_player.displays.screen import go_dark, screen_wall
 from arrt_player.heartbeat import INTERVAL_SECONDS, path_in
 from arrt_player.manifest import Watcher
 from arrt_player.wall import Wall
@@ -270,3 +270,26 @@ async def test_a_change_is_written_at_once_and_an_unchanged_state_keeps_the_inte
     clock.advance(INTERVAL_SECONDS / 7)
     await screen.tick()
     assert path_in(wall_dir, "living-room").read_text() != first, "a change waited for the interval"
+
+
+# -- going dark -----------------------------------------------------------------------------
+
+
+async def test_going_dark_draws_the_screen_black_and_says_so(output, caplog):
+    with caplog.at_level(logging.INFO, logger="arrt_player.displays.screen"):
+        await go_dark(output, wall_id="hall", output_name="hdmi-a-2")
+
+    assert output.blanked == [0]
+    [said] = [record for record in caplog.records if record.__dict__.get("event") == "screen.blanked"]
+    assert (said.wall_id, said.output) == ("hall", "hdmi-a-2")
+
+
+async def test_a_screen_that_cannot_be_drawn_black_is_said_and_raises_nothing(output, caplog):
+    output.blank_fails = PermissionError(13, "Permission denied")
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.displays.screen"):
+        await go_dark(output, wall_id="hall", output_name="hdmi-a-2")
+
+    events = [record.__dict__.get("event") for record in caplog.records]
+    assert events == ["screen.blank_failed"], events
+    assert "Permission denied" in caplog.records[0].getMessage()

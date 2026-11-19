@@ -6,7 +6,9 @@ lands. The drawing is then held to the same geometry by sampling pixels well
 inside each region, away from the edges where JPEG rings.
 """
 
+import errno
 import json
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -22,7 +24,9 @@ from arrt_player.compose import (
     Rect,
     Uncomposable,
     compose,
+    composed_path,
     composition_key,
+    is_intact,
     layout,
     mat_mode,
     mat_rgb,
@@ -270,6 +274,105 @@ class TestTheDrawing:
         again = compose(master, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN, directory=tmp_path)
 
         assert again == first
+
+    def test_the_staged_file_is_flushed_to_the_disk_before_it_is_renamed(self, tmp_path: Path, monkeypatch):
+        """Power lost between the rename and the disk's own write leaves an empty file under the final name."""
+        master = a_master(tmp_path / "m.jpg", (600, 400))
+        out = tmp_path / "out"
+        destination = composed_path(out, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN)
+        staged = destination.with_name(f"{destination.name}.composing")
+        events: list[tuple[str, bool]] = []
+        real_fsync, real_replace = os.fsync, Path.replace
+
+        def fsync(fd: int) -> None:
+            # Whose bytes were flushed: the staged file's, written in full.
+            events.append(("fsync", os.fstat(fd).st_ino == staged.stat().st_ino and staged.stat().st_size > 0))
+            real_fsync(fd)
+
+        def replace(self: Path, target):
+            events.append(("replace", self == staged))
+            return real_replace(self, target)
+
+        monkeypatch.setattr(compose_module.os, "fsync", fsync)
+        monkeypatch.setattr(Path, "replace", replace)
+
+        compose(master, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN, directory=out)
+
+        assert events == [("fsync", True), ("replace", True)]
+
+    def test_a_master_whose_read_fails_is_uncomposable_for_now_not_for_good(self, tmp_path: Path, monkeypatch):
+        """An errno is the disk or the cache failing, which the same bytes may not do twice."""
+        master = a_master(tmp_path / "m.jpg", (600, 400))
+
+        def failing_read(*args, **kwargs):
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(compose_module.Image, "open", failing_read)
+
+        with pytest.raises(Uncomposable, match=r"m\.jpg") as caught:
+            compose(master, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN, directory=tmp_path / "out")
+
+        assert caught.value.transient is True
+
+    def test_a_master_that_is_not_an_image_is_never_transient(self, tmp_path: Path):
+        master = tmp_path / "m.jpg"
+        master.write_bytes(b"not a picture")
+
+        with pytest.raises(Uncomposable) as caught:
+            compose(master, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN, directory=tmp_path / "out")
+
+        assert caught.value.transient is False
+
+    def test_a_master_cut_short_is_never_transient(self, tmp_path: Path):
+        """Pillow reports a truncated file as an OSError with no errno: the bytes are wrong, and rereading them will not help."""
+        master = a_master(tmp_path / "m.jpg", (600, 400))
+        master.write_bytes(master.read_bytes()[: master.stat().st_size // 2])
+
+        with pytest.raises(Uncomposable) as caught:
+            compose(master, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN, directory=tmp_path / "out")
+
+        assert caught.value.transient is False
+
+
+class TestAComposedFileFoundOnDisk:
+    """Power loss can leave a file under its final name that is no picture."""
+
+    def composed(self, tmp_path: Path) -> Path:
+        master = a_master(tmp_path / "m.jpg", (600, 400))
+        return compose(master, master_sha256=SHA, mat_color=MAT, mode="proportional", geometry=SCREEN, directory=tmp_path / "out")
+
+    def test_a_picture_compose_wrote_is_intact(self, tmp_path: Path):
+        assert is_intact(self.composed(tmp_path))
+
+    def test_an_empty_file_is_not(self, tmp_path: Path):
+        picture = self.composed(tmp_path)
+        picture.write_bytes(b"")
+
+        assert not is_intact(picture)
+
+    def test_a_picture_cut_short_is_not(self, tmp_path: Path):
+        picture = self.composed(tmp_path)
+        whole = picture.read_bytes()
+        picture.write_bytes(whole[: len(whole) // 2])
+
+        assert not is_intact(picture)
+
+    def test_a_picture_with_its_tail_zeroed_is_not(self, tmp_path: Path):
+        """What delayed allocation leaves: the length is right and the last blocks are zeros."""
+        picture = self.composed(tmp_path)
+        whole = picture.read_bytes()
+        picture.write_bytes(whole[: len(whole) // 2] + bytes(len(whole) - len(whole) // 2))
+
+        assert not is_intact(picture)
+
+    def test_a_file_that_is_not_a_jpeg_is_not(self, tmp_path: Path):
+        picture = tmp_path / "x.jpg"
+        Image.new("RGB", (10, 10)).save(picture, format="PNG")
+
+        assert not is_intact(picture)
+
+    def test_a_file_that_is_not_there_is_not(self, tmp_path: Path):
+        assert not is_intact(tmp_path / "gone.jpg")
 
 
 class TestTheKey:

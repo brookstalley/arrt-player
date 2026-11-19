@@ -1,4 +1,4 @@
-"""How the plane-isolation guard reads this project's source.
+"""How the isolation guard reads this project's source.
 
 A copy of Arrt's own reader (its governance suite's `import_graph.py`, behind its
 seam guard), carried when the repositories split so this guard needs nothing
@@ -75,7 +75,7 @@ def resolve(name: str, roots: tuple[pathlib.Path, ...]) -> pathlib.Path | None:
 
     Returning None for third-party names is what keeps the television's transport
     out of scope: `samsungtvws` imports `aiohttp`, and following into
-    site-packages would report the library's own dependency as this plane's.
+    site-packages would report the library's own dependency as the Player's.
     """
     relative = pathlib.Path(*name.split("."))
     for root in roots:

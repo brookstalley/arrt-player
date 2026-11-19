@@ -201,7 +201,7 @@ def test_every_workflow_that_runs_a_suite_calls_the_guard():
     **What this does NOT catch, stated rather than left to be discovered:** it
     matches per *file*, so a second pytest job added to a workflow that already
     calls the guard elsewhere would pass unseen. Closing that needs a YAML parse,
-    and pyyaml is not a dependency of this plane — adding one for a single test
+    and pyyaml is not a dependency of the Player — adding one for a single test
     buys less than it costs. The Critic reviews new jobs; this holds the case
     where a whole workflow forgets.
     """
@@ -270,7 +270,7 @@ def test_every_ci_pytest_invocation_scopes_a_path():
     reviewer should not have to catch a third time.
 
     Matched textually rather than through a YAML parse, for the reason the test
-    above gives: pyyaml is not a dependency of this plane.
+    above gives: pyyaml is not a dependency of the Player.
 
     **Every line carrying the command counts, whatever precedes it**, and that
     breadth is the correction rather than the original design. The first version

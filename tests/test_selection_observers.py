@@ -117,8 +117,8 @@ class TestTheFanOut:
     def test_an_announcement_nobody_here_asked_for_still_reaches_observers(self, tv: SamsungTv):
         """The case the old handler discarded, and the one an observer wants most.
 
-        Somebody picking up the remote makes the set announce a selection this
-        plane never made. There is no pending selection, so the handler used to
+        Somebody picking up the remote makes the set announce a selection the
+        Player never made. There is no pending selection, so the handler used to
         return before parsing anything — which is precisely the news an observer
         exists to hear: the wall changed, and we did not do it.
         """

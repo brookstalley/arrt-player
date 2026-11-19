@@ -8,26 +8,34 @@ against `TvClient` and can be exercised without a television or its library.
 """
 
 from arrt_player.tv.client import (
+    READS,
     UPLOADED_CATEGORY,
+    WRITES,
+    Gate,
     IdentityUnreadable,
     PowerStateUnreadable,
     RemovalOutcome,
     SelectionAnnouncement,
     SelectionObserver,
     TvClient,
+    TvNotOurs,
     TvRemovalUnconfirmed,
     TvUnavailable,
     TvUploadFailed,
 )
 
 __all__ = [
+    "READS",
     "UPLOADED_CATEGORY",
+    "WRITES",
+    "Gate",
     "IdentityUnreadable",
     "PowerStateUnreadable",
     "RemovalOutcome",
     "SelectionAnnouncement",
     "SelectionObserver",
     "TvClient",
+    "TvNotOurs",
     "TvRemovalUnconfirmed",
     "TvUnavailable",
     "TvUploadFailed",

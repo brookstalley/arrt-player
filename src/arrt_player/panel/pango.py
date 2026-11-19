@@ -1,6 +1,6 @@
 """The typesetter: Pango and Cairo, measuring and drawing the label's text.
 
-**Isolated in its own module because it is the one part of this plane that needs
+**Isolated in its own module because it is the one part of the Player that needs
 something a default install does not provide.** Pango arrives through PyGObject,
 in the optional `raster` group: a device with a television and no panel installs
 neither it nor the driver. The layout tier above was split out so the judgement

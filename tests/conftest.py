@@ -1,4 +1,4 @@
-"""Fixtures for the display plane: an art root, a store, a clock that does not tick.
+"""Fixtures for the Player: an art root, a store, a clock that does not tick.
 
 The daemon is driven one `tick()` at a time rather than started and stopped,
 because a loop exercised through its own timer is a test that fails on a busy
@@ -90,7 +90,7 @@ class FakeClock:
 
 
 #: The wall every fixture in this suite serves. A readable literal rather than a
-#: UUID because what the plane requires is *a* wall id, and the assertions that
+#: UUID because what the Player requires is *a* wall id, and the assertions that
 #: name a file are legible with this one. Module-level so a test that has a wall
 #: directory but no `Settings` can still say which wall's file it means.
 WALL_ID = "living-room"
@@ -344,7 +344,7 @@ class Publisher:
                 picture = self.picture(work_id, wall_id=wall_id)
                 if not picture.exists():
                     picture.parent.mkdir(parents=True, exist_ok=True)
-                    picture.write_bytes(b"not really a jpeg")
+                    Image.new("RGB", (8, 8)).save(picture, format="JPEG")
         write_manifest(self._wall_dir, document, wall_id=wall_id)
         return document
 

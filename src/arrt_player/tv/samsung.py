@@ -10,7 +10,7 @@ what is encoded here is the *behaviour* they establish:
   most of the time. It cannot happen on the event loop, so it happens on a thread.
 * **`start_listening()` can hang rather than raise**, and on another attempt
   raised after ~15 s — not even consistent between runs, so it gets a ceiling of
-  this plane's own. **Not a symptom of art mode being off**, which is what it was
+  the Player's own. **Not a symptom of art mode being off**, which is what it was
   first taken for: with a cached token the channel opens against a dark panel and
   against a set showing a programme. It has been seen failing *in* art mode after
   heavy connect-and-close churn, which points at a cap on concurrent clients.
@@ -30,7 +30,7 @@ The rule those three share, and the one to apply to any verb added later:
 against the television itself.**
 
 **`get_current_artwork` is not that confirmation, and believing it was cost this
-plane two days.** It reports the *art-store* slot — its replies carry
+project two days.** It reports the *art-store* slot — its replies carry
 `"content_type": "artstore"` — and it is unaffected by selecting a user upload.
 Measured on 2026-08-07 against a set in art mode: the wall visibly changed to the
 requested image, `image_selected` fired at +1.0 s with `is_shown: "Yes"`, and
@@ -39,7 +39,7 @@ through 37 seconds of polling. It was adopted as the confirming read a day
 earlier because it *agreed* in the dark state — where it is right by coincidence,
 having simply never changed. There is no reader on this firmware that answers
 "what is on the wall"; `get_slideshow_status.current_content_id` is empty while
-the slideshow is off, which is the state this plane requires.
+the slideshow is off, which is the state the Player requires.
 
 **Nothing above this seam imports `samsungtvws`.** That is not tidiness — it is
 what makes the standing risk survivable, since the fork is unowned, static, and
@@ -49,7 +49,8 @@ has no maintained alternative carrying an async art client.
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Sequence
+import re
+from collections.abc import Awaitable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, TypeVar
@@ -87,7 +88,7 @@ T = TypeVar("T")
 #: a dropped socket, and — non-obviously — **every `requests` exception**, since
 #: `RequestException` subclasses `OSError`. That last one is why nothing here
 #: imports `requests` to name its timeout: the constructor's blocking REST call
-#: is already covered, and importing an HTTP client into this plane is exactly
+#: is already covered, and importing an HTTP client into the Player is exactly
 #: what the isolation guard forbids.
 #:
 #: `JSONDecodeError` is a `ValueError` and is named rather than caught broadly:
@@ -105,7 +106,7 @@ _LIBRARY_FAILURES: Final[tuple[type[Exception], ...]] = (
 )
 
 #: The set's own art application publishes no matte for images this product
-#: sends: the mat is already composed into the render by the curation plane, and
+#: sends: the mat is already composed into the render by the server, and
 #: letting the television draw a second one over it would frame the frame.
 _NO_MATTE: Final[str] = "none"
 
@@ -135,7 +136,7 @@ _IS_SHOWN_YES: Final[str] = "Yes"
 #: Everything the set says when its art mode may have changed. All four are
 #: treated identically — as "ask again" — so none of their payloads is parsed and
 #: the list can grow without anything downstream having to learn a new shape.
-#: `wakeup` and `go_to_standby` are here because the transition this plane waits
+#: `wakeup` and `go_to_standby` are here because the transition the Player waits
 #: for is somebody picking up a remote, which is what they report.
 _ART_MODE_ANNOUNCEMENTS: Final[tuple[str, ...]] = (
     "art_mode_changed",
@@ -272,7 +273,7 @@ class SamsungTv(TvClient):
             art.set_callback(announcement, self._on_art_mode_changed)
 
         # A reconnection is itself news: the set may have entered art mode while
-        # this plane could not hear it, and without this the wall would sit out
+        # the Player could not hear it, and without this the wall would sit out
         # whatever wait was in force when the connection dropped.
         self._art_mode_announced = True
         self._art = art
@@ -321,7 +322,7 @@ class SamsungTv(TvClient):
         — somebody using the remote — and those arrive with no pending selection
         at all. Reading `_awaiting` first, as this did while confirmation was its
         only job, discarded exactly the announcements an observer wants most: the
-        ones where the wall changed and this plane did not do it.
+        ones where the wall changed and the Player did not do it.
         """
         announcement = _announced(response)
         if announcement is None:
@@ -339,7 +340,7 @@ class SamsungTv(TvClient):
             # unreadable frame should not be able to fill a journal that lives in
             # this device's RAM.
             log.warning(
-                "the television announced a selection this plane could not read (%.200r); "
+                "the television announced a selection the Player could not read (%.200r); "
                 "the wall may stop changing until it is understood",
                 response,
                 extra={"event": "tv.selection_unreadable"},
@@ -370,7 +371,7 @@ class SamsungTv(TvClient):
         that raises must not cost a later one its notification, and — since this
         runs on the reader task — must not take the socket down. The failure is
         logged rather than swallowed: an observer raising on every announcement is
-        a real fault, and the journal is where this plane says so.
+        a real fault, and the journal is where the Player says so.
         """
         for observer in self._selection_observers:
             try:
@@ -432,7 +433,7 @@ class SamsungTv(TvClient):
             # connection for minutes, and this line is the only trace of why.
             log.warning("closing the television connection raised %s", _named(exc), extra={"event": "tv.close_failed"})
 
-    async def disable_native_slideshow(self) -> None:
+    async def _send_disable_native_slideshow(self) -> None:
         """Tell the set to stop rotating on its own.
 
         Its slideshow can only be scoped to a whole category — there is no
@@ -451,7 +452,7 @@ class SamsungTv(TvClient):
             raise TvUnavailable(f"the television listed its uploads as a {type(entries).__name__}, not a list")
         return [entry for entry in entries if isinstance(entry, dict)]
 
-    async def upload(self, path: Path) -> str:
+    async def _send_upload(self, path: Path) -> str:
         """Put an image on the television, and establish whether it landed.
 
         The library returns None when the acknowledgement does not arrive inside
@@ -529,7 +530,7 @@ class SamsungTv(TvClient):
             return str(arrived[0]["content_id"])
         return None
 
-    async def show(self, content_id: str) -> bool:
+    async def _send_show(self, content_id: str) -> bool:
         """Select an image and wait for the set to announce that it is displayed.
 
         **The waiter is armed before the request goes out**, which is the whole
@@ -607,7 +608,7 @@ class SamsungTv(TvClient):
 
         **Through the art client's own REST helper**, which is what the library's
         `on()` uses: it rides the HTTP session the art client already owns and
-        closes, so this plane imports no HTTP client of its own. `on()` itself is
+        closes, so the Player imports no HTTP client of its own. `on()` itself is
         not used because it swallows every failure into "off" — the one reading
         that would turn a REST hiccup into a wall reported dark.
 
@@ -670,19 +671,17 @@ class SamsungTv(TvClient):
             return None
         return mode if isinstance(mode, str) else None
 
-    async def remove(self, content_ids: Sequence[str]) -> RemovalOutcome:
+    async def _send_remove(self, content_ids: tuple[str, ...]) -> RemovalOutcome:
         """Remove images, then read the set's own list to find out what happened.
 
         Confirmation cannot come from the call: the library sends the request and
         discards the reply, so "it worked" and "it was refused" are the same
         return value. Reading the list back is also stronger than an
         acknowledgement would be — it reports the state the set is actually in
-        rather than what it said it would do.
+        rather than what it said it would do. Never handed an empty list:
+        `TvClient.remove` answers that without asking the set.
         """
-        requested = tuple(content_ids)
-        if not requested:
-            return RemovalOutcome(requested=(), surviving=())
-
+        requested = content_ids
         try:
             await self._client().delete_list(list(requested))
         except _LIBRARY_FAILURES as exc:
@@ -705,7 +704,7 @@ class SamsungTv(TvClient):
             )
         return outcome
 
-    async def set_brightness(self, value: int) -> None:
+    async def _send_set_brightness(self, value: int) -> None:
         await self._call("set_brightness", self._client().set_brightness(value))
 
     def _client(self) -> SamsungTVAsyncArt:
@@ -714,7 +713,7 @@ class SamsungTv(TvClient):
         return self._art
 
     async def _call(self, verb: str, awaitable: Awaitable[T]) -> T:
-        """Run one library call, and turn its many failures into this plane's one.
+        """Run one library call, and turn its many failures into the Player's one.
 
         The connection is dropped on failure rather than kept: the library holds a
         websocket whose state after an error is not knowable from out here, and a
@@ -746,7 +745,7 @@ class _RestOnly(SamsungTVAsyncArt):
     pairing prompt on the screen of whoever is watching. The identity read needs
     neither, so this skips it. Nothing here calls `start_listening`, so the art
     channel is never opened; `_get_rest_api` builds the library's REST client on a
-    session the library owns, which `close()` closes. That is why this plane need
+    session the library owns, which `close()` closes. That is why the Player need
     not import an HTTP client of its own to read the set's description.
     """
 
@@ -754,9 +753,23 @@ class _RestOnly(SamsungTVAsyncArt):
         return None
 
 
+#: The pairing token, wherever a library failure quotes it: the art channel's URL
+#: carries it as a query parameter (`…/api/v2/channels/<app>?name=…&token=…`,
+#: `samsungtvws/connection.py`), and the set's replies carry it as a `"token"`
+#: field, which the library's exceptions repr as a dict or quote as JSON. The
+#: value runs to the next separator any of those shapes uses.
+_TOKEN: Final[re.Pattern[str]] = re.compile(r"""(token["']?\s*[=:]\s*["']?)[^&\s"',}]+""", re.IGNORECASE)
+
+
 def _named(exc: Exception) -> str:
-    """`TypeName: message`, because several of these carry an empty message."""
-    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    """`TypeName: message`, because several of these carry an empty message, with any token withheld.
+
+    **Every message this seam builds from a library failure goes through here**,
+    and the message is not only a log line: it is `TvUnavailable`'s text, which
+    the wall keeps as its `last_error` and the heartbeat carries to the server.
+    """
+    text = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return _TOKEN.sub(r"\1<withheld>", text)
 
 
 def _announced(response: dict[str, Any]) -> "SelectionAnnouncement | None":

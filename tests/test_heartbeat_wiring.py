@@ -33,7 +33,7 @@ class TestTheFrameLoopDrawsNoLabel:
 
     @pytest.fixture
     def journal(self):
-        """The lines this plane would actually write, parsed (see `test_label_renderer.py`)."""
+        """The lines the Player would actually write, parsed (see `test_label_renderer.py`)."""
         root = logging.getLogger()
         handlers, level = list(root.handlers), root.level
         logs.configure()
@@ -106,7 +106,7 @@ class TestShuttingDown:
 
 class TestTheHeartbeat:
     @pytest.mark.asyncio
-    async def test_a_running_plane_writes_one(self, daemon, publish, wall_dir: Path):
+    async def test_a_running_player_writes_one(self, daemon, publish, wall_dir: Path):
         publish(["work-a"])
 
         await daemon.tick()
@@ -141,7 +141,7 @@ class TestTheHeartbeat:
     async def test_it_is_written_while_the_television_is_unreachable(self, daemon, tv, publish, wall_dir: Path):
         """The condition an operator most wants reported.
 
-        A plane that only beat on good passes would fall silent exactly when it
+        A Player that only beat on good passes would fall silent exactly when it
         had something to say, and curation would report a healthy process as one
         that has never spoken.
         """

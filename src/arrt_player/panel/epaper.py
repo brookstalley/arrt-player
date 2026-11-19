@@ -19,7 +19,7 @@ measurement against the real panel on 2026-08-04
 * The driver comes up in **1-bit `bw`** unless told otherwise, and `max_colors`
   reports 16 in *both* modes — so the mode is set explicitly and then read back,
   and the read-back is on `mode`. Every legibility claim this product makes
-  assumes 16 grey levels, and the 2024 plane shipped 1-bit type past every check
+  assumes 16 grey levels, and the 2024 installation shipped 1-bit type past every check
   a reasonable person would have thought to run.
 * `display()` returns `None` on success and on failure alike, so nothing here
   reads a return value as confirmation; a failure is a raised
@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 GREYSCALE_MODE: Final[str] = "gray16"
 
 #: How far the rendered label is turned before it reaches the panel. **180 is the
-#: reference wall's value, carried forward from the 2024 plane that runs it
+#: reference wall's value, carried forward from the 2024 installation that runs it
 #: today** — that panel is mounted with its ribbon at the top, and a device that
 #: did not turn the image would show the label upside down. It is configuration
 #: rather than a constant because the next device's mounting is the next device's

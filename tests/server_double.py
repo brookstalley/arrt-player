@@ -10,8 +10,11 @@ another repository will not have:
 * `GET /client` lists that client's walls with an ETag, `304` on a match;
 * `GET /walls/{wall_id}/manifest/v{major}` serves a wall's manifest at the
   major it is published at, with an ETag, and `404` at any other major;
-* `POST /client/heartbeat` is `204`, and `400` for a body the contract's schema
-  refuses — so a Player writing a bad one fails here as it would against Arrt;
+* `POST /client/heartbeat` and `POST /walls/{wall_id}/heartbeat` are `204`, and
+  `400` for a body the contract's schema refuses — so a Player writing a bad one
+  fails here as it would against Arrt;
+* `GET /media/sha256-{hex}` streams a held master in pieces, so a Player that
+  stops reading is seen to stop;
 * `GET /labels/{label_id}` serves a label document with an ETag, `304` on a
   match, and `403` for a label output another client holds or an unknown id.
 """
@@ -30,6 +33,10 @@ from PIL import Image
 CONTRACT = root()
 ROUTES = routes()
 CLIENT_HEARTBEAT = validator("schemas/client-heartbeat.v1.schema.json")
+WALL_HEARTBEAT = validator("schemas/heartbeat.v1.schema.json")
+
+#: How much of a master `serve_media` writes at a time.
+MEDIA_CHUNK_BYTES = 64 * 1024
 
 #: The client every test's Player is, unless it says otherwise.
 TOKEN = "the-clients-token"
@@ -57,8 +64,21 @@ class ServerDouble:
         self.heartbeats_by_wall: dict[str, list[dict]] = {}
         #: Each client heartbeat accepted.
         self.client_heartbeats: list[dict] = []
-        #: Forced answers, for the failure tests.
+        #: Forced answers, for the failure tests: every master, or one master by its hash.
         self.media_status: int | None = None
+        self.media_status_by_sha: dict[str, int] = {}
+        #: Masters whose request is answered by dropping the connection, as a
+        #: server that has gone away mid-poll does.
+        self.media_dropped: set[str] = set()
+        #: A forced answer for every manifest request.
+        self.manifest_status: int | None = None
+        #: How many bytes of each master were written before the transfer ended,
+        #: by hash, one entry per request.
+        self.media_sent: dict[str, list[int]] = {}
+        #: A forced answer for every wall heartbeat.
+        self.heartbeat_status: int | None = None
+        #: Every request that reached this server, routed or not, as (method, raw path).
+        self.seen: list[tuple[str, str]] = []
         #: False serves manifests with no ETag, as a server or proxy may, and never 304.
         self.manifest_etags = True
         self.client_status: int | None = None
@@ -84,7 +104,12 @@ class ServerDouble:
     # -- the app ---------------------------------------------------------------------
 
     def app(self) -> web.Application:
-        application = web.Application()
+        @web.middleware
+        async def record(request: web.Request, handler):
+            self.seen.append((request.method, request.raw_path))
+            return await handler(request)
+
+        application = web.Application(middlewares=[record])
         for key, handler in (
             ("client", self.serve_client),
             ("client_heartbeat", self.receive_client_heartbeat),
@@ -161,6 +186,8 @@ class ServerDouble:
         _client, refused = self._admit(request, wall_id)
         if refused is not None:
             return refused
+        if self.manifest_status is not None:
+            return web.Response(status=self.manifest_status)
         manifest = self.manifests.get(wall_id)
         if manifest is None or self.served_at.get(wall_id, manifest["schema"]["major"]) != major:
             return web.json_response({"error": f"No manifest of major {major} is published for this wall."}, status=404)
@@ -172,25 +199,53 @@ class ServerDouble:
             return web.Response(status=304, headers={"ETag": etag})
         return web.Response(body=body, content_type="application/json", headers={"ETag": etag})
 
-    async def serve_media(self, request: web.Request) -> web.Response:
+    async def serve_media(self, request: web.Request) -> web.StreamResponse:
         _client, refused = self._admit(request, None)
         if refused is not None:
             return refused
-        if self.media_status is not None:
-            return web.Response(status=self.media_status)
-        data = self.media.get(request.match_info["sha256"])
+        sha = request.match_info["sha256"]
+        if sha in self.media_dropped:
+            request.transport.close()
+            return web.Response(status=200)
+        status = self.media_status_by_sha.get(sha, self.media_status)
+        if status is not None:
+            return web.Response(status=status)
+        data = self.media.get(sha)
         if data is None:
             return web.json_response({"error": "No render with that hash is held."}, status=404)
-        return web.Response(body=data, content_type="image/jpeg")
+        response = web.StreamResponse(headers={"Content-Type": "image/jpeg"})
+        response.content_length = len(data)
+        await response.prepare(request)
+        sent = self.media_sent.setdefault(sha, [])
+        sent.append(0)
+        try:
+            for start in range(0, len(data), MEDIA_CHUNK_BYTES):
+                await response.write(data[start : start + MEDIA_CHUNK_BYTES])
+                sent[-1] = min(start + MEDIA_CHUNK_BYTES, len(data))
+            await response.write_eof()
+        except ConnectionError:
+            # The Player stopped reading and closed the connection: what the
+            # count up to here is for.
+            pass
+        return response
 
     async def receive_heartbeat(self, request: web.Request) -> web.Response:
         wall_id = request.match_info["wall_id"]
         _client, refused = self._admit(request, wall_id)
         if refused is not None:
             return refused
+        if self.heartbeat_status is not None:
+            return web.Response(status=self.heartbeat_status)
         body = await request.read()
+        try:
+            document = json.loads(body)
+        except ValueError:
+            return web.json_response({"error": "The body is not JSON."}, status=400)
+        errors = [error.message for error in WALL_HEARTBEAT.iter_errors(document)]
+        if errors:
+            return web.json_response({"error": "; ".join(errors)}, status=400)
         self.heartbeats.append(body)
-        self.heartbeats_by_wall.setdefault(wall_id, []).append(json.loads(body))
+        self.heartbeats_by_wall.setdefault(wall_id, []).append(document)
         if self.echo_heartbeats_to is not None:
             # What Arrt does with a POSTed heartbeat on a host it shares.
             self.echo_heartbeats_to.write_bytes(body)

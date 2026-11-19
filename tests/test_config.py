@@ -11,11 +11,14 @@ may not have, so the Frame's own required values are required only on a client
 configured with one.
 """
 
+import re
 from pathlib import Path
 
 import pytest
 
+from arrt_player import config, pull
 from arrt_player.config import (
+    CACHE_DIR_NAMES,
     DEFAULT_UI_BIND,
     DEFAULT_UI_PORT,
     RETIRED_SETTINGS,
@@ -253,10 +256,10 @@ class TestWhatDefaults:
         """**The names a misspelling makes invisible.**
 
         These three are the whole of what `.env` says about the label surface, and
-        every other test in this plane builds its settings directly — so a misspelt
+        every other test in the Player builds its settings directly — so a misspelt
         key or a wrong default here would leave `epd_device` empty on a Pi that has
         a panel, `label_surface` would return None, and the heartbeat would report
-        a device with no panel. That is the exact distinction this plane was built
+        a device with no panel. That is the exact distinction the Player was built
         to draw, collapsed by a typo nothing else would catch.
         """
         panel = load(
@@ -336,9 +339,114 @@ class TestEachWallHasItsOwnDirectory:
         with pytest.raises(WallIdUnusable):
             load(an_environment(cache_dir)).wall(unusable)
 
+    @pytest.mark.parametrize("reserved", sorted(CACHE_DIR_NAMES | {pull.CLIENT_ETAG_FILENAME}))
+    def test_a_wall_id_that_names_a_file_the_client_keeps_beside_the_walls_is_refused(self, cache_dir: Path, reserved: str):
+        """A wall called `token_file` would put its manifest inside the television's pairing token."""
+        client = load(an_environment(cache_dir))
+
+        for spelling in (reserved, reserved.upper()):
+            with pytest.raises(WallIdUnusable):
+                client.wall(spelling)
+
+    def test_the_names_reserved_are_the_ones_the_client_writes(self, cache_dir: Path):
+        """The reserved set is read from the paths themselves, so a rename that leaves it behind turns this red."""
+        settings = load(an_environment(cache_dir))
+        written = {
+            settings.frame.tv_token_file,
+            settings.client_document_path,
+            store.path_in(cache_dir),
+        }
+
+        assert {path.relative_to(cache_dir).name for path in written} <= CACHE_DIR_NAMES
+        assert all(path.parent == cache_dir for path in written)
+
     @pytest.mark.parametrize("usable", ["3f2a9c1e-8b7d-4e6f-a1b2-c3d4e5f60718", "living-room", "w_1", "wall.v2"])
     def test_ids_the_server_mints_are_accepted(self, cache_dir: Path, usable: str):
         assert load(an_environment(cache_dir)).wall(usable).wall_dir == cache_dir / usable
+
+
+#: Every `*_SECONDS` key the configuration reads, from its own source, so a key added later is checked the day it is.
+SECONDS_KEYS = sorted(set(re.findall(r'"([A-Z][A-Z0-9_]*_SECONDS)"', Path(config.__file__).read_text(encoding="utf-8"))))
+
+
+def reading(cache_dir: Path, key: str, value: str) -> dict[str, str]:
+    """An environment in which `key` is read: the slideshow's own keys in slideshow mode, the rest on a Frame."""
+    if key.startswith("SLIDESHOW_"):
+        return a_slideshow(cache_dir, **{key: value})
+    return an_environment(cache_dir, **{key: value})
+
+
+class TestIntervalsAndTimeouts:
+    def test_the_keys_are_found(self):
+        """Not vacuous: the scan of the source finds the keys this was written for."""
+        assert {
+            "MANIFEST_POLL_SECONDS",
+            "BRIGHTNESS_INTERVAL_SECONDS",
+            "TV_UPLOAD_TIMEOUT_SECONDS",
+            "TV_UPLOAD_RETRY_SECONDS",
+            "TV_SELECT_CONFIRM_SECONDS",
+            "TV_CONNECT_TIMEOUT_SECONDS",
+            "TV_RETRY_MIN_SECONDS",
+            "TV_RETRY_MAX_SECONDS",
+            "SLIDESHOW_MIN_SECONDS",
+            "SLIDESHOW_MAX_SECONDS",
+        } <= set(SECONDS_KEYS)
+
+    @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "1e400"])
+    @pytest.mark.parametrize("key", SECONDS_KEYS)
+    def test_zero_a_negative_nan_and_infinity_are_refused_by_name(self, cache_dir: Path, key: str, value: str):
+        """`MANIFEST_POLL_SECONDS=0` spins the wall loop and the pull; NaN passes every check built on `<`."""
+        with pytest.raises(ConfigError, match=key):
+            load(reading(cache_dir, key, value))
+
+    @pytest.mark.parametrize("key", [key for key in SECONDS_KEYS if not key.startswith("SLIDESHOW_")])
+    def test_a_fraction_of_a_second_is_accepted(self, cache_dir: Path, key: str):
+        load(reading(cache_dir, key, "0.5"))
+
+
+class TestWhereTheSunIsSeenFrom:
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("LATITUDE", "nan"),
+            ("LATITUDE", "inf"),
+            ("LATITUDE", "90.5"),
+            ("LATITUDE", "-91"),
+            ("LONGITUDE", "nan"),
+            ("LONGITUDE", "-inf"),
+            ("LONGITUDE", "180.5"),
+            ("LONGITUDE", "-181"),
+        ],
+    )
+    def test_a_coordinate_off_the_globe_is_refused_by_name(self, cache_dir: Path, key: str, value: str):
+        with pytest.raises(ConfigError, match=key):
+            load(an_environment(cache_dir, **{key: value}))
+
+    @pytest.mark.parametrize(("latitude", "longitude"), [("90", "180"), ("-90", "-180"), ("0", "0")])
+    def test_the_edges_of_the_globe_are_on_it(self, cache_dir: Path, latitude: str, longitude: str):
+        frame = load(an_environment(cache_dir, LATITUDE=latitude, LONGITUDE=longitude)).frame
+
+        assert (frame.latitude, frame.longitude) == (float(latitude), float(longitude))
+
+    def test_a_measurement_that_is_not_finite_is_refused_by_name(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="EPD_VIEWING_DISTANCE_INCHES"):
+            load(an_environment(cache_dir, EPD_VIEWING_DISTANCE_INCHES="nan"))
+
+
+class TestTheNamesThePageAnswersTo:
+    def test_none_are_listed_by_default(self, cache_dir: Path):
+        assert load_ui(an_environment(cache_dir, frame=False)).allowed_hosts == frozenset()
+
+    def test_listed_names_are_read_lowercased_without_a_trailing_dot(self, cache_dir: Path):
+        ui = load_ui(an_environment(cache_dir, frame=False, UI_ALLOWED_HOSTS=" Wall.LAN., wall.example.com ,,::1"))
+
+        assert ui.allowed_hosts == {"wall.lan", "wall.example.com", "::1"}
+
+    @pytest.mark.parametrize("listed", ["http://wall.lan", "wall.lan:8771", "wall.lan/settings", "wall lan", "-wall.lan"])
+    def test_a_url_a_port_or_a_path_is_refused_by_name(self, cache_dir: Path, listed: str):
+        """Refused rather than reduced: `http://wall.lan` says the operator meant something this does not do."""
+        with pytest.raises(ConfigError, match="UI_ALLOWED_HOSTS"):
+            load_ui(an_environment(cache_dir, frame=False, UI_ALLOWED_HOSTS=listed))
 
 
 class TestTheStartupLine:
@@ -734,12 +842,19 @@ class TestAScreensBrightness:
         load(an_environment(cache_dir, SCREEN_BRIGHTNESS="off", SCREEN_MIN_BRIGHTNESS="60", SCREEN_MAX_BRIGHTNESS="50"))
 
     def test_an_interval_the_frame_accepts_is_accepted_for_the_screens(self, cache_dir: Path):
-        """One key, read one way: a Frame on `BRIGHTNESS_INTERVAL_SECONDS=0` started before this existed."""
-        settings = load(an_environment(cache_dir, BRIGHTNESS_INTERVAL_SECONDS="0"))
+        """One key, read one way: what a Frame accepts the screens accept, and what one refuses both refuse.
+
+        Zero was once accepted here, for a Frame that started on it before the
+        screens read the key; it is refused now for both, since it is an interval
+        that never waits (`TestIntervalsAndTimeouts`)."""
+        settings = load(an_environment(cache_dir, BRIGHTNESS_INTERVAL_SECONDS="0.5"))
 
         assert settings.frame is not None
-        assert settings.frame.brightness_interval_seconds == 0
-        assert settings.screen_brightness.interval_seconds == 0
+        assert settings.frame.brightness_interval_seconds == 0.5
+        assert settings.screen_brightness.interval_seconds == 0.5
+        for frame in (True, False):
+            with pytest.raises(ConfigError, match="BRIGHTNESS_INTERVAL_SECONDS"):
+                load(an_environment(cache_dir, frame=frame, BRIGHTNESS_INTERVAL_SECONDS="0"))
 
     def test_the_frame_and_the_screens_read_one_location(self, cache_dir: Path):
         settings = load(an_environment(cache_dir, LOCATION_REGION="Montana"))

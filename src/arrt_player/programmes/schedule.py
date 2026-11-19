@@ -8,7 +8,7 @@ republished feed and an hour off the network all come to the same thing: the
 wall shows what the schedule says, as soon as the display lets it.
 
 **What to show** (`what_to_show`) is `player-contract.md` § Time and § Scenes,
-held to `contract/vectors/schedule.json` by this plane's suite:
+held to `contract/vectors/schedule.json` by the Player's suite:
 
 * an active scene wins, at its own absolute times, and is never moved;
 * otherwise the instant is moved into the horizon by whole horizons — forward
@@ -48,7 +48,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Final, Protocol
 
-from arrt_player.compose import Geometry, Uncomposable, compose, composed_path, mat_mode
+from arrt_player.compose import Geometry, Uncomposable, compose, composed_path, is_intact, mat_mode
 from arrt_player.episodes import ReportOnce
 from arrt_player.logs import work_context
 from arrt_player.manifest import Feed
@@ -155,6 +155,12 @@ class Schedule:
         self._composing: tuple[asyncio.Task[Path], _Planned] | None = None
         #: Composed files that failed: when, and whether a retry can help.
         self._failed: dict[Path, tuple[float, bool]] = {}
+        #: Composed files found whole, by the file's size and modification time:
+        #: each is read once, and again only if the file changes under its name.
+        #: An entry goes when this schedule removes its file (the tidy, or
+        #: `_intact` finding it damaged) or finds it gone, so the works a wall
+        #: rotates through do not each leave one behind.
+        self._verified: dict[Path, tuple[int, int]] = {}
         #: Whether the composed directory owes a tidy, and the geometry it was last
         #: tidied for: a new feed or a new geometry owes one, done between
         #: compositions.
@@ -287,8 +293,9 @@ class Schedule:
                     extra={"event": "schedule.media_missing", "wall_id": self._wall_id, "master_path": str(planned.master)},
                 )
             return False
-        if not picture.path.is_file():
-            # Composing, or queued to be, or failed and said so once already.
+        if not self._intact(picture.path):
+            # Composing, or queued to be, or failed and said so once already;
+            # or found damaged and removed, so owed again.
             return False
         refused = self._refused
         return refused is None or refused[0] != picture.work_id or self._clock.monotonic() - refused[1] >= RETRY_SECONDS
@@ -380,7 +387,7 @@ class Schedule:
 
     def _owed(self, planned: _Planned) -> bool:
         """Whether this work still needs composing: its master is here, its picture is not, and it has not just failed."""
-        if planned.composed.is_file() or not planned.master.is_file():
+        if not planned.master.is_file() or self._intact(planned.composed):
             return False
         failed = self._failed.get(planned.composed)
         if failed is None:
@@ -388,17 +395,55 @@ class Schedule:
         at, retryable = failed
         return retryable and self._clock.monotonic() - at >= COMPOSE_RETRY_SECONDS
 
+    def _intact(self, path: Path) -> bool:
+        """Whether a whole composed picture is at `path`; a damaged one is removed, so the work is owed again.
+
+        **A file under its final name is not yet a picture**: power lost after
+        the rename can leave it empty or cut short, and its name (the master,
+        the mat, the screen) is the same for as long as the feed is, so nothing
+        else would ever replace it. A composed file is derived, never kept as
+        the only copy, so the remedy is to compose it again. Each file is read
+        once, and again only if its size or time change.
+        """
+        try:
+            status = path.stat()
+        except OSError:
+            self._verified.pop(path, None)
+            return False
+        if not path.is_file():
+            return False
+        stamp = (status.st_size, status.st_mtime_ns)
+        if self._verified.get(path) == stamp:
+            return True
+        if status.st_size > 0 and is_intact(path):
+            self._verified[path] = stamp
+            return True
+        self._verified.pop(path, None)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            self._say_tidy_failed(exc)
+            return False
+        log.warning(
+            "the composed picture %s was empty or damaged and was removed; it will be composed again",
+            path.name,
+            extra={"event": "schedule.composed_damaged", "wall_id": self._wall_id, "composed_path": str(path)},
+        )
+        return False
+
     def _collect(self, task: asyncio.Task[Path], planned: _Planned) -> None:
         """Read a finished composition. A failure costs its work, never the wall, and is said once."""
         exc = task.exception()
         if exc is None:
             return
-        retryable = isinstance(exc, OSError)
+        retryable = isinstance(exc, OSError) or (isinstance(exc, Uncomposable) and exc.transient)
         first_time = planned.composed not in self._failed
         self._failed[planned.composed] = (self._clock.monotonic(), retryable)
         if not first_time:
             return
-        if isinstance(exc, Uncomposable):
+        if isinstance(exc, Uncomposable) and exc.transient:
+            reason, event = f"{exc}; it will be tried again", "schedule.compose_read_failed"
+        elif isinstance(exc, Uncomposable):
             reason, event = str(exc), "schedule.uncomposable"
         elif retryable:
             reason, event = f"its picture could not be written ({exc})", "schedule.compose_write_failed"
@@ -447,6 +492,9 @@ class Schedule:
             except OSError as exc:
                 self._say_tidy_failed(exc)
                 return
+            # Forgotten with the file: `_intact` is never asked about it again,
+            # so its entry would otherwise outlive it for the life of the process.
+            self._verified.pop(path, None)
             removed += 1
         if removed:
             log.info(

@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 overrides = [
     { name = "it8951", extras = ["rpi"], git = "https://github.com/GregDMeyer/IT8951.git?rev=9f136139378f74e17d9972d7165dc6ae53a2568e" },
     { name = "jetson-gpio", marker = "sys_platform == 'never'" },
+    { name = "waveshare-epd", git = "https://github.com/mendhak/waveshare-epaper-sample.git?subdirectory=RaspberryPi_JetsonNano%2Fpython&rev=2587516a8ad32b3ef4f7829212d962eb0679006b" },
 ]
 build-constraints = [{ name = "cython", specifier = ">=3.0,<4" }]
 
@@ -1357,7 +1358,7 @@ wheels = [
 [[package]]
 name = "waveshare-epd"
 version = "0.0.0"
-source = { git = "https://github.com/mendhak/waveshare-epaper-sample.git?subdirectory=RaspberryPi_JetsonNano%2Fpython#2587516a8ad32b3ef4f7829212d962eb0679006b" }
+source = { git = "https://github.com/mendhak/waveshare-epaper-sample.git?subdirectory=RaspberryPi_JetsonNano%2Fpython&rev=2587516a8ad32b3ef4f7829212d962eb0679006b#2587516a8ad32b3ef4f7829212d962eb0679006b" }
 dependencies = [
     { name = "jetson-gpio", marker = "sys_platform == 'never'" },
     { name = "pillow" },

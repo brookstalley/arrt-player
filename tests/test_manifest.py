@@ -1,4 +1,4 @@
-"""What this plane will and will not act on, and what it keeps when it refuses."""
+"""What the Player will and will not act on, and what it keeps when it refuses."""
 
 import json
 import logging
@@ -177,7 +177,7 @@ class TestWatching:
         assert "manifest.not_text" in {r.__dict__.get("event") for r in caplog.records}
 
     def test_a_manifest_that_has_never_appeared_is_not_an_error(self, wall_dir: Path, caplog):
-        """A plane that has not published yet is a normal state on a fresh install,
+        """A server that has not published yet is a normal state on a fresh install,
         and this one holding still until it does is the availability norm working."""
         watcher = a_watcher(wall_dir)
 
@@ -213,12 +213,12 @@ class TestWatching:
 
 
 class TestAnUnreadableManifestIsSaidOnce:
-    """The third instance of a class this plane has fixed twice already.
+    """The third instance of a class the Player has fixed twice already.
 
     The faults that reach the `OSError` arm do not clear on their own — EIO from a
     failing card, EACCES, ESTALE on a dropped mount — so at a one-second poll an
     unguarded WARNING is 86,400 identical lines a day, into a journal that
-    rate-limits and whose dropped lines are the ERRORs this plane depends on.
+    rate-limits and whose dropped lines are the ERRORs the Player depends on.
     """
 
     def test_a_persistent_stat_failure_is_reported_once(self, tmp_path, caplog, monkeypatch):

@@ -1,6 +1,6 @@
-"""The display plane's log shape, and the work id every line about a work carries.
+"""The Player's log shape, and the work id every line about a work carries.
 
-**This plane's failure is silent by construction, and more completely so than its
+**The Player's failure is silent by construction, and more completely so than its
 sibling's**: it runs unattended on a Pi under systemd, its only output is a
 picture on a wall, and a stalled daemon looks exactly like a working one showing
 a static image. Nobody is watching a terminal. The journal is the whole signal.
@@ -19,8 +19,8 @@ through every call site that might log is a discipline, and one forgotten call
 site defeats a discipline — the lines that go missing that way are the ones
 logged from inside a failure, which are the ones worth having.
 
-Deliberately a sibling of the curation plane's module of the same name rather
-than a shared one: the two planes share no code by ratified norm, and this file
+Deliberately a sibling of the server's module of the same name rather
+than a shared one: the Player and the server share no code by ratified norm, and this file
 is the cheapest possible thing to keep in two places.
 """
 
@@ -72,7 +72,7 @@ class WorkCorrelationFilter(logging.Filter):
     A filter rather than a formatter concern: the id belongs to the record, so
     anything that later formats or routes it can see it. Never rejects a record —
     a log filter that dropped lines would make the absence of a signal mean two
-    different things, and absence is already this plane's signal for a dead loop.
+    different things, and absence is already the Player's signal for a dead loop.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -114,20 +114,26 @@ class JsonFormatter(logging.Formatter):
 #: rather than evicting handlers it knows nothing about.
 _INSTALLED: Final[str] = "_display_log_handler"
 
-#: The television client's logger, floored at WARNING in `configure` because it
-#: writes the pairing token at INFO. Named here rather than inline so the reason
-#: travels with the name.
-_TELEVISION_CLIENT: Final[str] = "samsungtvws"
+#: The loggers floored at WARNING in `configure`, because each writes the
+#: television's pairing token below it. Named here rather than inline so the
+#: reason travels with the name:
+#:
+#: - `samsungtvws`, the television client, writes `New token %s` at INFO on
+#:   every pairing.
+#: - `websockets`, which carries the art channel, writes `> GET %s HTTP/1.1` at
+#:   DEBUG through `websockets.client` (`ClientProtocol.send_request`), and the
+#:   path it names ends `&token=…`. Its request headers follow at the same level.
+_TELEVISION_LOGGERS: Final[tuple[str, ...]] = ("samsungtvws", "websockets")
 
-#: The level the client's own logging is held at or above. **WARNING, not INFO,
-#: and the difference is the whole point**: the token line is emitted at INFO, so
+#: The level those loggers are held at or above. **WARNING, not INFO, and the
+#: difference is the whole point**: the client's token line is emitted at INFO, so
 #: a floor of INFO permits exactly what it was written to prevent. Nothing below
-#: WARNING in that library says anything this plane's own events do not.
+#: WARNING in either library says anything the Player's own events do not.
 _TELEVISION_CLIENT_FLOOR: Final[int] = logging.WARNING
 
 
 def configure(level: int = logging.INFO) -> None:
-    """Install the plane's log shape on the root logger.
+    """Install the Player's log shape on the root logger.
 
     Called once, from the entry point. Calling it twice replaces the handler from
     the first call rather than adding a second, so lines cannot start arriving in
@@ -161,5 +167,8 @@ def configure(level: int = logging.INFO) -> None:
     # This floor read INFO until 2026-08-07, which permitted precisely the line it
     # was written to stop; the belief that the token was a DEBUG line was never
     # checked against the pinned fork. The lesson is cheap and general: a guard
-    # aimed at a specific line has to be verified against that line.
-    logging.getLogger(_TELEVISION_CLIENT).setLevel(max(level, _TELEVISION_CLIENT_FLOOR))
+    # aimed at a specific line has to be verified against that line. The
+    # websocket library's handshake line is the same leak one level lower, held
+    # only while nobody configured DEBUG.
+    for name in _TELEVISION_LOGGERS:
+        logging.getLogger(name).setLevel(max(level, _TELEVISION_CLIENT_FLOOR))

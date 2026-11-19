@@ -528,6 +528,186 @@ async def test_a_stopped_wall_is_not_restarted(client, server, drm):
     assert calls == ["living-room"]
 
 
+# -- outputs that come and go under one document ---------------------------------------------
+
+
+class Answers:
+    """The real client link, recording what each fetch answered: a document, or None for a 304."""
+
+    def __init__(self, link: ClientPull) -> None:
+        self._link = link
+        self.answers: list[ClientDocument | None] = []
+
+    def cached(self) -> ClientDocument | None:
+        return self._link.cached()
+
+    async def fetch(self) -> ClientDocument | None:
+        answer = await self._link.fetch()
+        self.answers.append(answer)
+        return answer
+
+    async def report(self, heartbeat) -> bool:
+        return await self._link.report(heartbeat)
+
+    async def close(self) -> None:
+        await self._link.close()
+
+
+async def test_a_connector_listed_after_the_document_gets_its_wall_while_the_server_answers_304(client, server, tmp_path):
+    """**A card the kernel enumerates after the Player starts.** The document placed
+    the wall before its output existed here, and the server has nothing new to say,
+    so only the outputs changing can start it."""
+    without_frame = replace(client, frame=None)
+    server.unassign("living-room")
+    server.assign("hall", "hdmi-a-1")
+    drm = drm_tree(tmp_path / "late", {})
+    link = Answers(ClientPull(without_frame))
+    supervisor = supervisor_for(without_frame, drm, worker=_idle, link=link)
+    try:
+        await supervisor.cycle()
+        assert supervisor.running == {}, "a wall started on an output this client did not list"
+
+        drm_tree(drm, {"card1-HDMI-A-1": ("connected", "1920x1080\n")})
+        for _ in range(3):
+            await supervisor.cycle()
+
+        assert link.answers[0] is not None
+        assert link.answers[1:] == [None, None, None], "the server sent a new document, so this proves nothing"
+        assert supervisor.running == {"hall": "hdmi-a-1"}
+    finally:
+        await supervisor.stop_all()
+        await link.close()
+
+
+async def test_a_connector_the_kernel_stops_listing_stops_its_wall_unretired_and_its_return_starts_it(
+    client, server, drm, connectors
+):
+    """A connector gone from sysfs is a driver going away, not the curator moving the
+    wall: the worker stops, the screen is not drawn black, and the wall is back on
+    the connector once it is listed again, with the server sending nothing new."""
+    server.unassign("living-room")
+    server.assign("hall", "hdmi-a-1")
+    server.publish("h1", wall_id="hall")
+    hidden = drm.parent / "hidden-HDMI-A-1"
+
+    async with Running(supervisor_for(client, drm)) as supervisor:
+        await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="the wall to be drawn")
+        drawn = len(connectors["hdmi-a-1"].shown)
+
+        (drm / "card1-HDMI-A-1").rename(hidden)
+        await eventually(lambda: supervisor.running == {}, what="the wall on the vanished connector to stop")
+        hidden.rename(drm / "card1-HDMI-A-1")
+        await eventually(lambda: supervisor.running == {"hall": "hdmi-a-1"}, what="the wall to start again")
+        await eventually(lambda: len(connectors["hdmi-a-1"].shown) > drawn, what="the wall to draw again")
+
+    assert connectors["hdmi-a-1"].blanked == [], "a connector the driver dropped was drawn black as if its wall had left"
+
+
+# -- a screen its wall has left goes dark ----------------------------------------------------
+
+
+@pytest.fixture
+def connectors(monkeypatch) -> dict[str, RecordingOutput]:
+    """Every screen output the entry point builds, by connector, one per connector as the card is one per process."""
+    built: dict[str, RecordingOutput] = {}
+    monkeypatch.setattr(entry, "screen_output", lambda wall, output: built.setdefault(output, RecordingOutput()))
+    return built
+
+
+def _on_hdmi_a_1(server: ServerDouble) -> None:
+    server.unassign("living-room")
+    server.assign("hall", "hdmi-a-1")
+    server.publish("h1", "h2", wall_id="hall")
+
+
+async def test_a_screen_wall_taken_away_draws_its_screen_black_once(client, server, drm, connectors):
+    _on_hdmi_a_1(server)
+
+    async with Running(supervisor_for(client, drm)) as supervisor:
+        await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="the wall to be drawn")
+        server.unassign("hall")
+        await eventually(lambda: supervisor.running == {}, what="the worker to stop")
+        await eventually(lambda: connectors["hdmi-a-1"].blanked, what="the screen to be drawn black")
+        await asyncio.sleep(0.15)  # several more polls of the same document
+
+    assert connectors["hdmi-a-1"].blanked == [len(connectors["hdmi-a-1"].shown)], "black not drawn once, after the art"
+
+
+async def test_a_screen_wall_moved_to_another_connector_draws_the_old_one_black(client, server, drm, connectors):
+    _on_hdmi_a_1(server)
+
+    async with Running(supervisor_for(client, drm)) as supervisor:
+        await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="the wall to be drawn")
+        server.assign("hall", "hdmi-a-2")
+        await eventually(lambda: supervisor.running == {"hall": "hdmi-a-2"}, what="the move")
+        await eventually(lambda: "hdmi-a-2" in connectors and connectors["hdmi-a-2"].shown, what="the new screen to draw")
+
+    assert len(connectors["hdmi-a-1"].blanked) == 1, "the connector the wall left kept its picture"
+    assert connectors["hdmi-a-2"].blanked == [], "the client stopping drew the wall's new screen black"
+
+
+async def test_a_connector_handed_to_another_wall_is_black_before_the_new_walls_first_picture(client, server, drm, connectors):
+    _on_hdmi_a_1(server)
+    server.publish("p1", wall_id="porch")
+
+    async with Running(supervisor_for(client, drm)) as supervisor:
+        await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="the wall to be drawn")
+        by_hall = len(connectors["hdmi-a-1"].shown)
+        server.unassign("hall")
+        server.assign("porch", "hdmi-a-1")
+        await eventually(lambda: supervisor.running == {"porch": "hdmi-a-1"}, what="the handover")
+        await eventually(lambda: len(connectors["hdmi-a-1"].shown) > by_hall, what="the new wall to draw")
+
+    output = connectors["hdmi-a-1"]
+    assert output.blanked == [by_hall], "black was not drawn between the two walls' pictures"
+    assert output.shown[by_hall].parent == client.cache_dir / "porch" / COMPOSED_DIRNAME
+
+
+async def test_a_client_stopping_leaves_its_screens_as_they_are(client, server, drm, connectors):
+    """The S5 decision: a Player merely stopping is no wall leaving its screen."""
+    _on_hdmi_a_1(server)
+
+    async with Running(supervisor_for(client, drm)):
+        await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="the wall to be drawn")
+
+    assert connectors["hdmi-a-1"].blanked == []
+
+
+async def test_a_wall_taken_away_while_its_worker_waits_to_restart_still_draws_its_screen_black(client, server, drm, connectors):
+    """**The gap a worker's own tidy-up cannot reach.** The worker drew, then crashed,
+    and the wall is taken away during the wait before its restart: no worker is
+    running to see the stop, so it is called once more, already stopped, to draw
+    black and do nothing else."""
+    _on_hdmi_a_1(server)
+    stops_at_entry: list[bool] = []
+    crashed: list[str] = []
+
+    async def draws_then_crashes(wall, output, stop):
+        stops_at_entry.append(stop.is_set())
+        if len(stops_at_entry) > 1:
+            await entry.run_wall(client, wall, output, stop)
+            return
+        ending = asyncio.Event()
+        worker = asyncio.create_task(entry.run_wall(client, wall, output, ending))
+        await eventually(lambda: "hdmi-a-1" in connectors and connectors["hdmi-a-1"].shown, what="the wall to be drawn")
+        ending.set()
+        await worker
+        # Nothing between this and the supervisor's wait yields, so a test that
+        # sees it sees the supervisor waiting.
+        crashed.append(wall.wall_id)
+        raise RuntimeError("the pull died on a full disk")
+
+    # A restart wait far longer than the test, so the stop lands inside it.
+    supervisor = supervisor_for(client, drm, worker=draws_then_crashes, restart_min_seconds=60, restart_max_seconds=60)
+    async with Running(supervisor):
+        await eventually(lambda: crashed, what="the worker to draw and crash")
+        server.unassign("hall")
+        await eventually(lambda: connectors["hdmi-a-1"].blanked, what="the screen to be drawn black")
+
+    assert stops_at_entry == [False, True], "the worker was not called once more, already stopped"
+    assert len(connectors["hdmi-a-1"].blanked) == 1
+
+
 # -- the outputs ---------------------------------------------------------------------------
 
 
@@ -886,6 +1066,28 @@ async def test_a_crashed_renderer_is_logged_and_started_again(client, server, dr
     crashes = [record for record in caplog.records if record.__dict__.get("event") == "client.label_crashed"]
     assert len(crashes) == 1
     assert crashes[0].__dict__.get("label_id") == "label-1"
+
+
+async def test_a_label_unmapped_while_its_renderer_waits_to_restart_is_called_once_more_retired(client, server, drm):
+    """The walls' gap, for a label: no renderer is running to see the mapping go, so
+    it is called once more, already stopped and retired, to leave its panel blank."""
+    calls: list[tuple[bool, bool]] = []
+    crashed: list[str] = []
+
+    async def crashes_first(assignment, stop, retired):
+        calls.append((stop.is_set(), retired.is_set()))
+        if len(calls) == 1:
+            crashed.append(assignment.label_id)
+            raise RuntimeError("the panel's driver raised something nobody predicted")
+
+    server.map_label("label-1", "epd-0", "living-room", LABEL_DOCUMENT)
+    supervisor = with_a_panel(client, drm, crashes_first, restart_min_seconds=60, restart_max_seconds=60)
+    async with Running(supervisor):
+        await eventually(lambda: crashed, what="the renderer to crash")
+        server.unmap_label("label-1")
+        await eventually(lambda: len(calls) == 2, what="the renderer to be called once more")
+
+    assert calls == [(False, False), (True, True)]
 
 
 async def test_the_client_heartbeat_reports_the_panel_and_a_client_without_one_reports_no_label_outputs(client, server, drm):

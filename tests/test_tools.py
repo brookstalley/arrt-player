@@ -602,7 +602,13 @@ def mpv_check(monkeypatch):
     monkeypatch.setattr(
         module,
         "MpvOutput",
-        partial(mpv.MpvOutput, command=(sys.executable, str(fake)), drm_root=drm, dev_root=scratch / "dev"),
+        partial(
+            mpv.MpvOutput,
+            command=(sys.executable, str(fake)),
+            drm_root=drm,
+            dev_root=scratch / "dev",
+            environment_names=(*mpv.MPV_ENVIRONMENT, "FAKE_MPV_BEHAVIOUR"),
+        ),
     )
     monkeypatch.setattr(module, "time", ToolClock())
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))

@@ -124,7 +124,7 @@ MOCHE: Final[dict[str, str]] = {
 #: gained `display_nationality` and a curator shortened it (2026-08-13).
 #:
 #: **The short form is what appears here because it is what the manifest carries**:
-#: curation resolves the fallback when it builds the manifest, so this plane never
+#: curation resolves the fallback when it builds the manifest, so the Player never
 #: sees the long string. The long one is still in the catalogue, where it is the
 #: provenance rather than typography.
 KANDINSKY: Final[dict[str, str]] = {

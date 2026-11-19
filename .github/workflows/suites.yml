@@ -11,6 +11,14 @@
 # exactly the directories that cannot import, and every one of them is run by
 # another job.
 #
+# EVERYTHING IS PINNED. Each `uses:` names a commit, its tag in the comment after
+# it, because a tag moves and a commit does not; `setup-uv` names the uv (the
+# server's) and the Python (the Pi's, 3.13.5, `platform-and-dependency-findings.md`),
+# set here rather than by a `.python-version` file, which would move the Pi's
+# interpreter too; and every `uv run` and `uv sync` is `--locked`, so a lockfile
+# out of step with `pyproject.toml` fails the job instead of being rewritten under
+# it. `tests/test_ci_scope.py` reads all three from this file.
+#
 # LINT IS ITS OWN JOB, because a lint failure and a test failure want different
 # fixes, and folding them together reports a formatting nit as a broken suite.
 
@@ -35,10 +43,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with:
           enable-cache: true
+          version: "0.11.32"
+          python-version: "3.13.5"
       - name: Run the suite
         # `--ignore=tests/raster` because that directory `importorskip`s the
         # `raster` group, a default
@@ -52,7 +62,7 @@ jobs:
         # Nothing here reaches a television. The set is behind an abstract base
         # and the suite drives a double, which is why this leg can run on a
         # GitHub runner at all.
-        run: uv run pytest tests --ignore=tests/raster -v --junitxml=results.xml
+        run: uv run --locked pytest tests --ignore=tests/raster -v --junitxml=results.xml
       - name: Fail if nothing actually ran
         if: always()
         run: python3 .github/scripts/assert_tests_ran.py results.xml
@@ -74,10 +84,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with:
           enable-cache: true
+          version: "0.11.32"
+          python-version: "3.13.5"
       - name: Install the text stack the typesetter builds and renders against
         # Two unrelated needs, and missing either one fails in a way that blames
         # this code for the machine it ran on.
@@ -112,7 +124,7 @@ jobs:
             pkg-config \
             fonts-dejavu-core
       - name: Run the typesetting tests
-        run: uv run --group raster pytest tests/raster -v --junitxml=results.xml
+        run: uv run --locked --group raster pytest tests/raster -v --junitxml=results.xml
       - name: Fail if nothing actually ran
         # The guard matters more here than on any other leg. These tests skip
         # themselves when the group is absent, so a mis-provisioned job reports a
@@ -125,11 +137,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
         with:
           enable-cache: true
+          version: "0.11.32"
+          python-version: "3.13.5"
       - name: ruff and black
         run: |
-          uv run ruff check .
-          uv run black --check .
+          uv run --locked ruff check .
+          uv run --locked black --check .

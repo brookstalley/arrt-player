@@ -1,7 +1,7 @@
-"""The heartbeat this plane writes, and the atomicity curation's polling needs.
+"""The heartbeat the Player writes, and the atomicity curation's polling needs.
 
-The cross-plane half, that the Player reports the instant under the key Arrt
-reads, is `test_heartbeat_key.py`, which holds this plane's constant to the
+The half that spans the Player and the server, that the Player reports the instant under the key Arrt
+reads, is `test_heartbeat_key.py`, which holds the Player's constant to the
 contract's `instant_key`; Arrt holds its readers to the same key in its own
 suite. What is pinned here is the shape and the atomicity.
 """
@@ -81,7 +81,7 @@ class TestWhatItSays:
         assert document["announced_content_id"] == "MY_F1201"
         assert document["television_showing_art"] is True
 
-    def test_a_plane_that_knows_nothing_yet_says_so_rather_than_inventing(self, tmp_path: Path):
+    def test_a_player_that_knows_nothing_yet_says_so_rather_than_inventing(self, tmp_path: Path):
         """Nulls, not zeroes and not `false`. "Not yet known" is a real answer here."""
         write(tmp_path, Health(), wall_id=WALL, reported_at=WHEN)
 
@@ -100,7 +100,7 @@ class TestWhatItSays:
         assert document["label_surface_working"] is None
 
     def test_the_last_error_survives_a_good_pass(self, tmp_path: Path):
-        """Held by the caller, so a plane failing every other minute cannot look fine."""
+        """Held by the caller, so a Player failing every other minute cannot look fine."""
         write(tmp_path, Health(last_error="the television refused the art channel"), wall_id=WALL, reported_at=WHEN)
 
         document = json.loads((tmp_path / HEARTBEAT_FILENAME).read_text())
@@ -139,7 +139,7 @@ class TestWritingItSafely:
 
     def test_a_reader_never_sees_a_partial_document(self, tmp_path: Path):
         """Curation polls this on its own schedule, so a truncating write would
-        show it half a file — which it correctly reports as this plane being
+        show it half a file — which it correctly reports as the Player being
         broken. Asserted by reading between every write in a long run."""
         for version in range(25):
             write(tmp_path, Health(manifest_schema=f"1.{version}"), wall_id=WALL, reported_at=WHEN)

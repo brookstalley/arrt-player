@@ -15,23 +15,32 @@ Library/Programming split perhaps another host. The client's token is sent to
 the server's own origin only.
 
 **The cache is the only thing a wall renders from.** A worker's watcher reads
-`CACHE_DIR/<wall id>/manifest.json`, and this module writes that file only once
+`CACHE_DIR/<wall id>/manifest.json`, and this module writes that file once
 every master it names has been fetched and checked against its hash, or
-answered for (`_adopt_feed`). So a server that goes away changes nothing about
+answered for, or once a master that keeps failing has been waited for as long
+as `MEDIA_HOLD_SECONDS` (`_adopt_feed`). So a server that goes away changes nothing about
 what is on the wall: the last good manifest stays, and so do its masters. The client document is kept the same way,
-so a client restarted while the server is down still knows its walls.
+so a client restarted while the server is down still knows its walls, and so is each label document, so a
+label restarted then still captions for what is left of the rule's hold (`LabelPull.cached`).
 
 **Every failure keeps the cache** (`player-contract.md` § Transport). A transport
 error, a timeout or a `5xx` means the server is unreachable: back off and try
 again. `401`, `403` and a `404` on the wall at every major this Player reads
-are configuration errors. A master whose bytes do not match its hash, or that
-answers `404`, is not cached, and the rest of the wall goes on. Each is said once in the
+are configuration errors. A master whose bytes do not match its hash, that runs
+past the size its feed declares, or that answers `404`, is not cached, and the
+rest of the wall goes on. Each is said once in the
 journal when it starts and once when it ends. None names the token.
+
+**Nothing the server sends is read without a bound.** A master is streamed to
+disk under a running hash and stopped at the size its feed declares; the client
+and label documents are read up to `DOCUMENT_MAX_BYTES`.
 
 **The heartbeat rides along.** Each worker goes on writing its wall's heartbeat
 file into the wall's cache (`WallSettings.heartbeat_root` says why there), and
-this module POSTs it whenever it holds a report not yet sent, so a worker needs
-no second way of reporting.
+this module POSTs it whenever it holds a report not yet sent, every poll
+interval while the server answers, so a worker needs no second way of
+reporting. A report the server refuses with a `4xx` is sent again only once it
+changes; one it fails with a `5xx` is sent again on the next poll.
 """
 
 import asyncio
@@ -43,6 +52,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import Enum
 from http import HTTPStatus
 from pathlib import Path
@@ -52,7 +62,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 
 from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
-from arrt_player.config import CACHED_MANIFEST_FILENAME, ClientSettings, WallSettings
+from arrt_player.config import CACHED_MANIFEST_FILENAME, PLAIN_COMPONENT, ClientSettings, WallSettings
 from arrt_player.episodes import ReportOnce
 from arrt_player.heartbeat import path_in as heartbeat_path_in
 from arrt_player.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
@@ -73,6 +83,19 @@ ETAG_FILENAME: Final[str] = "manifest.etag"
 #: Beside the cached client document, for the same reason.
 CLIENT_ETAG_FILENAME: Final[str] = ".client.etag"
 
+#: Directly under `CACHE_DIR`: one file per label this client renders, named by
+#: its id, holding the last label document accepted for it. **A leading dot**,
+#: as the client document has, so no wall's directory can take the name.
+LABEL_CACHE_DIRNAME: Final[str] = ".labels"
+
+#: How often a cached label document's file is stamped with the instant the
+#: server last answered for it, while the server goes on answering and sends
+#: nothing new. The stamp is the file's modification time, and it is what a
+#: restarted renderer runs the rule's hold from, so it is never later than the
+#: last answer and at most this much earlier: a hold after a restart ends up to
+#: a minute early, never late. Stamping every poll would be a write a second.
+LABEL_ANSWER_STAMP_SECONDS: Final[float] = 60.0
+
 
 #: How long to wait before asking again after the server could not be reached,
 #: doubling to the ceiling and reset on the next answer.
@@ -89,7 +112,33 @@ BACKOFF_MAX_SECONDS: Final[float] = 60.0
 #: kept because the next one is served beside major 2 the same way.
 HIGHER_MAJOR_SECONDS: Final[float] = 60.0
 
+#: How long a new feed waits for a master that fails for a reason that may
+#: clear (a `5xx`, a timeout, a dropped connection) before it is cached without
+#: it, as a master that answers `404` is at once. The wait exists so a feed is
+#: not adopted half-fetched over a blip; its end is what keeps one master that
+#: will not download from holding back the wall's schedule, scene and staging
+#: for good. The master is asked for again on every later poll until it arrives.
+MEDIA_HOLD_SECONDS: Final[float] = 10 * 60.0
+
+#: The most of a client or label document this Player reads. Each is a few
+#: kilobytes; the bound is what stops a server, or anything answering in its
+#: place, from filling the Pi's memory with one.
+DOCUMENT_MAX_BYTES: Final[int] = 1024 * 1024
+
+#: How much of a body is read at a time.
+_CHUNK_BYTES: Final[int] = 64 * 1024
+
+#: A master's own timeout, in place of the session's total. A master is bounded
+#: by the size its feed declares, and a large one over slow Wi-Fi can take longer
+#: than any total that suits a manifest; what ends a download that has stalled is
+#: thirty seconds with no bytes.
+_MEDIA_TIMEOUT: Final = aiohttp.ClientTimeout(total=None, connect=10, sock_read=30)
+
 _UNREACHABLE: Final = (aiohttp.ClientError, asyncio.TimeoutError, OSError)
+
+
+class DocumentTooLarge(ValueError):
+    """A document the server sent runs past `DOCUMENT_MAX_BYTES`."""
 
 
 class _Poll(Enum):
@@ -145,7 +194,20 @@ class Pull:
         self._unreadable = ReportOnce()
         self._heartbeat_failing = ReportOnce()
         self._media_failing = ReportOnce()
+        self._hold_ran_out = ReportOnce()
         self._skipped: set[str] = set()
+        #: When the feed was first held for a master that may yet arrive, or
+        #: None while nothing is being held. One wait for the episode, not one
+        #: per document: a server republishing every minute must not restart it.
+        self._held_since: float | None = None
+        #: The hashes of the masters that failed on the last poll, which are
+        #: asked for after the rest, so one slow master never keeps the others out.
+        self._failing: set[str] = set()
+        #: Whether the last manifest poll was answered, which is when the heartbeat goes.
+        self._server_heard = False
+        #: The stamp of the cached manifest last read and found good, so its
+        #: ETag is vouched for without parsing it on every poll.
+        self._etag_vouched: tuple[int, int] | None = None
 
     # -- the loop ---------------------------------------------------------------------------
 
@@ -166,26 +228,54 @@ class Pull:
         )
         timeout = aiohttp.ClientTimeout(total=60, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            while not stop.is_set():
-                reachable = await self.cycle(session)
-                wait = self._interval if reachable else self._next_backoff()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=wait)
+            heartbeats = asyncio.create_task(self._heartbeats(session, stop), name=f"heartbeat:{self._settings.wall_id}")
+            try:
+                while not stop.is_set():
+                    polled = await self._poll(session)
+                    wait = self._interval if polled is _Poll.ANSWERED else self._next_backoff()
+                    await _rest(stop, wait, heartbeats)
+                    if heartbeats.done():
+                        # Re-raises a heartbeat loop that crashed, so the pull
+                        # ends failed rather than polling on without being heard.
+                        heartbeats.result()
+            finally:
+                heartbeats.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeats
 
     async def cycle(self, session: aiohttp.ClientSession) -> bool:
         """One poll: the manifest, then the heartbeat. False when the next poll should back off.
 
-        **Backing off and being heard are separate.** A render that keeps
-        failing backs the manifest poll off, but the server's manifest route just
-        answered, so the heartbeat still goes: the health panel must not report a
-        live Player as silent because one render will not download.
+        `run` does the same on two clocks, the manifest poll's and the
+        heartbeat's, so a backoff never delays a report.
         """
-        polled = await self._pull_manifest(session)
-        if polled is not _Poll.UNREACHABLE:
+        polled = await self._poll(session)
+        if self._server_heard:
             await self._forward_heartbeat(session)
+        return polled is _Poll.ANSWERED
+
+    async def _poll(self, session: aiohttp.ClientSession) -> _Poll:
+        polled = await self._pull_manifest(session)
+        self._server_heard = polled is not _Poll.UNREACHABLE
         if polled is _Poll.ANSWERED:
             self._backoff = BACKOFF_START_SECONDS
-        return polled is _Poll.ANSWERED
+        return polled
+
+    async def _heartbeats(self, session: aiohttp.ClientSession, stop: asyncio.Event) -> None:
+        """Forward the heartbeat every poll interval while the server answers, whatever the manifest's backoff is doing.
+
+        **Backing off and being heard are separate.** A render that keeps
+        failing backs the manifest poll off, but the server's manifest route
+        answered, so the heartbeat still goes, and at the poll's own pace: a
+        label follows the wall's display state through the server, and must not
+        fall a minute behind because one render will not download. A server
+        that did not answer the last poll is not posted to until it does.
+        """
+        while not stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=self._interval)
+            if not stop.is_set() and self._server_heard:
+                await self._forward_heartbeat(session)
 
     def _next_backoff(self) -> float:
         wait = self._backoff
@@ -216,6 +306,9 @@ class Pull:
         # already sent, so it ends a refusal just as a 200 does.
         self._report_accepted()
         if status == HTTPStatus.NOT_MODIFIED:
+            # The feed already cached, which was cached with an ETag only when
+            # every master it names was in hand, is the server's current one.
+            self._media_settled()
             return _Poll.ANSWERED
 
         try:
@@ -287,19 +380,79 @@ class Pull:
         be had stays in the feed, and the programme skips it until its file is
         here. Every work the feed carries is fetched, staged ones included, so a
         scene is a switch rather than a download.
+
+        **A master that may yet arrive holds the feed, for a while.** While one
+        fails for a reason that may clear, the feed already cached stays, for up
+        to `MEDIA_HOLD_SECONDS`; then the new feed is cached without that master,
+        and with no ETag, so every later poll is answered whole and asks for the
+        master again until it arrives.
         """
-        for work in feed.works.values():
-            outcome = await self._cache_media(session, work)
+        missing: list[Work] = []
+        failed: set[str] = set()
+        why = ""
+        gone = False
+        for work in self._in_fetch_order(feed):
+            if gone:
+                # The server stopped answering partway through: the rest are
+                # not asked for this poll, which would only time out in turn,
+                # and keep their place in the order for the next.
+                missing.append(work)
+                continue
+            outcome = await self._cache_media(session, work, _declared_size(document, work.work_id))
             if isinstance(outcome, _Retry):
-                if self._media_failing.begin():
-                    log.warning(
-                        "a work's media for this wall could not be fetched (%s); keeping the manifest already cached",
-                        outcome.why,
-                        extra={"event": "pull.media_failing"},
-                    )
-                return _Poll.MEDIA_FAILING
+                missing.append(work)
+                failed.add(work.sha256)
+                why, gone = outcome.why, outcome.unreachable
+        self._failing = failed
+        if missing:
+            return self._hold_or_adopt(feed, document, missing, why)
+        self._media_settled()
+        self._cache_feed(feed, document, served_etag)
+        return _Poll.ANSWERED
+
+    def _media_settled(self) -> None:
+        """Nothing is being waited for: the feed the server serves has every master here."""
+        self._held_since = None
+        self._hold_ran_out.end()
         if self._media_failing.end():
             log.info("renders for this wall arrive again", extra={"event": "pull.media_ok"})
+
+    def _in_fetch_order(self, feed: Feed) -> list[Work]:
+        """The feed's works in its order, those that failed last poll moved to the end."""
+        works = list(feed.works.values())
+        return [work for work in works if work.sha256 not in self._failing] + [
+            work for work in works if work.sha256 in self._failing
+        ]
+
+    def _hold_or_adopt(self, feed: Feed, document: dict[str, Any], missing: list[Work], why: str) -> _Poll:
+        now = self._monotonic()
+        if self._held_since is None:
+            self._held_since = now
+        if self._media_failing.begin():
+            log.warning(
+                "a work's media for this wall could not be fetched (%s); keeping the manifest already cached "
+                "for up to %d minutes, then taking the new one without it",
+                why,
+                MEDIA_HOLD_SECONDS // 60,
+                extra={"event": "pull.media_failing", "hold_seconds": MEDIA_HOLD_SECONDS},
+            )
+        if now - self._held_since < MEDIA_HOLD_SECONDS:
+            return _Poll.MEDIA_FAILING
+        if self._hold_ran_out.begin():
+            log.warning(
+                "the media of %d works for this wall has not arrived in %d minutes (%s); caching the feed without it, "
+                "and asking for it again on every poll",
+                len(missing),
+                MEDIA_HOLD_SECONDS // 60,
+                why,
+                extra={"event": "pull.hold_ended", "work_ids": [work.work_id for work in missing]},
+            )
+        self._cache_feed(feed, document, None)
+        return _Poll.MEDIA_FAILING
+
+    def _cache_feed(self, feed: Feed, document: dict[str, Any], served_etag: str | None) -> None:
+        manifest = self._cache / CACHED_MANIFEST_FILENAME
+        text = json.dumps(document, indent=2).encode("utf-8")
         previous = self._cached_render_names()
         # **The old ETag goes before the manifest it describes is replaced**, and
         # a new one is written only after: an ETag left beside a manifest it
@@ -308,55 +461,79 @@ class Pull:
         # this order a crash between the writes leaves no ETag, which costs one
         # full download.
         (self._cache / ETAG_FILENAME).unlink(missing_ok=True)
-        _write_atomically(self._cache / CACHED_MANIFEST_FILENAME, json.dumps(document, indent=2).encode("utf-8"))
+        # The same feed again, as every poll past a hold brings, is not
+        # rewritten: the watcher would read it as new each time.
+        written = not _holds(manifest, text)
+        if written:
+            _write_atomically(manifest, text)
         if served_etag:
             _write_atomically(self._cache / ETAG_FILENAME, served_etag.encode("utf-8"))
         held = {Path(work.media_path).name for work in feed.works.values() if (self._cache / work.media_path).is_file()}
         kept = self._evict(held | previous)
-        log.info(
-            "cached the feed for this wall with %d of %d works' media; %d held",
-            len(held),
-            len(feed.works),
-            kept,
-            extra={"event": "pull.adopted", "works": len(feed.works), "media_held": len(held)},
-        )
-        return _Poll.ANSWERED
+        if written:
+            log.info(
+                "cached the feed for this wall with %d of %d works' media; %d held",
+                len(held),
+                len(feed.works),
+                kept,
+                extra={"event": "pull.adopted", "works": len(feed.works), "media_held": len(held)},
+            )
 
-    async def _cache_media(self, session: aiohttp.ClientSession, work: Work) -> "bool | _Retry":
+    async def _cache_media(  # noqa: PLR0911 -- one return per way a master can end, each said where it happens
+        self, session: aiohttp.ClientSession, work: Work, declared: int | None
+    ) -> "bool | _Retry":
         """Whether the work's master is in the cache now; False to skip the work; `_Retry` to try again later.
 
         The work's hash and address are already checked: the parser refuses a
-        feed whose work carries no media with a hash and a URL.
+        feed whose work carries no media with a hash and a URL. Its size is the
+        feed's to declare, and bounds the download.
         """
         work_id, sha = work.work_id, work.sha256
         name = media_name(sha)
         if (self._media / name).is_file():
             return True
+        if declared is None:
+            self._skip_once(
+                f"unsized:{sha}",
+                "the feed declares no size for the master of work %s, and the size is what bounds its download; skipping it",
+                work_id,
+            )
+            return False
 
         address = urljoin(self._manifest_url, work.url)
         # The token is this client's credential on this server. A master named on
         # another host is fetched without it, so a manifest can never be used to
         # send the token somewhere else.
         headers = self._auth() if _same_origin(address, self._server) else {}
+        temporary = self._media / f".{name}.tmp"
         try:
-            async with session.get(address, headers=headers) as response:
+            async with session.get(address, headers=headers, timeout=_MEDIA_TIMEOUT) as response:
                 status = response.status
-                data = await response.read() if status == HTTPStatus.OK else b""
+                digest = await _stream_to(response, temporary, declared) if status == HTTPStatus.OK else None
         except _UNREACHABLE as exc:
-            return _Retry(f"{type(exc).__name__} fetching it")
+            return _Retry(f"{type(exc).__name__} fetching it", unreachable=True)
         if status == HTTPStatus.NOT_FOUND:
             self._skip_once(f"missing:{sha}", "the master for work %s is not held by the server; skipping it", work_id)
             return False
         if status != HTTPStatus.OK:
             return _Retry(f"the media route answered {status}")
-        if hashlib.sha256(data).hexdigest() != sha:
+        if digest is None:
+            self._skip_once(
+                f"oversize:{sha}",
+                "the master for work %s ran past the %d bytes its feed declares and was discarded; skipping it",
+                work_id,
+                declared,
+            )
+            return False
+        if digest != sha:
+            temporary.unlink(missing_ok=True)
             self._skip_once(
                 f"mismatch:{sha}",
                 "the master for work %s did not match its hash and was discarded; skipping it",
                 work_id,
             )
             return False
-        _write_atomically(self._media / name, data)
+        temporary.replace(self._media / name)
         return True
 
     def _evict(self, referenced: set[str]) -> int:
@@ -387,12 +564,24 @@ class Pull:
         }
 
     def _cached_etag(self) -> str | None:
-        """The ETag to send, but only while the manifest it describes is still cached."""
-        if not (self._cache / CACHED_MANIFEST_FILENAME).is_file():
-            return None
+        """The ETag to send, but only while the manifest it describes is cached and the watcher can read it.
+
+        **Read with the watcher's own parser.** Sent beside a manifest the
+        watcher refuses (a torn write, a damaged card, a hand edit), the ETag
+        gets a 304, and the wall has no feed until the server's changes. Without
+        it, the server sends the whole feed again and the pull replaces it.
+        """
+        manifest = self._cache / CACHED_MANIFEST_FILENAME
         try:
+            stat = manifest.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            if stamp != self._etag_vouched:
+                parse(manifest.read_text(encoding="utf-8"))
+                self._etag_vouched = stamp
             return (self._cache / ETAG_FILENAME).read_text(encoding="utf-8").strip() or None
-        except FileNotFoundError:
+        except (OSError, UnicodeDecodeError, ManifestUnreadable):
+            # Missing or unreadable, the answer is the same: ask without one,
+            # and the server sends the whole document.
             return None
 
     # -- the heartbeat ----------------------------------------------------------------------
@@ -424,17 +613,33 @@ class Pull:
                 status = response.status
         except _UNREACHABLE:
             return
+        self._heard(status, stamp, reported_at)
+
+    def _heard(self, status: int, stamp: tuple[int, int], reported_at: object) -> None:
+        """What the server's answer to a heartbeat means for the next one."""
         if status == HTTPStatus.NO_CONTENT:
             self._heartbeat_seen = stamp
             self._heartbeat_sent = reported_at
             if self._heartbeat_failing.end():
                 log.info("the server is accepting this wall's heartbeat again", extra={"event": "pull.heartbeat_ok"})
             return
+        if status < HTTPStatus.INTERNAL_SERVER_ERROR:
+            # **A 4xx is the server's word on this report**, and posting it again
+            # each poll would only hear the same word; the next report may differ.
+            self._heartbeat_seen = stamp
+            self._heartbeat_sent = reported_at
+            if self._heartbeat_failing.begin():
+                log.warning(
+                    "the server refused this wall's heartbeat with %d; it will be sent again when it next changes",
+                    status,
+                    extra={"event": "pull.heartbeat_refused", "status": status},
+                )
+            return
         if self._heartbeat_failing.begin():
             log.warning(
-                "the server refused this wall's heartbeat with %d; it will be sent again when it next changes",
+                "the server failed this wall's heartbeat with %d; it will be sent again on the next poll",
                 status,
-                extra={"event": "pull.heartbeat_refused", "status": status},
+                extra={"event": "pull.heartbeat_failed", "status": status},
             )
 
     # -- reporting --------------------------------------------------------------------------
@@ -482,11 +687,11 @@ class Pull:
                     extra={"event": "pull.accepted", "status": status},
                 )
 
-    def _skip_once(self, key: str, message: str, work_id: object) -> None:
+    def _skip_once(self, key: str, message: str, work_id: object, *args: object) -> None:
         if key in self._skipped:
             return
         self._skipped.add(key)
-        log.warning(message, work_id, extra={"event": "pull.work_skipped", "work_id": work_id})
+        log.warning(message, work_id, *args, extra={"event": "pull.work_skipped", "work_id": work_id})
 
 
 class ClientPull:
@@ -540,7 +745,7 @@ class ClientPull:
         try:
             async with self._client().get(self._client_url, headers=headers) as response:
                 status = response.status
-                body = await response.read() if status == HTTPStatus.OK else b""
+                body = await _read_capped(response) if status == HTTPStatus.OK else b""
                 served_etag = response.headers.get("ETag")
         except _UNREACHABLE as exc:
             self._report_unreachable(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
@@ -570,9 +775,9 @@ class ClientPull:
         if status == HTTPStatus.NOT_MODIFIED:
             return None
         try:
-            text = body.decode("utf-8")
+            text = _text_of(body, "client document")
             document = parse_client_document(text)
-        except (UnicodeDecodeError, ClientDocumentUnreadable) as exc:
+        except (DocumentTooLarge, UnicodeDecodeError, ClientDocumentUnreadable) as exc:
             if self._unreadable.begin():
                 log.error(  # noqa: TRY400 -- the message is the finding
                     "refusing the client document the server sent (%s); the walls already running keep going",
@@ -642,12 +847,15 @@ class ClientPull:
         return self._session
 
     def _cached_etag(self) -> str | None:
-        """The ETag to send, but only while the document it describes is still cached."""
-        if not self._document_path.is_file():
-            return None
+        """The ETag to send, but only while the document it describes is cached and `cached` can read it.
+
+        Sent beside a document this client refuses, the ETag gets a 304, and no
+        wall on the client starts until a curator changes its assignments.
+        """
         try:
+            parse_client_document(self._document_path.read_text(encoding="utf-8"))
             return self._etag_path.read_text(encoding="utf-8").strip() or None
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError, ClientDocumentUnreadable):
             # Missing or unreadable, the answer is the same: ask without one,
             # and the server sends the whole document.
             return None
@@ -663,6 +871,16 @@ class ClientPull:
                 why,
                 extra={"event": "client.unreachable", "server_url": self._server},
             )
+
+
+@dataclass(frozen=True)
+class CachedLabel:
+    """The label document a client last accepted, as a restarted renderer starts from it."""
+
+    document: LabelDocument
+    #: When the server last answered for this label, by the wall clock: never
+    #: later than the last answer, and at most `LABEL_ANSWER_STAMP_SECONDS` earlier.
+    answered_at: datetime
 
 
 @dataclass(frozen=True)
@@ -684,29 +902,92 @@ class LabelPull:
     document this reader cannot use keeps the last good one; transport errors,
     timeouts and `5xx` mean the server is unreachable, which the renderer answers
     by holding its caption for the rule's 30 minutes. Each is said once when it
-    starts and once when it ends. The ETag is held in memory beside the document
-    the renderer holds, so a restarted renderer asks for the whole document.
+    starts and once when it ends.
+
+    **Each accepted document is cached**, under `LABEL_CACHE_DIRNAME`, and the
+    file is stamped as the server goes on answering, so a renderer restarted
+    while the server is down starts from it (`cached`). The ETag is not: it is
+    held in memory only, so a restarted renderer asks for the whole document and
+    never sends an ETag for a document it does not hold.
     """
 
-    def __init__(self, settings: ClientSettings, label_id: str) -> None:
+    def __init__(
+        self,
+        settings: ClientSettings,
+        label_id: str,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._server = settings.server_url
         self._token = settings.client_token
         self._label_id = label_id
-        self._url = self._server + LABEL_ROUTE.format(label_id=label_id)
+        plain = PLAIN_COMPONENT.fullmatch(label_id) is not None
+        #: None for an id that is not a plain path component: put into the
+        #: route, "../x" would ask for another route of the server's, so it is
+        #: never asked for at all.
+        self._url = self._server + LABEL_ROUTE.format(label_id=label_id) if plain else None
+        #: None for the same ids: put into a path, "../x" would name a file
+        #: outside the cache.
+        self._cache_path = settings.cache_dir / LABEL_CACHE_DIRNAME / f"{label_id}.json" if plain else None
+        #: The stamp's clock, which a restarted renderer compares with its own `now`.
+        self._now = now
+        #: The throttle's clock: when the file was last stamped.
+        self._monotonic = monotonic
+        self._stamped: float | None = None
+        self._uncacheable = ReportOnce()
+        self._unusable = ReportOnce()
         self._etag: str | None = None
         self._session: aiohttp.ClientSession | None = None
         self._unreachable = ReportOnce()
         self._refused_status: dict[int, ReportOnce] = {}
         self._unreadable = ReportOnce()
 
-    async def fetch(self) -> LabelAnswer:  # noqa: C901 -- one branch per answer the server can give
+    async def fetch(self) -> LabelAnswer:
+        if self._url is None:
+            if self._unusable.begin():
+                log.error(
+                    "the server named label %r, which is not a plain path component; this client will not ask for it, "
+                    "and the panel stays as it is",
+                    self._label_id,
+                    extra={"event": "label.id_unusable", "label_id": self._label_id},
+                )
+            return LabelAnswer(reachable=True)
+        return await self._ask(self._url)
+
+    def cached(self) -> CachedLabel | None:
+        """The last document accepted for this label and when the server last answered, or None if there is none it can read.
+
+        **Unreadable is absent**, as the client document's cache is: a file this
+        reader refuses is never a reason to stop, and never one to draw from.
+        """
+        if self._cache_path is None:
+            return None
+        try:
+            text = self._cache_path.read_text(encoding="utf-8")
+            answered_at = datetime.fromtimestamp(self._cache_path.stat().st_mtime, UTC)
+            return CachedLabel(document=parse_label_document(text), answered_at=answered_at)
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeDecodeError, ValueError, LabelDocumentUnreadable) as exc:
+            # `ValueError` is a modification time `fromtimestamp` cannot place.
+            log.warning(
+                "the cached document for label %s at %s cannot be read (%s); the label starts blank until the server answers",
+                self._label_id,
+                self._cache_path,
+                exc,
+                extra={"event": "label.cache_unreadable", "label_id": self._label_id},
+            )
+            return None
+
+    async def _ask(self, url: str) -> LabelAnswer:  # noqa: C901, PLR0912 -- one branch per answer the server can give
         headers = {"Authorization": f"Bearer {self._token}"}
         if self._etag is not None:
             headers["If-None-Match"] = self._etag
         try:
-            async with self._client().get(self._url, headers=headers) as response:
+            async with self._client().get(url, headers=headers) as response:
                 status = response.status
-                body = await response.read() if status == HTTPStatus.OK else b""
+                body = await _read_capped(response) if status == HTTPStatus.OK else b""
                 served_etag = response.headers.get("ETag")
         except _UNREACHABLE as exc:
             self._report_unreachable(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
@@ -720,6 +1001,12 @@ class LabelPull:
                 self._label_id,
                 extra={"event": "label.server_reachable", "label_id": self._label_id},
             )
+        if status != HTTPStatus.OK:
+            # An answer, so the hold a restart would run starts again here. Not
+            # on a 200: its document replaces the cached one, and the stamp goes
+            # with it, so a document this client could not cache is never left
+            # stamped as though it were the server's latest.
+            self._stamp()
         if status not in (200, 304):
             episode = self._refused_status.setdefault(status, ReportOnce())
             if episode.begin():
@@ -745,8 +1032,8 @@ class LabelPull:
         if status == HTTPStatus.NOT_MODIFIED:
             return LabelAnswer(reachable=True)
         try:
-            document = parse_label_document(body.decode("utf-8"))
-        except (UnicodeDecodeError, LabelDocumentUnreadable) as exc:
+            document = parse_label_document(_text_of(body, "label document"))
+        except (DocumentTooLarge, UnicodeDecodeError, LabelDocumentUnreadable) as exc:
             if self._unreadable.begin():
                 log.error(  # noqa: TRY400 -- the message is the finding
                     "refusing the label document the server sent for %s (%s); keeping the last one",
@@ -762,7 +1049,64 @@ class LabelPull:
                 extra={"event": "label.document_readable", "label_id": self._label_id},
             )
         self._etag = served_etag or None
+        self._keep(body)
         return LabelAnswer(reachable=True, document=document)
+
+    def _keep(self, body: bytes | None) -> None:
+        """Cache an accepted document, stamped now. **A cache that cannot be written costs the cache, not the label.**"""
+        path = self._cache_path
+        if path is None or body is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomically(path, body)
+            self._set_stamp(path)
+        except OSError as exc:
+            # **The document it would have replaced goes too.** It was stamped
+            # by this very answer, and left, a restart would hold it as the
+            # server's latest word when the latest may say the screen is dark.
+            with contextlib.suppress(OSError):
+                _discard(path)
+            self._report_uncacheable(exc)
+            return
+        if self._uncacheable.end():
+            log.info(
+                "the document for label %s is cached again",
+                self._label_id,
+                extra={"event": "label.cache_writable", "label_id": self._label_id},
+            )
+
+    def _stamp(self) -> None:
+        """Move the cached document's stamp to now, at most once per `LABEL_ANSWER_STAMP_SECONDS`."""
+        path = self._cache_path
+        if path is None:
+            return
+        if self._stamped is not None and self._monotonic() - self._stamped < LABEL_ANSWER_STAMP_SECONDS:
+            return
+        try:
+            self._set_stamp(path)
+        except FileNotFoundError:
+            # Nothing cached yet, so nothing to stamp: the next accepted
+            # document is written with its own.
+            return
+        except OSError as exc:
+            self._report_uncacheable(exc)
+
+    def _set_stamp(self, path: Path) -> None:
+        instant = self._now().timestamp()
+        os.utime(path, (instant, instant))
+        self._stamped = self._monotonic()
+
+    def _report_uncacheable(self, exc: OSError) -> None:
+        if self._uncacheable.begin():
+            log.error(
+                "the document for label %s cannot be cached at %s (%s); the label follows the server, and a restart "
+                "while the server is down starts blank",
+                self._label_id,
+                self._cache_path,
+                exc,
+                extra={"event": "label.cache_unwritable", "label_id": self._label_id},
+            )
 
     async def close(self) -> None:
         if self._session is not None:
@@ -790,6 +1134,81 @@ class _Retry:
     """A render that did not arrive for a reason that may clear, and the reason."""
 
     why: str
+    #: The server stopped answering, as against answering with an error.
+    unreachable: bool = False
+
+
+def _declared_size(document: dict[str, Any], work_id: str) -> int | None:
+    """The byte count the feed declares for a work's master, or None if it declares none this reader can use."""
+    declared = document["works"][work_id]["media"].get("bytes")
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        return None
+    return declared
+
+
+async def _stream_to(response: aiohttp.ClientResponse, path: Path, limit: int) -> str | None:
+    """Write a body to `path` under a running hash: its SHA-256, or None once it runs past `limit` bytes.
+
+    The file is removed when the body is refused or the transfer fails, so a
+    master is on disk whole or not at all, and never more than `limit` and one
+    chunk of it.
+    """
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        with path.open("wb") as handle:
+            async for chunk in response.content.iter_chunked(_CHUNK_BYTES):
+                received += len(chunk)
+                if received > limit:
+                    response.close()
+                    _discard(path)
+                    return None
+                digest.update(chunk)
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the partial file must go on any exit
+        _discard(path)
+        raise
+    return digest.hexdigest()
+
+
+def _discard(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+async def _read_capped(response: aiohttp.ClientResponse) -> bytes | None:
+    """A document's body, or None once it runs past `DOCUMENT_MAX_BYTES`."""
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(_CHUNK_BYTES):
+        body += chunk
+        if len(body) > DOCUMENT_MAX_BYTES:
+            return None
+    return bytes(body)
+
+
+def _text_of(body: bytes | None, what: str) -> str:
+    """A capped read as text. Raises `DocumentTooLarge` for one past the cap, `UnicodeDecodeError` for one that is not UTF-8."""
+    if body is None:
+        raise DocumentTooLarge(f"the {what} runs past {DOCUMENT_MAX_BYTES} bytes, the most this Player reads")
+    return body.decode("utf-8")
+
+
+def _holds(path: Path, data: bytes) -> bool:
+    """Whether the file at `path` already holds exactly `data`."""
+    try:
+        return path.read_bytes() == data
+    except OSError:
+        return False
+
+
+async def _rest(stop: asyncio.Event, seconds: float, beside: asyncio.Task[None]) -> None:
+    """Wait `seconds`, or less if asked to stop or if the task beside this loop ends."""
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait({stopping, beside}, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stopping.cancel()
 
 
 def _same_origin(address: str, server: str) -> bool:

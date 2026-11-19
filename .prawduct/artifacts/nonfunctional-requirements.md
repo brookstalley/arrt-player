@@ -28,9 +28,9 @@ Arrt's text that is now wrong about the Player is listed at the end.
      this comment; "none to ratify" is recorded through /prawduct:doctor, not here. -->
 
 No norm is ratified in this file. Two of Arrt's ratified norms bind the Player
-directly: **the display plane's ability to show art never depends on the
-curation plane being reachable** (Arrt § Direction, read "server" and "Player"
-per its 2026-09-30 amendment), and **the television belongs to whoever is using
+directly: **the Player's ability to show art never depends on the
+server being reachable** (Arrt § Direction, which says "display plane" and
+"curation plane"; read "Player" and "server" per its 2026-09-30 amendment), and **the television belongs to whoever is using
 it** (Arrt § Availability › The television belongs to whoever is using it).
 
 ## Performance
@@ -69,10 +69,16 @@ searching `src/` for `rmtree`, `rmdir`, `disk_usage` and `statvfs`:
   composed pictures and Frame store stay under `CACHE_DIR/<wall id>/`. Growth is
   bounded by the number of walls ever assigned.
 
-**Memory has no limit.** `deploy/display.service` sets no `MemoryMax=`, and no
-code bounds it. The only sized consumer is composition (above). Pillow's default
-decompression-bomb guard applies; `compose.py` catches `DecompressionBombError`
-as an uncomposable master.
+**Memory is bounded by the unit, not by the code.** `deploy/display.service` sets
+`MemoryHigh=60%` and `MemoryMax=75%` of the Pi's RAM, so an exhausted Pi loses
+the Player and not sshd; past `MemoryMax` the kernel kills inside the unit,
+systemd stops the rest of it, and `Restart=always` brings it back
+(`tests/test_deploy_unit.py::test_the_unit_bounds_its_memory_below_the_pis`).
+That the kernel enforces it needs its memory controller, which the runbook has
+the operator check on the Pi: stated, not enforced here. In code the only sized
+consumer is composition (above); a master is streamed to disk, never held whole.
+Pillow's default decompression-bomb guard applies; `compose.py` catches
+`DecompressionBombError` as an uncomposable master.
 
 **The journal is bounded** at 256M, in 32M files, on both the runtime and system
 ceilings (`deploy/journald.conf.d/10-bound-the-journal.conf`). Arrt's
@@ -90,7 +96,11 @@ mostly detection. What follows is what the Player's code does.
 The norm is Arrt § Direction (display independence). The mechanism is
 `pull.py`'s module docstring: a wall renders only `CACHE_DIR/<wall id>/manifest.json`,
 and the pull writes that file only after every master it names is fetched and
-checked against its hash, or answered for. Every failure keeps the cache
+checked against its hash, or answered for, or has been waited for as long as
+`MEDIA_HOLD_SECONDS` (10 minutes): a master that fails in a way that may clear
+holds the feed already cached for that long, after which the new feed is cached
+without it and with no ETag, and the master is asked for again on every poll.
+Every failure keeps the cache
 (`player-contract.md` § Transport). Tested in `tests/test_pull.py`
 (`test_the_server_stopped_while_the_wall_runs_and_the_schedule_continues_from_the_cache`,
 `test_a_player_restarted_with_the_server_down_starts_from_its_cache`),
@@ -100,17 +110,24 @@ and `tests/test_availability.py`.
 
 | Request | Timeout | Retry | Where |
 |---|---|---|---|
-| Wall manifest, masters, wall heartbeat | 60 s total, 10 s connect, per request | Backoff from 2 s, doubling to 60 s, reset when the manifest route answers | `pull.Pull.run` (`aiohttp.ClientTimeout`), `BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS` |
+| Wall manifest, wall heartbeat | 60 s total, 10 s connect, per request | Backoff from 2 s, doubling to 60 s, reset when the manifest route answers; the heartbeat is not held to it | `pull.Pull.run` (`aiohttp.ClientTimeout`), `BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS` |
+| A master | 10 s connect, 30 s without a byte, no total; stopped at the bytes its feed declares | The feed is held for at most 10 minutes (above), and the master asked for again on each poll | `pull._MEDIA_TIMEOUT`, `pull._stream_to`, `MEDIA_HOLD_SECONDS` |
+| A client or label document | Read up to 1 MiB | — | `pull.DOCUMENT_MAX_BYTES` |
 | A higher manifest major | — | Asked again every 60 s while a lower one answers | `pull.HIGHER_MAJOR_SECONDS` |
 | Client document and client heartbeat | 30 s total, 10 s connect | None; asked again on the next 30 s client poll | `pull.ClientPull._client` |
 | Label document | 10 s total, 5 s connect | None; asked again on the next 1 s label poll | `pull.LabelPull._client` |
 
 While the server cannot be reached, a label holds its last caption for 30
-minutes (`label_rule.HOLD`), then follows the rule in `labels-and-surfaces.md`
-§ What a label says.
+minutes (`label_rule.HOLD`), measured on the monotonic clock from the server's
+last answer so that a step of the Pi's clock neither blanks it at once nor holds
+it for ever, then follows the rule in `labels-and-surfaces.md` § What a label
+says. Each accepted label document is cached, so a Player restarted while the
+server is down captions from it for what is left of that hold, never more than
+30 minutes from the restart (`LabelPull.cached`, `LabelRenderer._seed`;
+`tests/test_label_renderer.py`).
 
 **One cache failure is not kept local to the cache.** A write that fails while
-adopting a wall's feed (`pull._write_atomically` inside `Pull._adopt_feed`) is not
+adopting a wall's feed (`pull._write_atomically` inside `Pull._cache_feed`) is not
 caught there. It ends that wall's pull, which ends the wall's worker
 (`__main__._pull_ended`); the supervisor starts it again (below). The previous
 manifest survives, because the write is temp-and-rename. The client document's
@@ -125,13 +142,17 @@ write failure, by contrast, is caught and reported once (`ClientPull.fetch`,
 | One wall's worker | Restarted after a wait from 5 s doubling to 300 s; the ladder resets after a run longer than 300 s | `client.RESTART_MIN_SECONDS`, `RESTART_MAX_SECONDS`, `Supervisor._keep_running` | `tests/test_client.py::test_a_crashed_worker_is_logged_and_started_again` |
 | A wall's pull | Its death ends its wall's worker at once, so the two restart together | `__main__._beside_its_pull`, `_pull_ended` | `tests/test_main.py::test_a_pull_that_dies_ends_its_walls_worker_at_once_and_says_why` |
 | The supervisor | Not caught. The process ends and systemd restarts it | `client.py` module docstring | — |
-| A Frame store from a newer Player | That wall is parked and says so once; other walls run | `__main__.run_frame_wall`, `state.StateSchemaTooNew` | `tests/test_main.py::test_a_store_from_a_newer_plane_parks_its_wall_and_says_so_once` |
+| A Frame store from a newer Player | That wall is parked and says so once; other walls run | `__main__.run_frame_wall`, `state.StateSchemaTooNew` | `tests/test_main.py::test_a_store_from_a_newer_player_parks_its_wall_and_says_so_once` |
 
 ### Start-up
 
 `config.load` and `config.load_ui` refuse to start, naming the variable, when
 `CACHE_DIR` is unset; when `CACHE_DIR` or `TV_TOKEN_FILE` is not absolute; when
-a numeric value does not parse, or `UI_PORT` is not a port; when `SERVER_URL`
+a numeric value does not parse, is `nan` or infinite, or `UI_PORT` is not a port;
+when any `*_SECONDS` interval or timeout is zero or below (`config._seconds`: a
+zero would be a loop that never waits), or `LATITUDE` or `LONGITUDE` is out of
+range; when a wall id equals a name the cache directory reserves
+(`WallIdUnusable`); when `SERVER_URL`
 is not an http(s) address with a host or carries a user name, password, query or
 fragment, `CLIENT_TOKEN` holds whitespace, or `PLAYER_NAME` is over 64
 characters or holds control characters (the same functions judge the settings
@@ -186,8 +207,10 @@ not about art mode).
 - SIGTERM and SIGINT set one stop event (`__main__._run`,
   `loop.add_signal_handler`).
 - `client.Supervisor.stop_all` stops every wall worker and label renderer and
-  waits for each to close what it holds, with no timeout of its own. The panel is
-  closed after that (`__main__._run`, `finally`).
+  waits for each to close what it holds, with no timeout of its own; it retires
+  nothing, so every screen and label is left as it was. The panel is closed
+  after that, once any draw still in the driver has finished or the label budget
+  has run out (`__main__._run`, `finally`; `LabelPanel.close`).
 - The bound is systemd's: `TimeoutStopSec=90`, `KillSignal=SIGTERM`
   (`deploy/display.service`). The unit's comment gives the worst case it must
   clear as about 45 s; `tests/test_deploy_unit.py::test_the_unit_gives_the_television_time_to_let_go`
@@ -204,7 +227,25 @@ The requirement is Arrt's `nonfunctional-requirements.md` § Availability › Th
 television belongs to whoever is using it. What this repository's code enforces is narrower than "never touch a
 set that is not in art mode":
 
-- **Selection is gated.** The schedule asks `display.is_ours()` before every
+- **Every write to the set is gated, in the seam.** `tv.client.WRITES` names each
+  verb that changes what the set shows or stores, and the gate it passes. Each is
+  a final `TvClient` method that reads the set immediately before the client's
+  `_send_<verb>` (`showing_art`, then `power_state` for a verb whose gate it can
+  open) and raises `TvNotOurs` when the set is not in a state the verb was
+  measured safe in; a subclass cannot define the verb itself, so a verb added
+  later inherits the read. Selection needs art mode on. Upload, removal,
+  brightness and switching off the set's own slideshow need art mode on, or art
+  mode off with `PowerState` `standby` (the dark state), and are held when the
+  set is lit and showing a programme and whenever `PowerState` cannot be read.
+  `samsung-tv-state-findings.md` § What works in each state is the measurement.
+  Tested in `tests/test_samsung_client.py`
+  (`test_a_write_is_sent_only_in_the_states_it_was_measured_safe_in`,
+  `test_the_read_is_taken_at_the_moment_of_the_write_not_before`,
+  `test_nothing_outside_the_seam_reaches_a_send`) and `tests/test_frame_wall.py`
+  (`test_every_write_is_held_from_a_set_showing_a_programme`,
+  `test_a_set_somebody_is_watching_is_sent_no_write_at_all`,
+  `test_a_set_whose_power_cannot_be_read_is_sent_no_write_either`).
+- **Selection is also gated early.** The schedule asks `display.is_ours()` before every
   `show` (`programmes/schedule.Schedule`, the `may_attempt` and `is_ours` check before `display.show`),
   and the Frame answers from a fresh `get_artmode` read
   (`displays/frame.FrameDisplay.is_ours`). A no selects nothing and backs off on
@@ -212,16 +253,19 @@ set that is not in art mode":
   (`config.DEFAULT_TV_RETRY_*`). Tested in `tests/test_frame_wall.py`
   (`test_a_television_somebody_is_watching_is_left_alone`,
   `test_an_evening_of_television_ends_on_the_slots_work_in_one_selection`).
-- **Other calls to the set are not gated on art mode.** Connecting
-  (`FrameDisplay._connected`), switching off the set's own slideshow, reconciling
-  and removing orphans, uploading, and setting brightness every 300 s when the
-  value changes (`FrameDisplay._apply_brightness`) all run whatever the set is
-  showing. Connecting includes a REST read on every construction and, **only when
-  the token file is empty**, an open of the remote-control channel to mint a
-  token, which raises a pairing prompt on the screen (`tv/samsung.SamsungTv._construct`;
-  `samsung-tv-state-findings.md` § This product has been opening the
-  remote-control channel all along). Whether any of the others is visible over a
-  programme has not been measured here.
+- **A held write is retried, not failed.** `FrameDisplay` answers `TvNotOurs` as
+  it answers a selection's no: said once (`tv.writes_held`), not recorded as a
+  failed upload, and tried again on one shared wait (`FrameDisplay._writes`) that a set
+  returning to art mode ends (`tv.writes_resumed`). So uploads wait while somebody
+  watches television, and the wall catches up in art mode.
+- **Connecting is not gated.** It includes a REST read on every construction and,
+  **only when the token file is empty**, an open of the remote-control channel to
+  mint a token, which raises a pairing prompt on the screen
+  (`tv/samsung.SamsungTv._construct`; `samsung-tv-state-findings.md` § This
+  product has been opening the remote-control channel all along). Whether a held
+  write would have been visible over a programme has not been measured: the gate
+  holds it there rather than finding out, and which verbs may be released is
+  the owner's measurement at the set.
 - **No shipped code sends a power key.** A search of `src/` for `KEY_POWER`,
   `send_key` and `SendRemoteKey` finds nothing. No test asserts that absence:
   stated, not enforced. Power control at the window edges (Arrt's amendment of
@@ -240,7 +284,7 @@ authority on what the server does with it.
 | Signal | Cadence | Where | Enforced by |
 |---|---|---|---|
 | Wall heartbeat file | Every 60 s, and at once when the display state or capabilities change | `heartbeat.INTERVAL_SECONDS` = 60, `wall.Wall._beat` | `tests/test_heartbeat_interval.py` holds 60 to the contract's `heartbeat_interval_seconds`. The contract's `stale_after_intervals` is 3, so the server calls a wall stale after 180 s |
-| Wall heartbeat POST | On the pull's next cycle after the file changes, and only when the manifest route answered | `pull.Pull._forward_heartbeat`, `Pull.cycle` | `tests/test_pull.py::test_the_heartbeat_file_is_posted_when_it_holds_a_new_report_and_not_otherwise` |
+| Wall heartbeat POST | Every poll interval from the pull's own loop, when the file holds a report not yet sent and the last manifest poll was answered; a manifest backoff does not delay it | `pull.Pull._heartbeats`, `Pull._forward_heartbeat` | `tests/test_pull.py::test_the_heartbeat_file_is_posted_when_it_holds_a_new_report_and_not_otherwise`, `::test_a_failing_master_does_not_hold_the_heartbeat_back_to_the_backoff` |
 | Client heartbeat POST | When the outputs change, else once per 60 s, checked on the 30 s client poll | `client.Supervisor._report_outputs` | `tests/test_client.py::test_a_screen_plugged_in_is_reported_at_once_and_an_unchanged_one_is_not_repeated` |
 | Journal | One JSON object per line; each trouble said once when it starts and once when it ends | `logs.configure`, `episodes.ReportOnce` | `tests/test_logs.py`, `tests/test_episodes.py` |
 
@@ -310,7 +354,7 @@ fixed here; each is a change on Arrt.
    § Risks says that after wave 3 the heartbeat "becomes an HTTP POST and stops
    writing to the card at all". The Player still writes each wall's heartbeat
    file into `CACHE_DIR/<wall id>/`, with an `fsync`, at least every 60 s, and the
-   pull posts that file (`heartbeat.write`, `pull.Pull._forward_heartbeat`). The
+   pull posts that file (`heartbeat.write`, `pull.Pull._heartbeats`). The
    card still takes that write.
 4. **Interpreter.** Arrt's `operational-spec.md` § Deployment Target gives the
    display process as Python 3.13 on the system interpreter. The unit runs

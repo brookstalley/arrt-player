@@ -1,12 +1,12 @@
 [project]
 name = "arrt-player"
 version = "0.8.0"
-description = "Display plane — reads the theme manifest, drives the television, owns this device's own state."
-# **The plane whose version is pinned by hardware, and the reason the two planes
-# are sibling uv projects rather than one workspace.** Raspberry Pi OS Trixie
+description = "Arrt Player — reads the theme manifest, drives the television, owns this device's own state."
+# **The Player's Python is pinned by hardware, and that is the reason it and the
+# server are sibling uv projects rather than one workspace.** Raspberry Pi OS Trixie
 # ships 3.13, and the IT8951 e-paper driver compiles Cython from 2023 sources
 # targeting 3.13/3.12 — verified building and importing on 3.13/aarch64 under
-# uv's PEP 517 isolation, 2026-08-04. The curation plane declares `>=3.14`, and a
+# uv's PEP 517 isolation, 2026-08-04. The server declares `>=3.14`, and a
 # workspace mixing that with this floor refuses to lock at all.
 #
 # 3.12 is a floor, not a fallback anyone expects to need. It is declared because
@@ -16,7 +16,7 @@ requires-python = ">=3.12"
 dependencies = [
     # **NOT the PyPI package of the same name, and not interchangeable with it.**
     # PyPI `samsungtvws` ships a synchronous art client only — no `async_art`
-    # module and no event callbacks — and this plane is built on both. The fork
+    # module and no event callbacks — and the Player is built on both. The fork
     # declares the same version string (3.0.5) as the release, so `pip list`
     # cannot tell them apart and a well-meant "upgrade" fails at import rather
     # than loudly. Pinned to the commit verified against the live television.
@@ -79,7 +79,7 @@ dependencies = [
 # rediscovering:
 #
 #     **That rule was suspended for `astral` and `tzlocal` when this manifest
-#     shipped ahead of the plane's first module, and the bill came due on
+#     shipped ahead of the Player's first module, and the bill came due on
 #     2026-08-06.** The reasoning was that both served the sun-position
 #     brightness port, which the build plan recorded as an assumption the
 #     operator might defer — so if it were deferred they would be locked entries
@@ -102,12 +102,12 @@ dependencies = [
 #     omission — it is the norm: the per-wall manifest and its media, from the
 #     shared file or pulled into this Player's cache by `src/arrt_player/pull.py`, are
 #     the only channel from curation to display. The television websocket is the
-#     other exemption, because talking to the television is this plane's whole
+#     other exemption, because talking to the television is the Player's whole
 #     job.
 #
 #     **Enforced mechanically since 2026-08-06** by
 #     `tests/test_plane_isolation.py`, which landed in the same commit
-#     as this plane's first modules — the sequencing this comment previously
+#     as the Player's first modules — the sequencing this comment previously
 #     described as owed, and owed for a reason: a check written over an empty
 #     package passes vacuously, and a green suite is exactly what a violation
 #     looks like without it. It reads the source rather than the running system,
@@ -227,6 +227,12 @@ arrt-contract = { git = "https://github.com/brookstalley/arrt", tag = "contract-
 # dependency.
 override-dependencies = [
     "IT8951[rpi] @ git+https://github.com/GregDMeyer/IT8951.git@9f136139378f74e17d9972d7165dc6ae53a2568e",
+    # **The third unpinned axis: `omni_epd` names the Waveshare sample with no
+    # commit either**, so the lock holds a commit and a re-lock would move it to
+    # that repository's default branch. This is the commit the lock already
+    # recorded when the pin was added (audit-8 F22), so adding it changed no
+    # resolved version.
+    "waveshare-epd @ git+https://github.com/mendhak/waveshare-epaper-sample.git@2587516a8ad32b3ef4f7829212d962eb0679006b#subdirectory=RaspberryPi_JetsonNano/python",
     "jetson-gpio; sys_platform == 'never'",
 ]
 
@@ -242,17 +248,17 @@ build-constraint-dependencies = [
 ]
 
 [tool.hatch.metadata]
-# **The line that lets this plane be a package at all.** Its television client is
+# **The line that lets the Player be a package at all.** Its television client is
 # a git dependency, and hatchling refuses a direct reference unless told that one
 # is intended — which is the whole of what used to make the build fail.
 allow-direct-references = true
 
-# **`[tool.uv] package = false` was here until this plane had a module, and both
+# **`[tool.uv] package = false` was here until the Player had a module, and both
 # of its reasons were artefacts of the empty tree rather than facts about the
 # design.** It recorded that hatchling refused the git-sourced `samsungtvws` as a
 # direct reference (one line above fixes that, and always would have) and that
 # there was no package directory to put in a wheel (there is one now). What it got
-# right is that nothing installs this plane from anywhere else: it is started by a
+# right is that nothing installs the Player from anywhere else: it is started by a
 # systemd unit against this directory, and being a package changes only that its
 # own venv can import it.
 #
@@ -262,7 +268,7 @@ allow-direct-references = true
 
 [tool.black]
 # The floor rather than the target: formatting that only parses on 3.13 would
-# break the 3.12 this plane declares it supports.
+# break the 3.12 the Player declares it supports.
 target-version = ["py312"]
 line-length = 130
 
@@ -271,9 +277,9 @@ line-length = 130
 target-version = "py312"
 
 [tool.ruff.lint]
-# The same strict set the curation plane carries, and for the same reason: this
+# The same strict set the server carries, and for the same reason: this
 # is new code with no legacy carve-out, so every rule applies to all of it.
-# `T20` matters more here than anywhere else in the repo — this plane runs
+# `T20` matters more here than anywhere else in the repo — the Player runs
 # unattended on a Pi under systemd, where a `print()` has no level and no
 # timestamp and a failure is invisible in the journal.
 #

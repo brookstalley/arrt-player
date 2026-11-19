@@ -66,13 +66,14 @@ F4. Compare the copied settings with the new checkout's example. Step 2's
 
 F5. Sync the environment, as in step 8.
 
-F6. Install the unit and reload systemd:
+F6. Check `.env` as in step 9a (if it prints a line, go to F9), then install
+    the unit and reload systemd:
 
         sudo cp /opt/arrt-player/deploy/display.service /etc/systemd/system/
         sudo systemctl daemon-reload
 
-F7. Steps 12–16, except that where one of them sends you to step 17, go to F9
-    instead. Then check the unit runs from the new checkout:
+F7. Steps 12–16 and step 14a, except that where one of them sends you to step
+    17, go to F9 instead. Then check the unit runs from the new checkout:
 
         systemctl show -p WorkingDirectory display.service
 
@@ -139,6 +140,28 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
    *Why `sudo`: `.env` is readable by `tvpi` and root only.*
 
+7b. **IF step 2 showed `deploy/README.md` § Two things that can stop an
+    upgrade**, check that `.env` holds none of the zero intervals it names:
+
+        sudo grep -nEi '^[A-Z_]+_SECONDS=["'"'"']?(0+(\.0*)?|-.*|nan|inf.*)["'"'"']?[[:space:]]*$' /opt/arrt-player/.env
+
+    **Expected:** nothing printed.
+    **If it prints a line:** set that key to the number of seconds meant, or
+    delete it for the default, with `sudoedit` as in step 7. *Why: the Player
+    refuses to start (exit 2, `daemon.misconfigured` naming the key) with a
+    `*_SECONDS` of 0, below 0, `nan` or `inf`, and `Restart=always` then tries
+    again every 5 s with every wall dark.*
+
+7c. **IF step 2 showed that section and you open the settings page by a name** that is not an IP address, not
+    `localhost`, not the Pi's own name and not `<name>.local` (a router's
+    `<name>.lan`, or a reverse proxy's name): list it in `.env`.
+
+        sudoedit /opt/arrt-player/.env
+
+    Add `UI_ALLOWED_HOSTS=<name>`, several comma-separated, names only. *Why:
+    the page refuses any other name with a 421 before any page, and the journal
+    says `settings_page.host_refused`.*
+
 7a. Check the system packages the Player runs beside it:
 
         mpv --version | head -1
@@ -154,19 +177,31 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
 8. Sync the Player's environment:
 
-       cd /opt/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
+       cd /opt/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
 
    **Expected:** ends with an `Installed …`, `Uninstalled …`, `Audited …`
    or `Checked …` line, and no `error:`.
    *Why the groups: without them the sync removes the label's typesetter and
-   the panel driver.*
+   the panel driver. Why `--frozen`: it installs what `uv.lock` says without
+   re-resolving it, so the checkout's lock is never rewritten. Why `--no-dev`:
+   the Pi runs no tests, and the unit starts without the dev group too.*
 
 9. Compare the unit with the checkout's:
 
        diff -q /opt/arrt-player/deploy/display.service /etc/systemd/system/display.service
 
    **Expected:** nothing printed → step 12.
-   **IF it prints `… differ`:** → step 10.
+   **IF it prints `… differ`:** → step 9a.
+
+9a. Check that `.env` names no path the unit cannot reach. The unit makes
+    `/home`, `/root` and `/run/user` unreachable for the Player:
+
+        sudo grep -nE '^[A-Z_]+=["'"'"']?(/home|/root|/run/user)(/|$)' /opt/arrt-player/.env
+
+    **Expected:** nothing printed → step 10.
+    **If it prints a line:** → step 17, with the new unit not installed. That
+    setting has to name a path outside those three before this unit can run,
+    and choosing where is the owner's call.
 
 10. Install the new unit:
 
@@ -195,6 +230,36 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
     **If not:** no `client.wall_started` after a minute → step 17.
 
+14a. **IF steps 10–11 installed a new unit:** check that its sandbox let the
+     Player do its work. Wait until the wall has had a few minutes, then:
+
+         journalctl -u display.service --since '10 min ago' --no-pager | grep -E 'Read-only file system|Permission denied|Address family not supported'
+
+     **Expected:** nothing printed. *Why: those are the errors a write the
+     unit forbids, a path it hides and a socket it refuses would raise.*
+
+         journalctl -u display.service --since '10 min ago' --no-pager | grep -oE '"event": "(rotation.selected|slideshow.shown|slideshow.not_shown|label.drawn|screen.draw_failed|screen.brightness_set|screen.brightness_failed)"' | sort | uniq -c
+
+     **Expected, all of:**
+     - `rotation.selected` (a wall from the server), or `slideshow.shown` (a
+       slideshow), and the screen shows the picture, not the text console
+     - `label.drawn`, if this Pi has a label panel
+     - `screen.brightness_set`, if `.env` sets a location
+     - no `screen.draw_failed`, `slideshow.not_shown` or
+       `screen.brightness_failed`
+
+     Then check that the kernel enforces the unit's memory bound:
+
+         cat /sys/fs/cgroup/system.slice/display.service/memory.high /sys/fs/cgroup/system.slice/display.service/memory.max
+
+     **Expected:** two numbers of bytes, the first smaller (about 5 and 6
+     billion on an 8 GB Pi).
+     **If `No such file or directory`:** the kernel's memory controller is off,
+     so the bound is not enforced and the Player runs as it did before. The wall
+     is not harmed. Tell the owner.
+     **If anything else is not as expected:** → step 17, and keep the line the
+     first command printed, if any. It names what the sandbox refused.
+
 15. **On your Mac**, read how the server hears the Pi. `SERVER_URL` is the
     server's address, the same value as in the Pi's `.env`:
 
@@ -219,8 +284,19 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
 ## Going back
 
-Every step above can be undone. Nothing on the Pi migrates. (To go back from
-§ The first time, use F9 there.)
+Every step above can be undone, but the Player moves two of its files
+forward, and an older Player may refuse them. (To go back from § The first
+time, use F9 there.)
+
+- **The settings page's file, `$CACHE_DIR/.settings.json`, is layout version
+  2** once a Player from v0.8.0 on has saved anything to it. A Player that
+  writes version 1 refuses it by name (`.settings.json is layout version 2`)
+  and exits with status 2, and the unit starts it again every 5 s with every
+  wall dark. Step 19a puts the file back to version 1.
+- **Each Frame wall's store, `$CACHE_DIR/<wall id>/display-state.sqlite`, is
+  widened on open** to the schema the running Player knows. It has been at
+  schema 2 since 2026-08-06, so every revision a Pi has run reads it. A Player
+  older than that shows no art on that wall, saying `daemon.state_too_new`.
 
 17. **IF step 2's sections say the release goes back as a pair** (the server
     and the Player together): roll the server back first, using the homelab
@@ -232,9 +308,39 @@ Every step above can be undone. Nothing on the Pi migrates. (To go back from
 
         sudo -u tvpi git -C /opt/arrt-player checkout --detach <old>
 
+19a. Ask the old revision which settings layout it writes:
+
+         sudo -u tvpi git -C /opt/arrt-player show <old>:src/arrt_player/settings_ui/store.py | grep '^VERSION: Final'
+
+     **Expected:** `VERSION: Final[int] = 2` → step 20.
+     **If it prints `fatal: path …`:** the old revision has no settings
+     page and ignores the file → step 20.
+     **If `VERSION: Final[int] = 1`:** read the file's own layout:
+
+         sudo grep '^CACHE_DIR=' /opt/arrt-player/.env
+         sudo jq .version <that directory>/.settings.json
+
+     If it prints `2`, edit it as root:
+
+         sudoedit <that directory>/.settings.json
+
+     In `values`, delete the keys `PLAYER_MODE`, `SLIDESHOW_URL`,
+     `REDDIT_SESSION`, `SLIDESHOW_MIN_SECONDS`, `SLIDESHOW_MAX_SECONDS` and
+     `SLIDESHOW_OUTPUT`, and set `version` to `1`. Leave `auth` as it is.
+     Then check:
+
+         sudo jq -c '{version, values: (.values | keys)}' <that directory>/.settings.json
+
+     **Expected:** `"version":1`, and none of the six keys.
+     *Why the edit and not a delete: the file holds the page's password and
+     whatever it set, which `.env` does not.* If it printed `1`, or
+     `No such file`, there is nothing to do → step 20.
+
 20. Repeat steps 8–14, which put the old revision's environment and unit back
     and start it.
     **Expected:** step 14's two lines, from the old revision.
+    *A unit from before 2026-11-19 starts `uv run` without `--no-dev`, so its
+    first start installs the dev group again, from uv's cache or from PyPI.*
 
 ## If this doesn't work
 - The old revision won't start either → stop. The wall shows the text console

@@ -57,7 +57,15 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 
 from arrt_player import logs
-from arrt_player.client import FRAME_KIND, FrameIdentity, LabelAssignment, OutputReport, Supervisor, client_outputs
+from arrt_player.client import (
+    FRAME_KIND,
+    FrameIdentity,
+    LabelAssignment,
+    OutputReport,
+    Supervisor,
+    client_outputs,
+    wall_retired,
+)
 from arrt_player.config import (
     ARRT_MODE,
     PANEL_OUTPUT,
@@ -77,7 +85,7 @@ from arrt_player.config import (
 )
 from arrt_player.ddc import Ddc, DdcBus, I2cTransport, bus_for
 from arrt_player.displays.frame import frame_wall
-from arrt_player.displays.screen import ScreenOutput, screen_wall
+from arrt_player.displays.screen import ScreenOutput, go_dark, screen_wall
 from arrt_player.displays.screen_brightness import ScreenBrightness
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
@@ -254,11 +262,14 @@ async def run_label(
     clock: Clock | None = None,
 ) -> None:
     """The supervisor's label worker: one renderer on this client's panel, until stopped."""
+    # One clock for both: the pull stamps the server's last answer by `now`, and
+    # the renderer reads that stamp back against its own `now`.
+    clock = clock if clock is not None else Clock.system()
     renderer = LabelRenderer(
         assignment=assignment,
-        link=LabelPull(settings, assignment.label_id),
+        link=LabelPull(settings, assignment.label_id, now=clock.now, monotonic=clock.monotonic),
         panel=panel,
-        now=(clock if clock is not None else Clock.system()).now,
+        now=clock.now,
         poll_seconds=settings.label_poll_seconds,
     )
     await renderer.run(stop, retired)
@@ -269,7 +280,12 @@ async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Cloc
 
     The Frame draws no label: the panel is a label output of the client,
     mapped to a wall by the server and drawn by `run_label`.
+
+    **Called already stopped, it returns at once**: the supervisor's last call
+    for a wall taken away between restarts, and the Frame has nothing to leave.
     """
+    if stop.is_set():
+        return
     settings.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(settings.manifest_path)
     tv = frame_tv(settings)
@@ -279,7 +295,7 @@ async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Cloc
     # to the same question, and the store's is the one that has to survive a
     # restart.
     clock = clock if clock is not None else Clock.system()
-    # **A store from a newer plane parks this wall, and only this wall.** Opening
+    # **A store from a newer Player parks this wall, and only this wall.** Opening
     # it would guess at a shape this code does not know, and restarting cannot
     # change the answer — the fix is a rollout — so the worker says so once and
     # waits to be stopped, rather than crash-looping a traceback per backoff step
@@ -314,18 +330,34 @@ async def run_screen_wall(
     clock: Clock | None = None,
     brightness: ScreenBrightnessSettings | None = None,
 ) -> None:
-    """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped."""
+    """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped.
+
+    **Retired, it leaves the screen black** once the loop and the pull have
+    ended, so no draw of its own can land after the black, and the next wall on
+    the connector starts only once this worker has finished. Called already
+    stopped, which is the supervisor's last call for a wall taken away between
+    restarts, it does only that.
+    """
+    if stop.is_set():
+        if wall_retired(stop):
+            await go_dark(screen_output(wall, output), wall_id=wall.wall_id, output_name=output)
+        return
     wall.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(wall.manifest_path)
     clock = clock if clock is not None else Clock.system()
+    drawn_on = screen_output(wall, output)
     screen = screen_wall(
         wall=wall,
-        output=screen_output(wall, output),
+        output=drawn_on,
         watcher=watcher,
         clock=clock,
         brightness=screen_brightness(wall, output, brightness, clock),
     )
-    await _beside_its_pull(wall, stop, screen.run)
+    try:
+        await _beside_its_pull(wall, stop, screen.run)
+    finally:
+        if wall_retired(stop):
+            await go_dark(drawn_on, wall_id=wall.wall_id, output_name=output)
 
 
 def screen_ddc(output: str) -> DdcBus:
@@ -590,8 +622,9 @@ async def _run() -> int:
     try:
         await supervisor.run(stop)
     finally:
-        # After every renderer has stopped, so no draw is in flight. On e-paper
-        # this is the panel's power-down.
+        # After every renderer has stopped. A draw that ran past its budget is
+        # left running, so one may still be in the driver: `close` waits for it,
+        # for at most the label budget. On e-paper this is the panel's power-down.
         if panel is not None:
             panel.close()
         stop.set()
@@ -612,7 +645,7 @@ def main() -> int:
         # `.env`. A stack through `load()` points at this codebase, which is the
         # one place the problem is not.
         log.error("%s", exc, extra={"event": "daemon.misconfigured"})  # noqa: TRY400 -- the fix is in .env, not in a frame
-        print(f"display plane cannot start: {exc}", file=sys.stderr)  # noqa: T201 -- the operator is at a terminal
+        print(f"Arrt Player cannot start: {exc}", file=sys.stderr)  # noqa: T201 -- the operator is at a terminal
         return 2
 
 

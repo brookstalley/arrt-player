@@ -26,6 +26,11 @@ Three things the measurements decided:
 The kernel keeps scanning out through a cable being pulled and pushed back, and
 the picture came back by itself when it was; the output still draws again
 whenever a screen returns, because a different screen may be what came back.
+
+**A wall leaving its connector leaves it black** (`KmsOutput.blank`): a black
+frame through the same `present`, measured on the Pi for every picture, rather
+than the CRTC switched off, which was never measured here and may hand the
+connector back to the text console.
 """
 
 import ctypes
@@ -473,6 +478,28 @@ class KmsOutput:
             return
         if self._drawn != (self._render, report.screen):
             self._draw(self._render)
+
+    def blank(self) -> None:
+        """Put an all-black frame of the connector's mode on it, and forget the render.
+
+        **Whatever the connector was showing**, this output's picture or one an
+        earlier worker on it left, since the card outlives every worker. With no
+        screen there is nothing to draw on and the card is not opened: black
+        cannot be put on a connector the kernel will not drive, so a screen
+        unplugged when its wall left may show the old picture when it is plugged
+        back in, until another wall is drawn there.
+        """
+        self._render = None
+        self._drawn = None
+        report = self._report()
+        if not report.connected or report.screen is None:
+            return
+        try:
+            device = self._device_for(self._card())
+            size = device.mode(self._name)
+            device.present(self._name, size, bytes(size[0] * size[1] * 4))
+        except ScreenAbsent:
+            return
 
     def _draw(self, render: Path) -> None:
         report = self._report()

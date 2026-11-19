@@ -4,7 +4,7 @@
 the work is the hardest kind of dependency to build against, and this set is one
 in a state it spends most of its life in. This document records what was
 *observed* — which calls work, which are accepted and ignored, and which state
-each belongs to — so that the display plane's behaviour follows evidence rather
+each belongs to — so that the Player's behaviour follows evidence rather
 than the library's vocabulary.
 
 **Set under test:** `QN50LS03DAFXZA` / `24_PONTUSM_FTV`, a 2024 panel, wired,
@@ -60,7 +60,10 @@ a set showing a television channel. **It does not discriminate art mode** —
 >
 > **`PowerState` still says only whether the panel is lit.** It reads `on` for
 > art mode and for somebody watching a channel alike, so it distinguishes those
-> two from `standby` and nothing more. Gate on `get_artmode` or on nothing.
+> two from `standby` and nothing more. Gate a selection on `get_artmode`; a write
+> that was measured working in the dark state as well (upload, delete, slideshow,
+> brightness) is admitted when `get_artmode` says `off` only if `PowerState` says
+> `standby` (`tv/client.py:WRITES`, `TvClient._permit`).
 
 ## What works in each state
 
@@ -97,8 +100,8 @@ outer `d2d_service_message` that wraps them.
 
 Everything else a daemon does in a rotation succeeds in this state. So a rotation
 loop that trusts return values reports a moving wall, indefinitely, at a panel
-that is dark — and the one plane that would notice, the label renderer, would
-caption pictures nobody can see. This is why the display plane treats "the set
+that is dark — and the one part that would notice, the label renderer, would
+caption pictures nobody can see. This is why the Player treats "the set
 took it and displayed nothing" as its own outcome rather than as a failure to
 show one work.
 
@@ -119,8 +122,10 @@ a daily occurrence.
 selecting, by a deliberate decision that reading it "before every selection would
 cost one call on every rotation that is about to succeed" — a trade priced against
 a wasted call, with the cost on the other side unmeasured. Measured, it is a
-television that grabs itself back from its owner every few minutes. The plane now
-asks `get_artmode` before every selection and declines unless it says `on`; see
+television that grabs itself back from its owner every few minutes. The Player now
+asks `get_artmode` before every selection and declines unless it says `on`, and
+the television seam asks it again immediately before every write it sends, so a
+verb added later inherits the read (`tv/client.py:TvClient._permit`); see
 Arrt's `nonfunctional-requirements.md` § "The television belongs to whoever is using
 it".
 
@@ -465,7 +470,8 @@ output drives a separate LCD.
    reads the REST device description through the art client's own
    `_get_rest_api()` — one GET of `/api/v2/`, the read-only half of what
    `power_probe.py` samples, never a key — only straight after a `get_artmode`
-   read says `off`, to tell television (`on` → `in_use`) from dark (`standby` →
+   read says `off` (and, in `TvClient._permit`, before a write that dark state
+   would admit), to tell television (`on` → `in_use`) from dark (`standby` →
    `dark`). It is bounded at 2 s and its failure is reported as `in_use`. Its unit
    tests drive the library's real REST client over a recording session; whether
    this firmware answers it on the art client's port (8002, over TLS) as it does
@@ -473,3 +479,17 @@ output drives a separate LCD.
    `standby`); the reading while the set shows television is still unmeasured
    until the display-state build plan's on-the-wall chunk sees the set in use and
    off on Walls.
+7. **What the write gate rests on, which is not measured.** The Player sends an
+   upload, a deletion, a slideshow switch-off or a brightness change only when
+   the set is in art mode, or `get_artmode` says `off` and `PowerState` says
+   `standby`; it holds them in the television state, where the table above
+   records them as *not tried*, and whenever `PowerState` cannot be read.
+   Three things at the set would settle it, and none has been done:
+   - **Whether `PowerState` on port 8002 says `on` while a programme shows.**
+     This is the one that matters most: if it says `standby`, the gate admits
+     every write except selection during television.
+   - **Whether upload, delete, slideshow and brightness disturb a programme.**
+     If they do not, they need not be held there, and the wall would catch up
+     sooner on an evening of television.
+   - **Whether an upload already in flight when the set leaves art mode still
+     finishes.** The gate reads the set before a send, not during one.

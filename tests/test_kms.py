@@ -83,6 +83,8 @@ class FakeDevice:
     def __init__(self, modes: dict[str, tuple[int, int] | None]) -> None:
         self.modes = modes
         self.presented: list[tuple[str, tuple[int, int], int]] = []
+        #: The pixels of each picture put on a connector, beside `presented`.
+        self.frames: list[bytes] = []
         self.fails: Exception | None = None
 
     def mode(self, connector: str) -> tuple[int, int]:
@@ -97,6 +99,7 @@ class FakeDevice:
         if self.modes.get(connector) != size:
             raise ScreenAbsent(connector)
         self.presented.append((connector, size, len(pixels)))
+        self.frames.append(pixels)
 
 
 class Bench:
@@ -256,6 +259,55 @@ def test_listed_tells_a_connector_with_no_screen_from_one_the_kernel_does_not_li
 
     assert (bench.output.listed, bench.output.connected) == (True, False)
     assert (absent.listed, absent.connected) == (False, False)
+
+
+# -- going dark ----------------------------------------------------------------------------
+
+
+def test_blank_puts_an_all_black_frame_of_the_connectors_mode_on_it(tmp_path):
+    """Black through the same `present` a picture takes, at the mode the card drives,
+    which here differs from the size sysfs lists so the two cannot be confused."""
+    bench = Bench(tmp_path, size=(1280, 720))
+    bench.output.show(bench.render)
+    bench.device.modes["hdmi-a-1"] = (1024, 768)
+
+    bench.output.blank()
+
+    assert bench.device.presented[-1] == ("hdmi-a-1", (1024, 768), 1024 * 768 * 4)
+    assert bench.device.frames[-1] == bytes(1024 * 768 * 4), "the frame drawn on leaving is not black"
+    assert bench.opened[-1] == tmp_path / "dev" / "card1"
+
+
+def test_a_blanked_output_does_not_draw_its_last_picture_back(tmp_path):
+    bench = Bench(tmp_path, size=(1280, 720))
+    bench.output.show(bench.render)
+    bench.output.blank()
+
+    bench.unplug()
+    bench.output.refresh()
+    bench.plug((1280, 720))
+    bench.output.refresh()
+
+    assert len(bench.device.presented) == 2, "the picture came back after the screen was drawn black"
+
+
+def test_blank_with_no_screen_on_the_connector_draws_nothing_and_raises_nothing(tmp_path):
+    bench = Bench(tmp_path, status="disconnected", size=None)
+
+    bench.output.blank()
+    bench.device.modes["hdmi-a-1"] = None
+    KmsOutput("hdmi-a-3", drm_root=bench.root, device_for=bench._open).blank()
+
+    assert bench.device.presented == []
+    assert bench.opened == [], "a connector with no screen opened the card to draw black"
+
+
+def test_blank_on_a_card_that_refuses_raises(tmp_path):
+    bench = Bench(tmp_path)
+    bench.device.fails = PermissionError(13, "Permission denied")
+
+    with pytest.raises(PermissionError):
+        bench.output.blank()
 
 
 def test_a_wall_on_an_hdmi_connector_draws_through_kernel_mode_setting(client_settings):

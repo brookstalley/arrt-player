@@ -8,6 +8,7 @@ then a picture.
 """
 
 import asyncio
+import errno
 import json
 import threading
 from collections.abc import Sequence
@@ -17,9 +18,12 @@ from pathlib import Path
 import pytest
 from arrt_contract import root
 from conftest import WALL_ID, a_master
+from PIL import Image
 
+from arrt_player import compose as compose_module
 from arrt_player.compose import Geometry, Uncomposable, compose, composition_key
 from arrt_player.manifest import Feed, parse
+from arrt_player.programmes import schedule as schedule_module
 from arrt_player.programmes.schedule import COMPOSE_RETRY_SECONDS, RETRY_SECONDS, InMemory, Schedule, what_to_show
 from arrt_player.wall import DisplayRecord, Picture, Shown
 
@@ -465,6 +469,129 @@ async def test_a_new_feed_lets_an_undecodable_master_be_tried_again(media_root, 
     assert len(attempts) == 2
 
 
+async def test_a_composed_picture_that_is_empty_is_composed_again(schedule, display, media_root):
+    """Power lost after the rename leaves a zero-length file under the work's final name, which nothing else replaces."""
+    cache(media_root, "w1")
+    schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")])))
+    damaged = composed(media_root, "w1")
+    damaged.parent.mkdir()
+    damaged.write_bytes(b"")
+
+    await step(schedule, display)
+
+    assert display.shown() == ["w1"]
+    assert damaged.stat().st_size > 0
+    with Image.open(damaged) as picture:
+        picture.load()
+        assert picture.size == GEOMETRY.screen
+
+
+async def test_a_composed_picture_cut_short_is_composed_again_and_said_once(schedule, display, media_root, clock, caplog):
+    cache(media_root, "w1")
+    schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")])))
+    path = composed(media_root, "w1")
+    whole = compose(
+        media_root / "media" / f"sha256-{_sha('w1')}",
+        master_sha256=_sha("w1"),
+        mat_color="#222222",
+        mode="proportional",
+        geometry=GEOMETRY,
+        directory=media_root / "composed",
+    ).read_bytes()
+    path.write_bytes(whole[: len(whole) // 2] + bytes(len(whole) - len(whole) // 2))
+
+    for _ in range(3):
+        clock.advance(1.3)
+        await step(schedule, display)
+
+    assert path.read_bytes() == whole
+    assert [record.__dict__.get("event") for record in caplog.records].count("schedule.composed_damaged") == 1
+
+
+async def test_a_whole_composed_picture_is_read_once_not_on_every_pass(media_root, memory, clock, display, monkeypatch):
+    reads: list[Path] = []
+    real = schedule_module.is_intact
+
+    def counting(path: Path) -> bool:
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(schedule_module, "is_intact", counting)
+    schedule = a_schedule(media_root, memory, clock)
+    cache(media_root, "w1", "w2")
+    schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")], staging=["w2"])))
+    await step(schedule, display)
+
+    for _ in range(5):
+        clock.advance(1.3)
+        await step(schedule, display)
+
+    assert sorted(set(reads)) == sorted({composed(media_root, "w1"), composed(media_root, "w2")})
+    assert len(reads) == len(set(reads)), "a picture found whole was read again on a later pass"
+
+
+async def test_a_composed_picture_rewritten_under_its_name_is_read_again(media_root, memory, clock, display):
+    """Once per file stamp: damage that arrives after the first look is still found."""
+    schedule = a_schedule(media_root, memory, clock)
+    cache(media_root, "w1")
+    schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")])))
+    await step(schedule, display)
+    path = composed(media_root, "w1")
+    path.write_bytes(b"")
+
+    await step(schedule, display)
+
+    assert path.stat().st_size > 0
+
+
+async def test_a_master_whose_read_failed_once_is_composed_after_the_wait(
+    media_root, memory, clock, display, monkeypatch, caplog
+):
+    """EIO is the disk's fault this once; the work is not lost for the life of the feed."""
+    real_open = compose_module.Image.open
+    failures = [OSError(errno.EIO, "Input/output error")]
+
+    def flaky(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(compose_module.Image, "open", flaky)
+    schedule = a_schedule(media_root, memory, clock)
+    cache(media_root, "w1")
+    schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")])))
+
+    await step(schedule, display)
+    assert display.shown() == []
+    clock.advance(COMPOSE_RETRY_SECONDS - 0.7)
+    await step(schedule, display)
+    assert display.shown() == [], "a failed read was retried before its wait"
+
+    clock.advance(1.3)
+    await step(schedule, display)
+
+    assert display.shown() == ["w1"]
+    assert [record.__dict__.get("event") for record in caplog.records].count("schedule.compose_read_failed") == 1
+
+
+async def test_a_master_that_is_not_an_image_is_still_refused_after_the_wait(media_root, memory, clock, display):
+    attempts: list[int] = []
+
+    def counting(*args, **kwargs):
+        attempts.append(1)
+        return compose(*args, **kwargs)
+
+    schedule = a_schedule(media_root, memory, clock, composer=counting)
+    (media_root / "media" / f"sha256-{_sha('w1')}").write_bytes(b"not a picture")
+    schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")])))
+    await step(schedule, display)
+
+    clock.advance(COMPOSE_RETRY_SECONDS * 3)
+    await step(schedule, display)
+
+    assert (len(attempts), display.asked) == (1, []), "the same bytes were decoded again after the wait"
+
+
 async def test_pictures_no_work_composes_to_are_removed_and_so_is_a_half_written_one(schedule, display, media_root):
     cache(media_root, "w1", "w2")
     schedule.adopt(_feed(feed_document(slots=[("w1", "08:00", "13:00")], staging=["w2"])))
@@ -476,6 +603,24 @@ async def test_pictures_no_work_composes_to_are_removed_and_so_is_a_half_written
     await step(schedule, display)
 
     assert sorted(path.name for path in (media_root / "composed").iterdir()) == [composed(media_root, "w1").name]
+
+
+async def test_what_is_remembered_as_whole_does_not_outgrow_a_rotation_of_works(media_root, memory, clock, display):
+    """A picture found whole is remembered so it is not read again; one the tidy
+    removed is not, or the memory gains an entry for every work the wall has ever
+    composed, for the life of the process."""
+    schedule = a_schedule(media_root, memory, clock)
+    for round_ in range(4):
+        works = [f"r{round_}w{n}" for n in range(3)]
+        cache(media_root, *works)
+        schedule.adopt(_feed(feed_document(slots=[(works[0], "08:00", "13:00")], staging=works[1:])))
+        await step(schedule, display)
+        await step(schedule, display)
+
+    remembered = set(schedule._verified)
+    on_disk = set((media_root / "composed").iterdir())
+    assert remembered == on_disk, f"{len(remembered - on_disk)} removed picture(s) are still remembered as whole"
+    assert len(remembered) == 3
 
 
 async def test_with_no_screen_nothing_is_composed_or_shown(media_root, memory, clock, display):

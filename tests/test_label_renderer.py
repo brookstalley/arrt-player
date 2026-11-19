@@ -41,7 +41,7 @@ from arrt_player.client import LabelAssignment
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.label_rule import HOLD, parse_label_document
 from arrt_player.panel import TypeScale
-from arrt_player.pull import LabelAnswer, LabelPull
+from arrt_player.pull import CachedLabel, LabelAnswer, LabelPull
 
 LABEL_ID = "label-hall-panel"
 WALL = "w-living"
@@ -79,9 +79,17 @@ class FakeLink:
         self.reachable = True
         self.fetches = 0
         self.closed = 0
+        #: What the link cached before this renderer started; None for nothing.
+        self.stored: CachedLabel | None = None
 
     def serve(self, document: dict) -> None:
         self.pending = document
+
+    def store(self, document: dict, answered_at) -> None:
+        self.stored = CachedLabel(document=parse_label_document(json.dumps(document)), answered_at=answered_at)
+
+    def cached(self) -> CachedLabel | None:
+        return self.stored
 
     async def fetch(self) -> LabelAnswer:
         self.fetches += 1
@@ -128,7 +136,14 @@ def panel(surface) -> LabelPanel:
 
 
 def renderer_for(panel: LabelPanel, link, clock) -> LabelRenderer:
-    return LabelRenderer(assignment=ASSIGNMENT, link=link, panel=panel, now=clock.as_clock().now, poll_seconds=1.0)
+    return LabelRenderer(
+        assignment=ASSIGNMENT,
+        link=link,
+        panel=panel,
+        now=clock.as_clock().now,
+        monotonic=clock.as_clock().monotonic,
+        poll_seconds=1.0,
+    )
 
 
 @pytest.fixture
@@ -190,7 +205,7 @@ class TestTheLabelFollowsTheWall:
     async def test_an_unchanged_document_is_drawn_once(self, renderer, link, surface, clock):
         """A redraw flashes the panel: polls that bring nothing new draw nothing.
 
-        Once moved from "this plane's own selection is not drawn twice" — the set
+        Once moved from "the Player's own selection is not drawn twice" — the set
         echoed every selection back, and the rule that redrew on the echo flashed
         the panel twice per rotation. The echo is now a 304.
         """
@@ -324,6 +339,36 @@ class TestTheServerGoneAway:
         assert surface.last_text == []
         assert len(surface.shown) == 2, "the blank was drawn more than once"
 
+    async def test_a_wall_clock_that_jumps_forward_does_not_blank_a_hold_that_is_a_minute_old(
+        self, renderer, link, surface, clock
+    ):
+        """**The hold is an interval, so it is the monotonic clock's.** An NTP
+        correction on a Pi that came up believing it was 1970 steps the wall clock
+        by hours; 31 minutes of it is one minute of the hold."""
+        await show(renderer, link, a_document())
+        link.reachable = False
+
+        clock.advance(61.3)
+        clock.move_to(clock.as_clock().now() + timedelta(minutes=31, seconds=7.3))
+        await renderer.tick()
+        await renderer.tick()
+
+        assert surface.last_text[:1] == ["Ruscha, Ed"], "the wall clock's step blanked a hold that was a minute old"
+        assert len(surface.shown) == 1
+
+    async def test_a_wall_clock_that_steps_back_does_not_extend_the_hold(self, renderer, link, surface, clock):
+        """The other direction: 31 minutes passed, whatever the wall clock says."""
+        await show(renderer, link, a_document())
+        link.reachable = False
+
+        clock.advance(HOLD.total_seconds() + 61.7)
+        clock.move_to(clock.as_clock().now() - timedelta(hours=2, seconds=13.1))
+        await renderer.tick()
+        await renderer.tick()
+
+        assert surface.last_text == [], "a wall clock stepped back held the caption past thirty minutes"
+        assert len(surface.shown) == 2, "the blank was drawn more than once"
+
     async def test_a_server_that_comes_back_brings_the_caption_back(self, renderer, link, surface, clock):
         await show(renderer, link, a_document())
         link.reachable = False
@@ -354,6 +399,124 @@ class TestTheServerGoneAway:
         assert surface.last_text == []
 
 
+class TestARestartedRenderer:
+    """A renderer started while the server is away captions from its link's cache, for what is left of the hold.
+
+    **The hold runs from the server's last answer before the restart**, by the
+    wall clock, because a monotonic reading does not survive one; and never for
+    more than the hold from the restart, by the monotonic clock.
+    """
+
+    @pytest.fixture
+    def away(self, link):
+        link.reachable = False
+        return link
+
+    async def test_a_cached_caption_is_drawn_on_the_first_tick(self, renderer, away, surface, clock):
+        away.store(a_document(), clock.as_clock().now() - timedelta(minutes=4, seconds=13.1))
+
+        await renderer.tick()
+
+        assert surface.last_text[:2] == ["Ruscha, Ed", "Cat Litter"], "a restart during an outage blanked the label"
+
+    async def test_the_hold_runs_from_the_last_answer_before_the_restart_not_from_the_restart(
+        self, renderer, away, surface, clock
+    ):
+        """A caption already held for most of the hold keeps only what is left of it."""
+        away.store(a_document(), clock.as_clock().now() - (HOLD - timedelta(seconds=61.3)))
+
+        await renderer.tick()
+        assert surface.last_text[:1] == ["Ruscha, Ed"]
+        clock.advance(60.1)
+        await renderer.tick()
+        assert surface.last_text[:1] == ["Ruscha, Ed"], "the caption went before the hold was up"
+
+        clock.advance(2.3)
+        await renderer.tick()
+        await renderer.tick()
+
+        assert surface.last_text == [], "a restart lengthened the hold"
+        assert len(surface.shown) == 2, "the blank was drawn more than once"
+
+    async def test_no_hold_runs_past_thirty_minutes_from_the_restart_whatever_the_wall_clock_says(
+        self, renderer, away, surface, clock
+    ):
+        """A last answer stamped by a clock that was ahead: the restart bounds the hold."""
+        start = clock.as_clock().now()
+        away.store(a_document(), start + timedelta(minutes=5, seconds=7.9))
+        await renderer.tick()
+        clock.advance(10 * 60 + 3.7)
+        await renderer.tick()
+        assert surface.last_text[:1] == ["Ruscha, Ed"]
+
+        clock.advance(HOLD.total_seconds() - 10 * 60 - 3.7 + 1.3)
+        await renderer.tick()
+
+        assert surface.last_text == [], "the hold ran past thirty minutes from the restart"
+
+    async def test_a_last_answer_the_wall_clock_puts_in_the_future_holds_nothing(self, renderer, away, surface, clock):
+        away.store(a_document(), clock.as_clock().now() + timedelta(seconds=47.3))
+
+        await renderer.tick()
+
+        assert surface.last_text == [], "a caption was held from an answer the clock cannot place"
+
+    @pytest.mark.parametrize("state", ["in_use", "dark", "no_screen", "unassigned"])
+    async def test_a_cached_document_that_draws_no_caption_stays_uncaptioned(self, renderer, away, surface, clock, state):
+        """The label text rides along, so only the rule keeps it off the panel."""
+        away.store(a_document(state, work_id=None, label=CAT_LITTER), clock.as_clock().now() - timedelta(seconds=9.7))
+
+        await renderer.tick()
+
+        assert surface.last_text == [], f"a cached {state} document was captioned"
+
+    async def test_a_cached_held_state_is_bounded_by_the_last_answer_not_its_own_since(self, renderer, away, surface, clock):
+        """A wall the server last called silent a minute before: its own since is later than the answer's bound."""
+        now = clock.as_clock().now()
+        away.store(
+            a_document("silent", work_id=None, label=CAT_LITTER, since=(now - timedelta(seconds=63.1)).isoformat()),
+            now - (HOLD - timedelta(seconds=10.3)),
+        )
+        await renderer.tick()
+        assert surface.last_text[:1] == ["Ruscha, Ed"]
+
+        clock.advance(11.9)
+        await renderer.tick()
+
+        assert surface.last_text == [], "a held state's own since ran the hold past the last answer's"
+
+    async def test_a_document_cached_for_another_wall_is_not_used(self, renderer, away, surface, clock):
+        away.store({**a_document(), "wall_id": "w-kitchen"}, clock.as_clock().now() - timedelta(seconds=9.7))
+
+        await renderer.tick()
+
+        assert surface.last_text == [], "the label captioned a wall it no longer captions"
+
+    async def test_a_server_that_answers_with_no_document_retires_the_cached_one(self, renderer, link, surface, clock):
+        """A refusal after a restart: the cache stood in for an unreachable server, and the server is reachable."""
+        link.store(a_document(), clock.as_clock().now() - timedelta(seconds=9.7))
+        link.reachable = False
+        await renderer.tick()
+        assert surface.last_text[:1] == ["Ruscha, Ed"]
+
+        link.reachable = True
+        clock.advance(1.3)
+        await renderer.tick()
+        assert surface.last_text == [], "a cached caption outlived the server's answer"
+
+        link.reachable = False
+        clock.advance(1.9)
+        await renderer.tick()
+        assert surface.last_text == [], "the cached caption came back when the server went away again"
+
+    async def test_a_new_document_replaces_the_cached_one(self, renderer, link, surface, clock):
+        link.store(a_document(), clock.as_clock().now() - timedelta(seconds=9.7))
+
+        await show(renderer, link, a_document(label=SILVER_SUN, work_id="work-b"))
+
+        assert surface.last_text == ["Silver Sun"]
+
+
 class TestThroughTheRealRoute:
     """The renderer with `pull.LabelPull` against the server double, on the contract's route."""
 
@@ -369,8 +532,48 @@ class TestThroughTheRealRoute:
 
     @pytest.fixture
     def pulled(self, server, client_settings, panel, clock):
-        link = LabelPull(replace(client_settings, server_url=server.url), LABEL_ID)
+        link = self._link(server, client_settings, clock)
         return link, renderer_for(panel, link, clock)
+
+    @staticmethod
+    def _link(server, client_settings, clock) -> LabelPull:
+        return LabelPull(
+            replace(client_settings, server_url=server.url),
+            LABEL_ID,
+            now=clock.as_clock().now,
+            monotonic=clock.as_clock().monotonic,
+        )
+
+    async def test_a_renderer_restarted_while_the_server_is_away_captions_from_the_cache(
+        self, server, pulled, client_settings, panel, surface, clock
+    ):
+        """The plan's case: a new link and renderer, a server gone, a document cached by the last ones."""
+        server.map_label(LABEL_ID, "epd-0", WALL, a_document())
+        link, renderer = pulled
+        try:
+            await renderer.tick()
+            clock.advance(3 * 60 + 1.1)
+            await renderer.tick()  # a 304, which stamps the cached document as answered now
+        finally:
+            await link.close()
+        await server.test_server.close()
+
+        clock.advance(4.7)
+        surface.shown.clear()
+        restarted_link = self._link(server, client_settings, clock)
+        restarted = renderer_for(panel, restarted_link, clock)
+        try:
+            await restarted.tick()
+            assert surface.last_text[:1] == ["Ruscha, Ed"], "a restart during an outage blanked the label"
+            clock.advance(HOLD.total_seconds() - 4.7 - 1.3)
+            await restarted.tick()
+            assert surface.last_text[:1] == ["Ruscha, Ed"], "the hold after the restart was not run from the 304"
+            clock.advance(2.9)
+            await restarted.tick()
+        finally:
+            await restarted_link.close()
+
+        assert surface.last_text == [], "the hold after the restart ran past thirty minutes from the last answer"
 
     async def test_an_unchanged_document_is_asked_for_with_its_etag(self, server, pulled, surface, clock):
         server.map_label(LABEL_ID, "epd-0", WALL, a_document())
@@ -693,6 +896,74 @@ class TestRunningAndStopping:
         panel.close()
 
         assert surface.closed == 1
+
+
+class _RecordsWhenItWasClosed(FakeSurface):
+    """A surface that notes whether a draw was inside it when `close` arrived."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_inside_a_draw: list[bool] = []
+
+    def close(self) -> None:
+        self.closed_inside_a_draw.append(self.entered.is_set() and not self.left.is_set())
+        super().close()
+
+
+class TestClosingThePanelUnderADraw:
+    """**`close` is the e-paper power-down**, and a draw past its budget is left running on purpose."""
+
+    async def test_a_draw_past_the_budget_is_not_closed_under(self, link, clock, caplog, monkeypatch):
+        monkeypatch.setattr(renderer_module, "LABEL_DRAW_BUDGET_SECONDS", 0.05)
+        surface = _RecordsWhenItWasClosed()
+        surface.blocks = True
+        panel = panel_on(surface)
+        try:
+            link.serve(a_document())
+            await asyncio.wait_for(renderer_for(panel, link, clock).tick(), timeout=10)
+            assert surface.entered.is_set()
+            assert not surface.left.is_set(), "the draw came back, so this is not the in-flight case"
+
+            with caplog.at_level("WARNING"):
+                panel.close()
+                panel.close()
+
+            assert surface.closed == 0, "the panel was powered down under a draw still in the driver"
+            left_open = [r for r in caplog.records if getattr(r, "event", None) == "label.close_abandoned"]
+            assert len(left_open) == 1, "leaving the panel was not said exactly once"
+        finally:
+            surface.release.set()
+            assert await _comes_back(surface.left), "the draw thread never came back"
+
+    async def test_a_draw_inside_the_budget_is_waited_for_and_then_the_panel_is_closed(self, link, clock, monkeypatch):
+        monkeypatch.setattr(renderer_module, "LABEL_DRAW_BUDGET_SECONDS", 5.0)
+        surface = _RecordsWhenItWasClosed()
+        surface.draw_takes_seconds = 0.3
+        panel = panel_on(surface)
+        link.serve(a_document())
+        ticking = asyncio.create_task(renderer_for(panel, link, clock).tick())
+        assert await _comes_back(surface.entered), "the draw never began"
+
+        await asyncio.to_thread(panel.close)
+        await ticking
+
+        assert surface.left.is_set(), "close returned with the draw still in the driver"
+        assert surface.closed_inside_a_draw == [False]
+        assert len(surface.shown) == 1, "the draw close waited for was lost"
+
+    async def test_a_draw_queued_behind_the_close_puts_nothing_on_a_closed_panel(self, link, clock):
+        surface = _RecordsWhenItWasClosed()
+        panel = panel_on(surface)
+        panel.close()
+
+        link.serve(a_document())
+        await asyncio.wait_for(renderer_for(panel, link, clock).tick(), timeout=10)
+
+        assert surface.draws_begun == 0, "a draw reached the driver after the panel was powered down"
+        assert surface.closed == 1
+
+    def test_closing_a_panel_that_never_opened_is_nothing(self):
+        panel_on(None, error="no such device").close()
 
 
 class TestThePanelAsALabelOutput:

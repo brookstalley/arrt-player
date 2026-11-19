@@ -20,7 +20,7 @@ import pathlib
 import re
 
 import pytest
-from workflow_scan import PYTEST_INVOCATION
+from workflow_scan import PYTEST_INVOCATION, unlocked_uv_calls, unpinned_actions, unpinned_setup_uv
 
 PROJECT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = PROJECT / ".github" / "workflows" / "suites.yml"
@@ -142,3 +142,135 @@ def test_every_directory_the_default_leg_ignores_is_run_by_another_job():
         f"the default leg ignores {sorted(unrun)} and no other job in suites.yml runs it, so those "
         "tests do not execute in CI at all — which is indistinguishable from their passing"
     )
+
+
+# --- The workflow is pinned: what runs in CI is named, not whatever is newest today. ---
+#
+# A floating action tag, an unpinned uv and a lockfile `uv run` may rewrite are the
+# same fault three times: CI's verdict depends on something that moved while nobody
+# looked, so a green run and a red one can differ by nothing in this repository.
+
+_WORKFLOW_TEXT = WORKFLOW.read_text(encoding="utf-8")
+
+_PINNED_CHECKOUT = "      - uses: actions/checkout@" + "a" * 40 + "  # v4\n"
+_PINNED_UV = (
+    "      - uses: astral-sh/setup-uv@" + "b" * 40 + "  # v5\n"
+    "        with:\n"
+    '          version: "0.11.32"\n'
+    '          python-version: "3.13.5"\n'
+)
+
+
+def test_the_workflow_uses_actions_the_scans_below_can_see():
+    """The scans are over `uses:` lines and a setup-uv step; a workflow with none would pass them all."""
+    found = [line for line in _WORKFLOW_TEXT.splitlines() if re.match(r"\s*-?\s*uses:", line)]
+    assert len(found) >= 6, f"expected checkout and setup-uv in each of three jobs, found {found}"
+    assert sum("setup-uv" in line for line in found) >= 3
+
+
+def test_every_action_is_pinned_to_a_commit_with_its_tag_in_a_comment():
+    problems = unpinned_actions(_WORKFLOW_TEXT)
+    assert problems == [], "\n".join(problems)
+
+
+def test_every_setup_uv_names_its_uv_and_its_python():
+    problems = unpinned_setup_uv(_WORKFLOW_TEXT)
+    assert problems == [], "\n".join(problems)
+
+
+def test_every_uv_run_and_sync_in_the_workflow_is_locked():
+    problems = unlocked_uv_calls(_WORKFLOW_TEXT)
+    assert problems == [], "\n".join(problems)
+
+
+@pytest.mark.parametrize(
+    ("line", "complaint"),
+    [
+        ("      - uses: actions/checkout@v4\n", "not pinned to a 40-hex commit"),
+        ("      - uses: actions/checkout@" + "a" * 39 + "\n", "not pinned to a 40-hex commit"),
+        ("      - uses: actions/checkout@" + "A" * 40 + "  # v4\n", "not pinned to a 40-hex commit"),
+        ("      - uses: actions/checkout@main\n", "not pinned to a 40-hex commit"),
+        ("      - uses: actions/checkout@" + "a" * 40 + "\n", "names no tag"),
+    ],
+)
+def test_an_action_not_pinned_by_commit_with_its_tag_is_rejected(line, complaint):
+    problems = unpinned_actions("    steps:\n" + line)
+    assert len(problems) == 1
+    assert complaint in problems[0]
+
+
+def test_a_pinned_action_and_a_comment_that_only_mentions_one_are_accepted():
+    """A comment saying `uses: x@v4` in prose is not a step, and the pinned form is not rejected."""
+    text = "      # uses: actions/checkout@v4 was here\n" + _PINNED_CHECKOUT + "      - uses: ./.github/actions/local\n"
+    assert unpinned_actions(text) == []
+
+
+@pytest.mark.parametrize(
+    ("step", "key"),
+    [
+        ("      - uses: astral-sh/setup-uv@" + "b" * 40 + "  # v5\n        with:\n          enable-cache: true\n", "version"),
+        (
+            "      - uses: astral-sh/setup-uv@" + "b" * 40 + "  # v5\n        with:\n          version: latest\n"
+            '          python-version: "3.13.5"\n',
+            "version",
+        ),
+        (
+            "      - uses: astral-sh/setup-uv@" + "b" * 40 + "  # v5\n        with:\n          version: 0.11.32\n",
+            "python-version",
+        ),
+        (
+            "      - uses: astral-sh/setup-uv@" + "b" * 40 + "  # v5\n        with:\n          version: 0.11.32\n"
+            '          python-version: "3.13"\n',
+            "python-version",
+        ),
+    ],
+)
+def test_a_setup_uv_without_an_exact_version_is_rejected(step, key):
+    problems = unpinned_setup_uv("    steps:\n" + step + "      - run: true\n")
+    assert any(f"`{key}:`" in problem for problem in problems), problems
+
+
+def test_a_setup_uv_that_names_both_versions_is_accepted_even_beside_another_step():
+    text = "    steps:\n" + _PINNED_CHECKOUT + _PINNED_UV + "      - name: next\n        run: uv run --locked pytest\n"
+    assert unpinned_setup_uv(text) == []
+
+
+def test_a_setup_uv_that_is_not_its_steps_first_key_is_still_read():
+    """`name:` before `uses:` puts the step's dash two columns left of `uses:`; the body must still end at the next step."""
+    text = (
+        "    steps:\n      - name: uv\n        uses: astral-sh/setup-uv@"
+        + "b" * 40
+        + "  # v5\n        with:\n          version: 0.11.32\n          python-version: 3.13.5\n"
+        + "      - name: elsewhere\n        with:\n          version: 9.9.9\n          python-version: 9.9.9\n"
+    )
+    assert unpinned_setup_uv(text) == []
+    assert unpinned_setup_uv(text.replace("          version: 0.11.32\n", "")) != []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "        run: uv sync\n",
+        "        run: uv run pytest tests\n",
+        "        run: uv run --group raster pytest tests/raster\n",
+        "        run: |\n          uv run --locked ruff check .\n          uv run black --check .\n",
+        "        run: uv run \\\n          pytest tests\n",
+    ],
+)
+def test_a_uv_run_or_sync_without_locked_is_rejected(line):
+    assert unlocked_uv_calls(line) != []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "        run: uv sync --locked\n",
+        "        run: uv run --locked pytest tests\n",
+        "        run: uv run --group raster --locked pytest tests/raster\n",
+        "        run: uv run \\\n          --locked pytest tests\n",
+        "        # run: uv sync, said in a comment\n",
+        "        run: python3 .github/scripts/assert_tests_ran.py results.xml\n",
+    ],
+)
+def test_a_locked_uv_call_and_a_comment_that_only_mentions_one_are_accepted(line):
+    assert unlocked_uv_calls(line) == []
