@@ -622,8 +622,9 @@ async def _run() -> int:
     try:
         await supervisor.run(stop)
     finally:
-        # After every renderer has stopped, so no draw is in flight. On e-paper
-        # this is the panel's power-down.
+        # After every renderer has stopped. A draw that ran past its budget is
+        # left running, so one may still be in the driver: `close` waits for it,
+        # for at most the label budget. On e-paper this is the panel's power-down.
         if panel is not None:
             panel.close()
         stop.set()

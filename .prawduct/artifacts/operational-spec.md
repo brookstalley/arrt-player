@@ -198,7 +198,7 @@ do not. The runbook's § If this doesn't work covers a release that will not sta
 | Label blank or stale, wall fine | `panel.unavailable` at start, `label.failed` later | The message names the cause: unstated viewing conditions, missing text stack (`uv sync --frozen --no-dev --group raster --group epaper`), or a panel that will not open. The walls are unaffected by design |
 | Art channel refused for minutes | `tv.unavailable` repeating | Wait. The set holds abandoned clients for minutes (`samsung-tv-state-findings.md` § The art channel can refuse to open). Do not SIGKILL or restart in a loop, which makes it worse |
 | Pairing prompt on the television | The token file | The token file was empty or lost. Accept the prompt at the set |
-| HDMI wall shows the text console | `systemctl is-active display.service` | Expected while the Player is stopped (`deploy/README.md` § The Player as a client of the NAS). `screen.absent` while running means no screen seen on the connector (`hdmi-output-findings.md`) |
+| HDMI wall shows the text console | `systemctl is-active display.service` | Expected while the Player is stopped (`deploy/README.md` § The Player as a client of the NAS). A wall the server took off the connector leaves it black, not on the console (`screen.blanked`). `screen.absent` while running means no screen seen on the connector (`hdmi-output-findings.md`) |
 
 **Stopping it.** `sudo systemctl stop display.service`, which sends SIGTERM and
 waits up to 90 s. Never SIGKILL: the set holds the abandoned art channel for

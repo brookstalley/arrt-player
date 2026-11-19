@@ -622,7 +622,7 @@ Slideshow mode draws through mpv (`mpv.py`; why, and the options, in
 
 ## The abandoned IT8951 checkout — do not resurrect
 
-`/home/tvpi/source/IT8951` on the card was a local checkout at upstream
+`/home/<user>/source/IT8951` on the card was a local checkout at upstream
 `9f13613` with **uncommitted** modifications to `spi.pyx` (41 lines) and
 `constants.py` (90 lines). It was never what ran in production: the project
 venv's `direct_url.json` shows `IT8951-1.0.0` was pip-installed from
@@ -670,7 +670,7 @@ over SSH:
   `gpio`). ~~There is no `tvpi` user on the rebuilt card at all~~ — **resolved
   2026-08-11 at the cutover**: `tvpi` was created (uid 102, `--system`, `nologin`,
   groups `spi` and `gpio`, home `/var/lib/tvpi` for tool state), and the
-  `/home/tvpi/` paths both units named were retired to `/srv/art` and
+  `/home/<user>/` paths both units named were retired to `/srv/art` and
   `/opt/samsung-frame-art-loader` rather than created. See Arrt's `operational-spec.md`
   § The Service Account and `deploy/README.md` § The cutover.
 - ~~**The art tree is effectively empty.**~~ **Restored, and then moved.** It was

@@ -328,10 +328,15 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   `SERVER_URL` is logged at start (`ClientSettings.startup_lines`), so
   credentials written into it as userinfo would be logged too. The TV token: see
   Authentication.
-- **The repository is public.** No addresses, hostnames or usernames in tracked
-  files (`tests/test_repository.py::test_no_source_file_carries_a_deployment_value`,
+- **The repository is public.** No addresses, hostnames or usernames in any file
+  the repository can commit, documents, `deploy/` and `.prawduct/` included
+  (`tests/test_repository.py::test_no_source_file_carries_a_deployment_value`,
+  `::test_no_file_in_the_working_tree_carries_a_deployment_value`,
   `::test_no_tracked_file_carries_this_machines_deployment_values`, which match
-  shapes, not values).
+  shapes, not values): private, CGNAT, link-local and unique-local addresses,
+  home-directory paths, `.local` and `.lan` names beyond the three the product's
+  own examples use, and `user@host` logins. A hit that is recorded rather than fixed
+  is listed with its reason in the test's `_ACCEPTED_RESIDUE`.
 - **Retention.** The journal is volatile and bounded
   (`deploy/journald.conf.d/10-bound-the-journal.conf`). The cache keeps a retired
   wall's directory indefinitely (`data-model.md` § The cache).
