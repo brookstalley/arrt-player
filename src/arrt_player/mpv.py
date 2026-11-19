@@ -34,6 +34,11 @@ drives one connector.
 `media_root` before it is sent, so mpv can never become a second network client
 (`tests/test_plane_isolation.py` guards the Player's network code).
 
+**mpv is handed none of the Player's secrets.** It decodes files that strangers
+posted, so a decoder bug runs as mpv; the unit loads `.env` into the Player's
+environment, client token and Reddit cookie included. mpv starts with only the
+variables in `MPV_ENVIRONMENT`.
+
 **Blocking, like every `displays.screen.ScreenOutput`.** Each call waits on mpv
 with a timeout and is meant for a worker thread; a lock keeps two threads from
 interleaving commands on the one socket.
@@ -50,7 +55,7 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Self
@@ -108,6 +113,28 @@ RESTART_BACKOFF_SECONDS: Final[tuple[float, ...]] = (1.0, 2.0, 4.0, 8.0, 16.0, 3
 #: The longest socket path every platform the suite runs on accepts: macOS
 #: allows 104 bytes in `sun_path` and Linux 108, with the terminating zero.
 MAX_SOCKET_PATH: Final[int] = 103
+
+
+#: The only variables mpv is started with, each taken from the Player's own
+#: environment when it is set there. An allowlist, because the Player's
+#: environment is the unit's `.env`, and a new secret added there must not reach
+#: mpv because nobody remembered to deny it.
+#:
+#: * `PATH`: given an environment, `Popen` looks for the command on that
+#:   environment's `PATH`, not the Player's.
+#: * `HOME` and `XDG_CACHE_HOME`: where mpv and Mesa keep their caches (under
+#:   systemd, `HOME` is the account's, `/var/lib/tvpi`).
+#: * `LANG` and `LC_ALL`: the locale the Player runs in, which mpv's libraries
+#:   read as the Player's do.
+#:
+#: Under the unit, what this drops is systemd's own bookkeeping (`INVOCATION_ID`,
+#: `JOURNAL_STREAM`; mpv's output goes nowhere), uv's (`VIRTUAL_ENV`), and `.env`.
+MPV_ENVIRONMENT: Final[tuple[str, ...]] = ("PATH", "HOME", "XDG_CACHE_HOME", "LANG", "LC_ALL")
+
+
+def mpv_environment(source: Mapping[str, str], names: Collection[str] = MPV_ENVIRONMENT) -> dict[str, str]:
+    """The environment mpv is started with: `source`'s values for `names`, and nothing else."""
+    return {name: source[name] for name in names if name in source}
 
 
 #: The group whose members may use the GPU's render node. mpv needs it on the
@@ -326,7 +353,9 @@ class MpvOutput:
         monotonic: Callable[[], float] = time.monotonic,
         start_timeout: float = START_TIMEOUT_SECONDS,
         load_timeout: float = LOAD_TIMEOUT_SECONDS,
+        environment_names: Collection[str] = MPV_ENVIRONMENT,
     ) -> None:
+        """`environment_names` names the variables mpv is passed from the Player's environment."""
         self._name = name
         self._runtime_dir = runtime_dir
         self._media_root = media_root.resolve()
@@ -336,6 +365,7 @@ class MpvOutput:
         self._monotonic = monotonic
         self._start_timeout = start_timeout
         self._load_timeout = load_timeout
+        self._environment_names = tuple(environment_names)
         self._lock = threading.Lock()
         self._process: subprocess.Popen[bytes] | None = None
         self._ipc: _Ipc | None = None
@@ -515,6 +545,7 @@ class MpvOutput:
             # signal meant for the Player is not delivered to mpv as well.
             self._process = subprocess.Popen(  # noqa: S603 -- argv is this module's constant options and a checked connector
                 argv,
+                env=mpv_environment(os.environ, self._environment_names),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
