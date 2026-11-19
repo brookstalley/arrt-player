@@ -1834,6 +1834,9 @@ class TestTheFramesAddress:
         assert '<input id="tv_address" name="tv_address" value=""' in document
         assert "the television at the new address is asked to pair: expect a prompt on that set" in said(document)
         assert "forgets this Player's pairing with the set at the old one" in said(document)
+        # What happens to the pictures, on each television: the Player tells them apart by their own ids.
+        assert "The same television at a new address keeps the pictures this Player put on it" in said(document)
+        assert "old television keeps this Player's pictures until the Player is pointed at it again" in said(document)
 
     async def test_a_new_address_forgets_the_old_sets_pairing_and_says_so(self, signed_in, state, cache_dir, restarts):
         give_location(state)
@@ -1846,6 +1849,8 @@ class TestTheFramesAddress:
         text = said(await response.text())
         assert f"The television at {NEW_SET} will be asked to pair as the Player starts again" in text
         assert f"The pairing with the television at {OLD_SET} is forgotten." in text
+        assert f"If the set at {NEW_SET} is the same television, the pictures this Player put on it are kept" in text
+        assert f"the television at {OLD_SET} keeps the pictures this Player put on it until" in text
 
     async def test_clearing_the_address_forgets_the_pairing_and_says_there_is_no_frame(
         self, signed_in, state, cache_dir, restarts
@@ -1859,6 +1864,7 @@ class TestTheFramesAddress:
         assert not token.exists()
         assert "TV_ADDRESS" not in store.read(cache_dir).values
         assert "This Player no longer drives a Frame" in said(await response.text())
+        assert "The pictures it put on the television stay there." in said(await response.text())
         assert '"version": 2' in store.path_in(cache_dir).read_text(encoding="utf-8")
 
     async def test_an_address_set_beside_a_token_kept_from_before_forgets_it(self, signed_in, state, restarts):
@@ -1871,6 +1877,7 @@ class TestTheFramesAddress:
 
         assert not token.exists()
         assert "The pairing kept from an earlier television is forgotten." in said(await response.text())
+        assert "a television this Player drove before keeps the pictures this Player put on it" in said(await response.text())
 
     async def test_the_same_address_saved_again_keeps_the_pairing(self, signed_in, state, cache_dir, restarts):
         give_location(state)

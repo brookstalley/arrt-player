@@ -1109,7 +1109,7 @@ class TestTheStoreKeepsWhenAWorkWasLastNamed:
             assert binding.last_named_at == clock.as_clock().now()
         with sqlite3.connect(settings.state_path) as connection:
             assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
-        assert SCHEMA_VERSION == 3
+        assert SCHEMA_VERSION == 4
 
     def test_the_wall_time_a_store_counted_survives_reopening_and_a_new_row_is_named_at_it(self, settings, clock):
         with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
@@ -1235,3 +1235,379 @@ class TestARetirementOutlivesAStoreFault:
         assert tv.removed == []
         assert state.binding_for("w9") is None, "the stale row was kept"
         assert state.binding_for("w2").tv_content_id == shared
+
+
+# -- a binding belongs to the set it was made on ------------------------------------
+#
+# A Samsung set's content ids are its own, small and sequential: an id one set
+# gave a work names another picture on the next set, or none. So the wall reads
+# which set it reaches before it uses a binding, the store keeps each set's
+# bindings apart, and a store that cannot say which set its bindings are from
+# sends no removal.
+
+#: Two sets, as their descriptions name them.
+THIS_SET = "uuid:frame-in-the-living-room"
+ANOTHER_SET = "uuid:frame-in-the-bedroom"
+
+#: A picture the household put on a set, under the id the first set gave w1.
+HOUSEHOLDS = Path("/the-households/own-picture.jpg")
+
+
+def _a_set(device_id: str | None, *, numbered_from: int = 10, **holding: Path) -> FakeTv:
+    """A set with this description's id and these pictures, giving its uploads ids from `numbered_from` up."""
+    tv = FakeTv()
+    tv.device_id = device_id
+    tv.holding.update(holding)
+    tv._next_id = numbered_from
+    return tv
+
+
+async def _a_life_on(settings, clock, publish, tv: FakeTv, works=("w1", "w2")) -> dict[str, str]:
+    """The wall shows the first work on `tv` and uploads the rest; returns each work's id on that set."""
+    with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+        wall = _a_frame(settings, tv, store, clock)
+        publish(list(works), interval_seconds=3600)
+        await wall.tick()
+        return {binding.artwork_id: binding.tv_content_id for binding in store.bindings()}
+
+
+def _a_schema_3_store(path: Path, rows: list[tuple], *, identity: str | None = None) -> None:
+    """A store as the previous release left it: schema 3, these rows, one work on the wall, no set recorded.
+
+    `identity` leaves a `tv_identity` key in it, as a store rolled back to the
+    previous release and forward again would hold one.
+    """
+    _a_schema_2_store(path, rows)
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_feed_seconds REAL")
+        connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_at TEXT")
+        connection.execute("UPDATE tv_binding SET last_named_feed_seconds = 0, last_named_at = '2026-01-01T00:00:00+00:00'")
+        connection.execute("INSERT INTO daemon_state VALUES ('native_slideshow_disabled', '1')")
+        if identity is not None:
+            connection.execute("INSERT INTO daemon_state VALUES ('tv_identity', ?)", (identity,))
+        connection.execute("PRAGMA user_version = 3")
+
+
+class TestTheStoreKeepsEachSetsBindingsApart:
+    def test_another_set_starts_with_none_and_the_first_gets_its_own_back(self, state: DisplayState, clock):
+        from arrt_player.state.store import SetChange
+
+        assert state.belongs_to(THIS_SET).change is SetChange.ADOPTED
+        state.record_upload("w1", "MY-F0001", render_fingerprint="sha256:w1")
+        state.record_upload_failure("w2")
+        state.set_last_selected_work_id("w1")
+        state.mark_native_slideshow_disabled()
+        state.count_feed_time(5 * DAY)
+        state.save_feed_time(named=["w1"], left={})
+
+        clock.advance(3600)
+        met = state.belongs_to(ANOTHER_SET)
+        assert (met.change, met.previous, met.set_aside, met.restored) == (SetChange.CHANGED, THIS_SET, 2, 0)
+        assert state.bindings() == (), "another set was handed the first set's bindings"
+        assert state.accounted_content_ids() == frozenset()
+        assert state.last_selected_work_id is None, "the work on the first set's wall was carried to another"
+        assert not state.native_slideshow_disabled, "the first set's slideshow switch was carried to another"
+        assert state.feed_seconds == 5 * DAY, "the wall's own running time was taken for a fact about the set"
+        state.record_upload("w1", "MY-F0001", render_fingerprint="sha256:w1-on-the-bedroom-set")
+
+        clock.advance(3600)
+        met = state.belongs_to(THIS_SET)
+        assert (met.change, met.previous, met.set_aside, met.restored) == (SetChange.CHANGED, ANOTHER_SET, 1, 2)
+        back = {binding.artwork_id: binding for binding in state.bindings()}
+        assert (back["w1"].tv_content_id, back["w1"].render_fingerprint) == ("MY-F0001", "sha256:w1")
+        assert back["w2"].upload_status is UploadStatus.FAILED
+        assert all(
+            binding.last_named_at == clock.as_clock().now() for binding in back.values()
+        ), "a binding back from aside kept the time a feed named it before the wall left"
+        assert state.belongs_to(THIS_SET).change is SetChange.SAME
+
+        with DisplayState(state._path) as reopened:
+            assert reopened.tv_identity == THIS_SET
+            assert reopened.feed_seconds == 5 * DAY
+            assert reopened.belongs_to(ANOTHER_SET).restored == 1, "the second set's binding was not kept for it"
+
+    @pytest.mark.parametrize("identity", [None, ANOTHER_SET], ids=["schema-3", "rolled-back-and-forward"])
+    def test_a_schema_3_store_opens_with_every_binding_and_no_set(self, settings, clock, identity: str | None):
+        """A store the previous release wrote was made on some set, and nothing says which; one that holds an
+        identity was rolled back to a Player that wrote bindings without looking, so it does not know either."""
+        from arrt_player.state.store import SCHEMA_VERSION, SetChange
+
+        rows = [("1", "w1", "MY-F0001", "10:20", "2026-01-01T00:00:00+00:00", "uploaded")]
+        _a_schema_3_store(settings.state_path, rows, identity=identity)
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            assert store.tv_identity is None
+            assert [(binding.artwork_id, binding.tv_content_id) for binding in store.bindings()] == [("w1", "MY-F0001")]
+            assert store.last_selected_work_id == "w1"
+            met = store.belongs_to(THIS_SET)
+            assert met.change is SetChange.ADOPTED
+            assert [binding.artwork_id for binding in store.bindings()] == ["w1"], "the first set read did not keep them"
+            assert store.native_slideshow_disabled
+        with sqlite3.connect(settings.state_path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+
+    #: The statements a move of the bindings makes, its commit last: a fault is met at each in turn.
+    MOVE_STATEMENTS = 10
+
+    @pytest.mark.parametrize("at", range(1, MOVE_STATEMENTS + 1))
+    def test_a_fault_while_the_bindings_move_leaves_them_under_their_set(self, state: DisplayState, at: int):
+        from arrt_player.state.store import StoreFault
+
+        state.belongs_to(THIS_SET)
+        state.record_upload("w1", "MY-F0001")
+        state.set_last_selected_work_id("w1")
+        met: list[str] = []
+
+        def the_one_at(statement: str) -> bool:
+            met.append(statement)
+            return len(met) == at
+
+        armed = _arm(state, lambda: _sqlite_error("SQLITE_FULL", "database or disk is full"), failing=the_one_at, times=1)
+
+        with pytest.raises(StoreFault) as raised:
+            state.belongs_to(ANOTHER_SET)
+
+        assert armed.raised == 1, f"the move made {len(met)} statements, not {at}"
+        assert at < self.MOVE_STATEMENTS or met[-1] == "COMMIT", "the last statement of the move is not its commit"
+        assert raised.value.operation == "belongs_to"
+        _disarm(state, armed)
+        assert state.tv_identity == THIS_SET
+        assert [(binding.artwork_id, binding.tv_content_id) for binding in state.bindings()] == [("w1", "MY-F0001")]
+        assert state.last_selected_work_id == "w1"
+        with DisplayState(state._path) as reopened:
+            assert reopened.tv_identity == THIS_SET, "a move cut short recorded the other set"
+            assert [binding.artwork_id for binding in reopened.bindings()] == ["w1"]
+            assert reopened._connection.execute("SELECT COUNT(*) FROM tv_binding_aside").fetchone()[0] == 0
+
+
+class TestABindingIsUsedOnlyOnTheSetItWasMadeOn:
+    async def test_another_set_is_sent_none_of_the_first_sets_ids(self, settings, clock, publish, caplog, wall_dir):
+        """The defect: the household's picture under w1's old id was selected as w1, and announced as w1."""
+        from test_display_state import display
+
+        first = _a_set(THIS_SET)
+        on_the_first = await _a_life_on(settings, clock, publish, first)
+        assert on_the_first["w1"] == "MY-F0011"
+        another = _a_set(ANOTHER_SET, numbered_from=20, **{"MY-F0011": HOUSEHOLDS})
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, another, store, clock)
+            publish(["w1", "w2"], interval_seconds=3600)
+            await wall.tick()
+            another.announce("MY-F0011", is_shown=True)  # somebody puts the household's picture up with the remote
+            await wall.tick()
+            shown_by_the_remote = display(wall_dir)
+
+        assert another.selected == ["MY-F0021"], f"selected {another.selected} on another set"
+        assert publish.work_of(another.holding["MY-F0021"]) == "w1"
+        assert shown_by_the_remote == ("showing_art", None), "the household's picture was reported as a work of the first set's"
+        changed = _store_events(caplog, "binding.set_changed")
+        assert len(changed) == 1
+        assert (changed[0].set_aside, changed[0].restored) == (2, 0)
+        journal = [f"{record.getMessage()} {record.__dict__}" for record in caplog.records]
+        assert not [line for line in journal if THIS_SET in line or ANOTHER_SET in line], "the journal printed a set's own id"
+        assert changed[0].set_was != changed[0].set_now
+
+    async def test_a_retirement_due_on_the_first_set_is_made_there_and_never_on_another(self, settings, clock, publish, caplog):
+        """w1 and w2 are due when the wall meets another set: their bindings are not that set's, so nothing of
+        theirs is retired there, and on the first set again they are retired after a full wait, from there."""
+        first = _a_set(THIS_SET)
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, first, store, clock)
+            left = await _a_theme_then_another(wall, first, publish, store)
+            clock.advance(15 * DAY)
+            await wall.tick()  # the count is written and finds w1 and w2 due; their removal is owed
+            assert set(left.values()) <= set(first.holding)
+
+        another = _a_set(ANOTHER_SET)
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, another, store, clock)
+            for _ in range(3):
+                await wall.tick()
+                clock.advance(DAY)
+        assert another.removed == [], "a binding of the first set was the reason for a removal from another"
+        assert not _store_events(caplog, "binding.retired")
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, first, store, clock)
+            await wall.tick()
+            assert set(left.values()) <= set(first.holding), "bindings back on their set were retired at once"
+            for _ in range(15):
+                clock.advance(DAY)
+                await wall.tick()
+            await wall.tick()
+        assert not set(left.values()) & set(first.holding), "the first set's works were never retired on it"
+        assert first.removed
+        assert all(set(request) <= set(left.values()) for request in first.removed)
+
+    async def test_the_set_is_asked_again_after_it_went_away(self, settings, clock, publish, caplog):
+        """Another set can answer at the address after an outage: a router's new lease, or a replaced television."""
+        tv = _a_set(THIS_SET)
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2"], interval_seconds=3600)
+            await wall.tick()
+            assert tv.selected == ["MY-F0011"]
+            tv.unavailable = True
+            publish(["w2", "w1"], interval_seconds=3600)  # a republish, so the pass asks the set something
+            await wall.tick()
+            assert _store_events(caplog, "tv.unavailable")
+            # The set behind the address is now another, holding the household's picture under w1's old id.
+            tv.unavailable, tv.device_id, tv.holding, tv.selected = False, ANOTHER_SET, {"MY-F0011": HOUSEHOLDS}, []
+            tv.displaying, tv._next_id = "MY-F0011", 20
+            tv.brightness.clear()
+            clock.advance(400)
+            await wall.tick()
+
+        assert tv.selected == ["MY-F0021"], f"selected {tv.selected} on the set that answered after the outage"
+        assert publish.work_of(tv.on_the_wall) == "w2"
+        assert tv.brightness, "the brightness written to the first set was taken as written to the second"
+        assert len(_store_events(caplog, "binding.set_changed")) == 1
+
+    async def test_a_fault_recording_the_set_ends_the_pass_with_no_binding_used(self, settings, clock, publish, caplog):
+        first = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, first)
+        another = _a_set(ANOTHER_SET, numbered_from=20, **{"MY-F0011": HOUSEHOLDS})
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, another, store, clock)
+            publish(["w1", "w2"], interval_seconds=3600)
+            armed = _arm(store, lambda: _sqlite_error("SQLITE_BUSY", "database is locked"), failing=lambda s: "aside" in s)
+            await wall.tick()
+            assert armed.raised == 1
+            assert (another.selected, another.uploaded, another.removed) == ([], [], [])
+            assert store.tv_identity == THIS_SET
+            await wall.tick()
+            _disarm(store, armed)
+            clock.advance(10)
+            await wall.tick()
+
+        assert len(_store_events(caplog, "store.busy")) == 1
+        assert "MY-F0011" not in another.selected
+        assert publish.work_of(another.on_the_wall) == "w1"
+
+
+class TestASetThatWillNotSayWhichItIs:
+    async def test_the_wall_uses_no_binding_says_it_once_and_asks_on_its_ladder(self, settings, clock, publish, caplog, wall_dir):
+        from test_display_state import heartbeat
+
+        first = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, first)
+        first.device_id = None
+        first.selected.clear()
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, first, store, clock)
+            for _ in range(20):
+                await wall.tick()
+                clock.advance(1)
+
+        assert (first.selected, first.removed) == ([], []), "a binding was used on a set that did not say which it is"
+        assert first.identity_reads <= 4, f"the identity was asked {first.identity_reads} times in twenty seconds"
+        assert len(_store_events(caplog, "tv.unidentified")) == 1
+        document = heartbeat(wall_dir)
+        assert "did not say which set it is" in document["last_error"]
+        assert document["television_reachable"] is None
+
+    async def test_a_store_from_before_the_upgrade_sends_no_removal_until_the_set_says(self, settings, clock, publish, caplog):
+        """The upgrade's danger: a store from the previous release does not know its set. Whatever the wall does
+        on a set that will not say, through its patience and days beyond it, nothing is removed from that set."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        rows = [(f"{n}", f"w{n}", f"MY-F000{n}", "1:1", "2026-01-01T00:00:00+00:00", "uploaded") for n in range(1, 4)]
+        _a_schema_3_store(settings.state_path, rows)
+        tv = _a_set(None, **{f"MY-F000{n}": Path(f"/somebodys/{n}.jpg") for n in range(1, 5)})
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w9"], interval_seconds=3600)  # none of the store's works: every row is due in fifteen days
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS)
+            for _ in range(20):
+                await wall.tick()
+                clock.advance(DAY)
+            assert [binding.artwork_id for binding in store.bindings()] == ["w1", "w2", "w3"], "a row was dropped"
+            assert store.tv_identity is None
+
+        assert tv.removed == [], "a removal was sent from a store that does not know which set it is on"
+        assert not {"MY-F0001", "MY-F0002", "MY-F0003"} & set(tv.selected)
+        assert publish.work_of(tv.on_the_wall) == "w9", "a set that would not say was shown no art"
+        assert len(_store_events(caplog, "tv.unidentified_going_on")) == 1
+
+    async def test_a_set_back_from_an_outage_that_will_not_say_gets_the_slots_work_from_the_store_in_memory(
+        self, settings, clock, publish
+    ):
+        """The programme remembers through the store in use, so it does not believe the first set's picture is up."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2"], interval_seconds=3600)
+            await wall.tick()
+            tv.unavailable = True
+            publish(["w1", "w2"], interval_seconds=3600)
+            await wall.tick()
+            tv.unavailable, tv.device_id, tv.selected = False, None, []
+            for _ in range(3):
+                clock.advance(IDENTITY_PATIENCE_SECONDS / 2)
+                await wall.tick()
+            assert store.last_selected_work_id == "w1", "the store in memory wrote to the device's store"
+
+        assert tv.selected, "the wall believed the picture its own store last put up was on a set it could not name"
+        assert "MY-F0011" not in tv.selected
+        assert publish.work_of(tv.on_the_wall) == "w1"
+
+    async def test_a_store_from_before_the_upgrade_takes_the_first_set_read_and_uploads_nothing_again(
+        self, settings, clock, publish, caplog
+    ):
+        tv = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, tv)
+        with sqlite3.connect(settings.state_path) as connection:
+            connection.execute("DELETE FROM daemon_state WHERE key = 'tv_identity'")
+            connection.execute("DROP TABLE tv_binding_aside")
+            connection.execute("PRAGMA user_version = 3")
+        uploaded = list(tv.uploaded)
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            for _ in range(3):
+                await wall.tick()
+            assert store.tv_identity == THIS_SET
+
+        assert tv.uploaded == uploaded, "the upgrade uploaded the library again"
+        assert tv.removed == []
+        assert len(_store_events(caplog, "binding.set_adopted")) == 1
+
+
+class _AModeThatWillNotRead(FakeTv):
+    """A set whose own art-mode flag cannot be read for the still wall's line, as when the read drops the connection."""
+
+    async def reported_art_mode(self) -> str | None:
+        return None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["an upload the set refused", "a removal the set could not confirm", "a still wall whose mode would not read"],
+)
+async def test_a_failure_that_may_have_cost_the_connection_has_the_next_one_identified(settings, clock, publish, failure):
+    """Each of these is how the seam reports a set that went away mid-verb, and a pass after it reconnects quietly."""
+    tv = _AModeThatWillNotRead() if failure.startswith("a still wall") else FakeTv()
+    if failure.startswith("an upload"):
+        tv.refuse_uploads = True
+    elif failure.startswith("a removal"):
+        tv.holding["MY-F0999"] = Path("/nobodys/picture.jpg")
+        tv.removal_unconfirmable = True
+    else:
+        tv.displays_nothing_selected = True
+
+    with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+        wall = _a_frame(settings, tv, store, clock)
+        publish(["w1", "w2"], interval_seconds=3600)
+        await wall.tick()
+        assert tv.identity_reads == 1
+        clock.advance(1)
+        await wall.tick()
+
+    assert tv.identity_reads == 2, f"after {failure}, the next pass used the bindings without asking which set it reaches"

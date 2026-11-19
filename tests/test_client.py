@@ -1310,6 +1310,13 @@ WALL_EVENTS = frozenset(
         "binding.retired",
         "binding.retirement_unconfirmed",
         "store.feed_time_unreadable",
+        # The Frame's reading of which set it reaches, and what the store found
+        # the set to be, both on the wall's own task before it uses a binding.
+        "tv.unidentified",
+        "tv.identified",
+        "tv.unidentified_going_on",
+        "binding.set_adopted",
+        "binding.set_changed",
         "tv.orphans_removed",
         "tv.orphan_removal_unconfirmed",
         "tv.removal_incomplete",
