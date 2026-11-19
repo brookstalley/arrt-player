@@ -95,6 +95,15 @@ def _held(settings) -> set[str]:
     return {path.name for path in (settings.wall_dir / MEDIA_DIRNAME).iterdir()}
 
 
+#: A wall heartbeat the contract's schema accepts, which is the only kind the double takes.
+_A_HEARTBEAT = json.loads((CONTRACT / "fixtures" / "heartbeat.v1" / "valid" / "fresh-start-no-panel.json").read_text())
+
+
+def _heartbeat(reported_at: str, **changes: object) -> str:
+    """A wall heartbeat file's text: a valid report made at `reported_at`."""
+    return json.dumps({**_A_HEARTBEAT, "reported_at": reported_at, **changes})
+
+
 # -- the contract's routes ------------------------------------------------------------
 
 
@@ -496,7 +505,7 @@ async def test_a_master_that_keeps_failing_is_said_once_and_backed_off(pull, stu
     stub.publish("w2")
     stub.media_status = 503
     heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}))
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
 
     with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
         for _ in range(3):
@@ -566,18 +575,18 @@ async def test_the_heartbeat_file_is_posted_when_it_holds_a_new_report_and_not_o
     heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
     assert heartbeat.parent == http_settings.wall_dir, "the wall's heartbeat file is in its own directory"
     stub.publish("w1")
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}))
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
 
     await pull.cycle(session)
     await pull.cycle(session)
-    assert [json.loads(body) for body in stub.heartbeats] == [{"reported_at": "2026-09-30T12:00:00+00:00"}]
+    assert [json.loads(body) for body in stub.heartbeats] == [json.loads(_heartbeat("2026-09-30T12:00:00+00:00"))]
 
     # Rewritten with the same report: not a new heartbeat.
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"}, indent=2))
+    heartbeat.write_text(json.dumps(json.loads(_heartbeat("2026-09-30T12:00:00+00:00")), indent=2))
     await pull.cycle(session)
     assert len(stub.heartbeats) == 1
 
-    heartbeat.write_text(json.dumps({"reported_at": "2026-09-30T12:01:00+00:00", "schema": {"major": 1, "minor": 1}}))
+    heartbeat.write_text(_heartbeat("2026-09-30T12:01:00+00:00", schema={"major": 1, "minor": 1}))
     await pull.cycle(session)
     assert len(stub.heartbeats) == 2
     assert json.loads(stub.heartbeats[-1])["reported_at"] == "2026-09-30T12:01:00+00:00"
@@ -591,15 +600,41 @@ async def test_a_server_that_writes_the_heartbeat_into_the_shared_tree_causes_no
     shared = tmp_path / "art" / f"display-heartbeat-{WALL_ID}.json"
     stub.echo_heartbeats_to = shared
     stub.publish("w1")
-    (http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json").write_text(
-        json.dumps({"reported_at": "2026-09-30T12:00:00+00:00"})
-    )
+    (http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json").write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
 
     for _ in range(5):
         await pull.cycle(session)
 
     assert len(stub.heartbeats) == 1, "each echo was posted again"
     assert json.loads(shared.read_text())["reported_at"] == "2026-09-30T12:00:00+00:00"
+
+
+def _heartbeat_fixtures(kind: str) -> list:
+    folder = CONTRACT / "fixtures" / "heartbeat.v1" / kind
+    return [pytest.param(path, id=path.stem) for path in sorted(folder.glob("*.json"))]
+
+
+@pytest.mark.parametrize("fixture", _heartbeat_fixtures("invalid"))
+async def test_the_double_refuses_a_wall_heartbeat_the_contract_refuses(stub, session, fixture):
+    """So a Player that writes a bad heartbeat fails against the double as it would against Arrt."""
+    async with session.post(
+        stub.url + HEARTBEAT_ROUTE.format(wall_id=WALL_ID),
+        data=fixture.read_bytes(),
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+    ) as response:
+        assert response.status == 400
+    assert stub.heartbeats == []
+
+
+@pytest.mark.parametrize("fixture", _heartbeat_fixtures("valid"))
+async def test_the_double_takes_a_wall_heartbeat_the_contract_takes(stub, session, fixture):
+    async with session.post(
+        stub.url + HEARTBEAT_ROUTE.format(wall_id=WALL_ID),
+        data=fixture.read_bytes(),
+        headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"},
+    ) as response:
+        assert response.status == 204
+    assert stub.heartbeats == [fixture.read_bytes()]
 
 
 async def test_the_pull_stops_when_asked(stub, http_settings):
