@@ -13,15 +13,18 @@ import html
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import stat
 from collections import Counter
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import ClassVar
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from conftest import journal
 
@@ -31,7 +34,7 @@ from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequi
 from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.settings_ui import auth, store
 from arrt_player.settings_ui import server as server_module
-from arrt_player.settings_ui.server import SECURITY_HEADERS, PageState, build
+from arrt_player.settings_ui.server import SECURITY_HEADERS, PageState, build, own_names, screen_name
 from arrt_player.sources import Outcome
 
 CODE = "the-setup-code"
@@ -159,21 +162,73 @@ class TestTheCookie:
         assert not auth.session_valid(auth.session_cookie(self.SECRET, now=1000), None, now=1001)
 
 
+#: Two addresses on the LAN, from the range kept for documentation (RFC 5737).
+GUESSER, OWNER = "192.0.2.66", "192.0.2.10"
+
+
 class TestTheThrottle:
     def test_each_failure_doubles_the_wait_up_to_a_minute_and_success_clears_it(self):
         clock = Clock()
         throttle = auth.Throttle(monotonic=clock)
         waits = []
         for _ in range(9):
-            throttle.failed()
-            waits.append(throttle.wait_seconds())
+            throttle.failed(GUESSER)
+            waits.append(throttle.wait_seconds(GUESSER))
 
         assert waits == [1, 2, 4, 8, 16, 32, 60, 60, 60]
         clock.now += 61
-        assert throttle.wait_seconds() == 0
-        throttle.succeeded()
-        throttle.failed()
-        assert throttle.wait_seconds() == 1
+        assert throttle.wait_seconds(GUESSER) == 0
+        throttle.succeeded(GUESSER)
+        throttle.failed(GUESSER)
+        assert throttle.wait_seconds(GUESSER) == 1
+
+    def test_one_addresss_wrong_passwords_do_not_slow_another(self):
+        """A single throttle for the process let a guesser hold the owner out for as long as it kept guessing."""
+        throttle = auth.Throttle(monotonic=Clock())
+        for _ in range(6):
+            throttle.failed(GUESSER)
+
+        assert throttle.wait_seconds(GUESSER) == 32
+        assert throttle.wait_seconds(OWNER) == 0
+
+    def test_wrong_passwords_from_many_addresses_meet_one_ceiling(self):
+        """A guesser that takes a new address for every guess is held by the ceiling, and freed as the window passes."""
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        for n in range(auth.CEILING_FAILURES - 1):
+            assert throttle.wait_seconds(f"192.0.2.{n}") == 0
+            throttle.failed(f"192.0.2.{n}")
+            clock.now += 1
+
+        assert throttle.wait_seconds(OWNER) == 0, "the ceiling was reached one failure early"
+        throttle.failed("192.0.2.200")
+        assert throttle.wait_seconds(OWNER) == auth.CEILING_WINDOW_SECONDS - auth.CEILING_FAILURES + 1
+
+        clock.now += auth.CEILING_WINDOW_SECONDS - auth.CEILING_FAILURES + 1
+        assert throttle.wait_seconds(OWNER) == 0
+
+    def test_a_right_password_gives_back_the_charge_its_attempt_made(self):
+        """Every attempt is charged before its password is checked; a right one must not count toward the ceiling."""
+        throttle = auth.Throttle(monotonic=Clock())
+        for _ in range(auth.CEILING_FAILURES):
+            throttle.failed(OWNER)
+            throttle.succeeded(OWNER)
+
+        assert throttle.wait_seconds(GUESSER) == 0
+
+    def test_an_address_quiet_for_the_window_is_forgotten(self):
+        """Otherwise every address that ever guessed is held for the life of the process."""
+        clock = Clock()
+        throttle = auth.Throttle(monotonic=clock)
+        throttle.failed(GUESSER)
+        throttle.failed(GUESSER)
+
+        clock.now += 2 + auth.CEILING_WINDOW_SECONDS
+        throttle.wait_seconds(OWNER)
+
+        assert throttle._runs == {}
+        throttle.failed(GUESSER)
+        assert throttle.wait_seconds(GUESSER) == 1
 
 
 # -- the pages -------------------------------------------------------------------------
@@ -373,6 +428,304 @@ class TestWhatThePageRefuses:
 
         for name, value in SECURITY_HEADERS.items():
             assert response.headers.get(name) == value, f"{path} answered without {name}"
+
+
+# -- the names it answers to ------------------------------------------------------------
+
+#: A name the page was never told, standing for the domain a rebinding page points at it.
+REBOUND = "rebound.example"
+
+#: A name this machine goes by, given to it for the test (`PageState.machine_names`).
+MACHINE = "wallpi"
+
+
+@pytest.fixture
+def machine(monkeypatch) -> str:
+    """This machine called `MACHINE`, as `socket.gethostname` would say."""
+    monkeypatch.setattr(server_module.socket, "gethostname", lambda: MACHINE)
+    return MACHINE
+
+
+def port_of(client: TestClient) -> int:
+    return client.make_url("").port
+
+
+async def setup_as(client: TestClient, *, host: str, origin_header: str | None):
+    headers = {"Host": host} | ({"Origin": origin_header} if origin_header is not None else {})
+    return await client.post(
+        "/setup", data={"code": CODE, "password": PASSWORD, "again": PASSWORD}, headers=headers, allow_redirects=False
+    )
+
+
+class TestTheNamesItAnswersTo:
+    """DNS rebinding: a page elsewhere points its own name at this machine, and its requests carry that name."""
+
+    @pytest.mark.parametrize("path", ["/", "/login", f"/setup?code={CODE}", "/static/settings.css", "/no-such-page"])
+    async def test_a_request_by_a_name_it_was_never_told_is_refused_before_any_page(self, page, path):
+        response = await page.get(path, headers={"Host": f"{REBOUND}:{port_of(page)}"}, allow_redirects=False)
+
+        assert response.status == server_module.HOST_REFUSED
+        text = await response.text()
+        assert "UI_ALLOWED_HOSTS" in text, "the refusal does not say what to change"
+        assert 'name="password"' not in text
+        assert "has no password yet" not in text
+        for name, value in SECURITY_HEADERS.items():
+            assert response.headers.get(name) == value
+
+    async def test_a_post_whose_origin_and_host_both_name_it_is_refused_and_does_nothing(self, page, cache_dir):
+        """The rebinding page's own form: Origin and Host agree, which the check comparing them let through."""
+        named = f"{REBOUND}:{port_of(page)}"
+
+        response = await setup_as(page, host=named, origin_header=f"http://{named}")
+
+        assert response.status == server_module.HOST_REFUSED
+        assert store.read(cache_dir).password is None
+
+    async def test_the_refusal_is_in_the_journal_with_the_name(self, page, caplog):
+        caplog.set_level(logging.WARNING)
+
+        await page.get("/", headers={"Host": REBOUND})
+
+        refused = [record for record in caplog.records if getattr(record, "event", None) == "settings_page.host_refused"]
+        assert [record.host for record in refused] == [REBOUND]
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "127.0.0.1:{port}",
+            "127.0.0.1",
+            "[::1]:{port}",
+            "192.0.2.10:{port}",
+            "localhost:{port}",
+            "LocalHost.:{port}",
+            f"{MACHINE}:{{port}}",
+            f"{MACHINE}.local:{{port}}",
+            f"{MACHINE.upper()}.LOCAL.",
+        ],
+    )
+    async def test_an_address_localhost_and_the_machines_own_names_are_answered(self, state, machine, host):
+        """Not answering to these would lock the owner out of a headless Pi: they are how it is reached unconfigured."""
+        async with TestClient(TestServer(build(state))) as client:
+            response = await client.get("/", headers={"Host": host.format(port=port_of(client))})
+
+            assert response.status == 200, f"{host} was refused"
+
+    async def test_the_name_this_machine_really_has_is_answered(self, page):
+        """Unpatched: whatever `socket.gethostname` says here, and its `.local`."""
+        short = socket.gethostname().split(".", 1)[0]
+
+        for host in (socket.gethostname(), f"{short}.local"):
+            assert (await page.get("/", headers={"Host": host})).status == 200, f"{host} was refused"
+
+    async def test_the_machines_names_are_its_own_and_its_bound_name(self, machine):
+        assert own_names("0.0.0.0") == {"localhost", MACHINE, f"{MACHINE}.local"}  # noqa: S104 -- a name, not a bind
+        assert "wall.example" in own_names("wall.example")
+
+    async def test_a_mac_style_host_name_gives_its_short_name_too(self, monkeypatch):
+        monkeypatch.setattr(server_module.socket, "gethostname", lambda: "Studio.local")
+
+        assert own_names("") == {"localhost", "studio", "studio.local"}
+
+    async def test_the_owner_sets_up_by_the_machines_name(self, state, machine, cache_dir):
+        """Host and Origin both the machine's `.local` name, as a browser sends them from the printed link."""
+        async with TestClient(TestServer(build(state))) as client:
+            named = f"{MACHINE}.local:{port_of(client)}"
+
+            response = await setup_as(client, host=named, origin_header=f"http://{named}")
+
+        assert response.status == 303
+        assert store.read(cache_dir).password is not None
+
+
+class TestTheNamesItIsTold:
+    """`UI_ALLOWED_HOSTS`: a router's DNS name for this machine, or a reverse proxy's."""
+
+    @pytest.fixture
+    def told(self, state: PageState) -> PageState:
+        state.ui = UiSettings(
+            cache_dir=state.ui.cache_dir, bind="127.0.0.1", port=0, pinned=frozenset(), allowed_hosts=frozenset({"wall.lan"})
+        )
+        return state
+
+    async def test_a_listed_name_is_answered(self, told):
+        async with TestClient(TestServer(build(told))) as client:
+            assert (await client.get("/", headers={"Host": "Wall.Lan:8771"})).status == 200
+
+    async def test_a_listed_name_is_a_good_origin_on_any_scheme_or_port(self, told, cache_dir):
+        """A reverse proxy changes both: the browser's Origin is the proxy's, the Host may be the address."""
+        async with TestClient(TestServer(build(told))) as client:
+            response = await setup_as(client, host=f"127.0.0.1:{port_of(client)}", origin_header="https://wall.lan:8443")
+
+        assert response.status == 303
+        assert store.read(cache_dir).password is not None
+
+    async def test_another_name_is_still_refused(self, told):
+        async with TestClient(TestServer(build(told))) as client:
+            assert (await client.get("/", headers={"Host": REBOUND})).status == server_module.HOST_REFUSED
+
+
+class TestWhichOriginsMayPost:
+    @pytest.mark.parametrize(
+        "origin_header",
+        [
+            "http://127.0.0.1:{other}",
+            "http://127.0.0.2:{port}",
+            "https://127.0.0.1:{port}",
+            "ftp://127.0.0.1:{port}",
+            "http://127.0.0.1:{port}/setup",
+            "http://user@127.0.0.1:{port}",
+            "null",
+            "",
+        ],
+    )
+    async def test_an_origin_that_is_not_this_address_is_refused(self, page, cache_dir, origin_header):
+        port = port_of(page)
+
+        response = await setup_as(page, host=f"127.0.0.1:{port}", origin_header=origin_header.format(port=port, other=port + 1))
+
+        assert response.status == 403
+        assert store.read(cache_dir).password is None
+
+    @pytest.mark.parametrize(
+        ("host", "origin_header"), [("localhost", "http://localhost:80"), ("[::1]:{port}", "http://[::1]:{port}")]
+    )
+    async def test_the_requests_own_address_is_a_good_origin_in_any_spelling(self, page, cache_dir, host, origin_header):
+        port = port_of(page)
+
+        response = await setup_as(page, host=host.format(port=port), origin_header=origin_header.format(port=port))
+
+        assert response.status == 303
+
+
+# -- the throttle, through the login --------------------------------------------------------
+
+
+@pytest.fixture
+async def from_addresses(state: PageState):
+    """The page, with each request coming from the address its `X-Peer` header names.
+
+    A test client connects from one address only. This stands in for several
+    machines on the LAN by setting what `request.remote` says, which is what
+    the page throttles by; the page's own handlers are unchanged.
+    """
+
+    @web.middleware
+    async def peer(request: web.Request, handler):
+        return await handler(request.clone(remote=request.headers.get("X-Peer", request.remote)))
+
+    app = build(state)
+    app.middlewares.insert(0, peer)
+    async with TestClient(TestServer(app)) as client:
+        await set_up(client)
+        yield client
+
+
+async def login_from(client: TestClient, address: str, password: str):
+    client.session.cookie_jar.clear()
+    return await post(client, "/login", {"password": password}, **{"X-Peer": address})
+
+
+class TestAGuesserCannotLockTheOwnerOut:
+    async def test_wrong_passwords_from_one_address_do_not_delay_a_right_one_from_another(self, from_addresses):
+        assert (await login_from(from_addresses, GUESSER, "wrong")).status == 403
+        assert (await login_from(from_addresses, GUESSER, "wrong again")).status == 429
+
+        owner = await login_from(from_addresses, OWNER, PASSWORD)
+
+        assert owner.status == 303, "the owner waited on the guesser's throttle"
+
+    async def test_the_guesser_is_still_throttled_after_the_owner_signs_in(self, from_addresses):
+        await login_from(from_addresses, GUESSER, "wrong")
+        await login_from(from_addresses, OWNER, PASSWORD)
+
+        assert (await login_from(from_addresses, GUESSER, PASSWORD)).status == 429
+
+    async def test_a_wrong_current_password_slows_only_its_own_address(self, from_addresses):
+        def change(address: str, current: str):
+            form = {"current": current, "password": "a new password", "again": "a new password"}
+            return post(from_addresses, "/password", form, **{"X-Peer": address})
+
+        assert (await change(GUESSER, "wrong")).status == 403
+        assert (await change(GUESSER, PASSWORD)).status == 429
+        assert (await change(OWNER, PASSWORD)).status == 303
+
+    async def test_a_refused_login_names_its_address_in_the_journal(self, from_addresses, caplog):
+        caplog.set_level(logging.WARNING)
+
+        await login_from(from_addresses, GUESSER, "wrong")
+
+        refused = [record for record in caplog.records if getattr(record, "event", None) == "settings_page.login_refused"]
+        assert [record.remote for record in refused] == [GUESSER]
+
+
+# -- the server's words ---------------------------------------------------------------------
+
+
+class _VisibleText(HTMLParser):
+    """The text a person sees: element content and the title, never an attribute."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def visible(document: str) -> str:
+    parser = _VisibleText()
+    parser.feed(document)
+    return " ".join(" ".join(parser.parts).split())
+
+
+#: The word the server's vocabulary has retired for a Player, as a word: `CLIENT_TOKEN`, a key
+#: for `.env`, is not one.
+CLIENT_WORD = re.compile(r"\bclients?\b", re.IGNORECASE)
+
+
+class TestThePageSpeaksTheServersWords:
+    def test_screens_are_named_as_the_server_names_them(self):
+        assert [screen_name(name) for name in ("hdmi-a-1", "hdmi-a-2", "frame", "dsi-1")] == [
+            "HDMI 1",
+            "HDMI 2",
+            "Samsung Frame",
+            "dsi-1",
+        ]
+
+    async def test_the_screen_picker_says_hdmi_1_and_never_the_connector(self, signed_in, state):
+        state.outputs = lambda: [OutputReport("hdmi-a-1", "framebuffer", True, (1920, 1080))]
+
+        document = await (await signed_in.get("/")).text()
+
+        assert "HDMI 1 (a screen at 1920×1080)" in visible(document)
+        assert "hdmi-a-1" not in visible(document)
+        assert '<option value="hdmi-a-1" selected>' in document, "the saved value must stay the connector"
+
+    async def test_the_fields_are_server_address_and_token(self, signed_in):
+        document = await (await signed_in.get("/")).text()
+
+        assert '<label for="server_url">Server address</label>' in document
+        assert '<label for="client_token">Token</label>' in document
+        assert "In .env, SERVER_URL." in visible(document)
+        assert "In .env, CLIENT_TOKEN." in visible(document)
+
+    async def test_no_visible_text_says_client(self, page, state, restarts):
+        """Arrt's vocabulary names this a Player. Each page the Player serves, in each state it can be in."""
+        documents = [await (await page.get("/")).text(), await (await page.get(f"/setup?code={CODE}")).text()]
+        documents.append(await (await page.get("/", headers={"Host": REBOUND})).text())
+        await set_up(page)
+        documents.append(await (await page.get("/")).text())
+        await save(page, server_url="http://arrt.example:8770", client_token=TOKEN)
+        state.missing = ()
+        documents.append(await (await page.get("/")).text())
+        state.mode, state.slideshow = "slideshow", SlideshowStatus()
+        documents.append(await (await page.get("/")).text())
+        page.session.cookie_jar.clear()
+        documents.append(await (await page.get("/login")).text())
+
+        said = [CLIENT_WORD.findall(visible(document)) for document in documents]
+        assert all(visible(document) for document in documents), "a page had no text, so this checks nothing"
+        assert said == [[]] * len(documents)
 
 
 async def test_no_credential_reaches_a_log_record(page, cache_dir, caplog):
@@ -779,14 +1132,18 @@ class TestTheNameAPlayerGoesBy:
 
 def test_a_thousand_wrong_guesses_still_wait_a_minute_and_never_overflow():
     """`2.0 ** 1024` overflows a float: uncapped, the 1025th wrong password would make every
-    later login a server error, the right password's included, until a restart."""
+    later login a server error, the right password's included, until a restart.
+
+    Each guess is made once the last one's wait is over, as the page would hear them,
+    so the run is one address's and the ceiling for all addresses never fills."""
     clock = Clock()
     throttle = auth.Throttle(monotonic=clock)
 
     for _ in range(2000):
-        throttle.failed()
+        clock.now += throttle.wait_seconds(GUESSER)
+        throttle.failed(GUESSER)
 
-    assert throttle.wait_seconds() == auth.MAXIMUM_THROTTLE_SECONDS
+    assert throttle.wait_seconds(GUESSER) == auth.MAXIMUM_THROTTLE_SECONDS
 
 
 class TestAWriteTheDiskRefuses:
@@ -1164,15 +1521,15 @@ class TestWhatTheSlideshowSays:
 
         text = await (await signed_in.get("/")).text()
 
-        assert '<option value="hdmi-a-1" selected>hdmi-a-1 (a screen at 3840×2160)</option>' in text
-        assert '<option value="hdmi-a-2">hdmi-a-2 (no screen connected)</option>' in text
+        assert '<option value="hdmi-a-1" selected>HDMI 1 (a screen at 3840×2160)</option>' in text
+        assert '<option value="hdmi-a-2">HDMI 2 (no screen connected)</option>' in text
 
     async def test_a_chosen_screen_this_machine_does_not_have_is_still_offered_and_named(self, signed_in, restarts):
         await save_slideshow(signed_in, slideshow_output="hdmi-a-2")
 
         text = await (await signed_in.get("/")).text()
 
-        assert '<option value="hdmi-a-2" selected>hdmi-a-2 (not found on this machine)</option>' in text
+        assert '<option value="hdmi-a-2" selected>HDMI 2 (not found on this machine)</option>' in text
 
     async def test_the_mode_the_player_is_set_to_is_the_one_checked(self, signed_in, restarts):
         before = await (await signed_in.get("/")).text()
