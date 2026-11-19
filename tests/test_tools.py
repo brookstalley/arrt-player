@@ -8,8 +8,8 @@ green, the linters stayed green, and the only thing that would have discovered i
 is the operator running the tool at the panel with the service stopped, which is
 the most expensive place this product has to find a defect.
 
-`tests/preferences/test_deployment_values.py` (the root suite) walks `arrt-player/tools/*.py`, but only with a regex looking
-for deployment values — it never imports them. A file nothing imports is a file
+`tests/test_repository.py` reads every file in the working tree, `tools/*.py` included, but only with
+regexes looking for deployment values — it never imports them. A file nothing imports is a file
 the type checker, the test suite and the linter all agree is fine.
 
 **The rasterizer is stubbed rather than skipped.** `label_preview` imports Pango
@@ -20,7 +20,9 @@ to the layout seam, which is the half that broke and the half that has nothing t
 do with typesetting.
 """
 
+import ast
 import math
+import re
 import sys
 import types
 from pathlib import Path
@@ -654,3 +656,90 @@ def test_mpv_check_refuses_limits_the_page_would_refuse(mpv_check, capsys):
     (media / "a.png").write_text("still")
     assert module.main(["--min", "20", "--max", "10", str(media / "a.png")]) == 2
     assert "not be more than the maximum" in capsys.readouterr().err
+
+
+# The tools' usage lines are what the operator copies at the Pi, and the checkout's
+# venv there is the one the unit runs from. `uv run` without `--frozen` re-resolves
+# the lock over the network and may rewrite `uv.lock`; without `--no-dev` it installs
+# pytest and the linters into that venv (`deploy/README.md`, the note before § The
+# cutover). `mpv_check.py` was written that way; the others were not.
+
+_UV_CALL = re.compile(r"\buv (?:run|sync)\b")
+_REQUIRED_UV_FLAGS = ("--frozen", "--no-dev")
+
+
+def unfrozen_uv_calls(docstring: str) -> list[str]:
+    """Every `uv run` or `uv sync` in a docstring whose line, continuations joined, lacks a required flag."""
+    problems = []
+    lines = docstring.splitlines()
+    for index, line in enumerate(lines):
+        found = _UV_CALL.search(line)
+        if not found:
+            continue
+        logical = line[found.start() :]
+        following = index
+        while logical.rstrip().endswith("\\") and following + 1 < len(lines):
+            following += 1
+            logical = logical.rstrip().removesuffix("\\") + " " + lines[following].strip()
+        missing = [flag for flag in _REQUIRED_UV_FLAGS if flag not in logical.split()]
+        if missing:
+            problems.append(f"`{line.strip()}` lacks {' and '.join(missing)}")
+    return problems
+
+
+def _tool_docstrings() -> dict[str, str]:
+    return {
+        path.name: ast.get_docstring(ast.parse(path.read_text(encoding="utf-8")), clean=False) or ""
+        for path in sorted(TOOLS.glob("*.py"))
+    }
+
+
+def test_every_uv_call_a_tool_tells_the_operator_to_run_is_frozen_and_without_dev():
+    docstrings = _tool_docstrings()
+    problems = {name: unfrozen_uv_calls(text) for name, text in docstrings.items()}
+
+    assert {name: found for name, found in problems.items() if found} == {}
+
+
+def test_the_scan_of_tool_usage_lines_sees_the_tools_that_have_them():
+    """A docstring the scan cannot find a call in passes it; these four are known to carry one."""
+    docstrings = _tool_docstrings()
+
+    for name in ("label_preview.py", "mpv_check.py", "power_probe.py", "tv_api_check.py"):
+        assert _UV_CALL.search(docstrings[name]), f"{name} shows no `uv run` any more, so the scan checks nothing there"
+
+
+@pytest.mark.parametrize(
+    ("line", "lacks"),
+    [
+        ("    uv run python tools/x.py", "--frozen and --no-dev"),
+        ("    cd arrt-player && uv run python tools/x.py", "--frozen and --no-dev"),
+        ("    uv run --frozen python tools/x.py", "--no-dev"),
+        ("    uv run --no-dev python tools/x.py", "--frozen"),
+        ("    uv run --group raster python tools/x.py", "--frozen and --no-dev"),
+        ("    uv sync --group raster", "--frozen and --no-dev"),
+        (
+            "    sudo -u svc env HOME=/x \\\n        uv run --group raster --group epaper \\\n        python tools/x.py",
+            "--frozen and --no-dev",
+        ),
+    ],
+)
+def test_a_usage_line_missing_a_flag_is_named(line, lacks):
+    problems = unfrozen_uv_calls(line)
+
+    assert len(problems) == 1
+    assert f"lacks {lacks}" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "    uv run --frozen --no-dev python tools/x.py",
+        "    sudo -u tvpi /usr/local/bin/uv run --frozen --no-dev python tools/x.py",
+        "    sudo -u svc env HOME=/x \\\n        uv run --frozen --no-dev --group raster \\\n        python tools/x.py",
+        "    uv run \\\n        --frozen --no-dev python tools/x.py",
+        "a line that mentions uvicorn and the word run",
+    ],
+)
+def test_a_frozen_usage_line_and_a_line_that_is_not_one_are_accepted(line):
+    assert unfrozen_uv_calls(line) == []
