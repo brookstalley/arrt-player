@@ -10,7 +10,7 @@ were measured on the wall's Pi (Trixie, kernel 6.18.34+rpt, mpv 0.40, a 4K LG,
 * `--gpu-hwdec-interop=drmprime-overlay` with the video on the **primary** plane
   and mpv's own drawing on the **overlay** plane lets the display hardware scale
   1080p to 4K: 0 dropped frames and 0 failed commits over 20 s, and the owner saw
-  it play. With the planes the other way round every atomic commit failed and the
+  it play. With the two hardware planes swapped every atomic commit failed and the
   screen showed nothing. The GPU-scaled path dropped about a third of its frames.
 * `--profile=fast` keeps the GPU's share cheap.
 * The screen stays at its first mode (4K): at 1080p the LG puts up its own

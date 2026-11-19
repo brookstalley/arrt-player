@@ -39,7 +39,7 @@ class TestTheTokenCannotReachTheJournal:
     def test_the_television_client_is_floored_above_info_even_in_debug(self):
         """The control itself.
 
-        `configure` attaches this plane's handler to the *root* logger, so
+        `configure` attaches the Player's handler to the *root* logger, so
         anything the fork logs is carried out unless its own logger is held above
         it. The floor must clear INFO, not merely reach it: the fork's token line
         is `_LOGGING.info("New token %s", token)`.

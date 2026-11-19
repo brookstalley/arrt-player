@@ -36,7 +36,7 @@ class ViewingConditionsUnknown(Exception):
     """The deployment did not say how big its panel is, or how far away it is read.
 
     **Raised rather than defaulted, and that asymmetry is the whole point.** Every
-    other unstated value in this plane takes a sensible default; a viewing distance
+    other unstated value in the Player takes a sensible default; a viewing distance
     must not, because a wrong distance produces silently illegible type — which is
     precisely the failure this module exists to prevent, and it looks like success
     from every direction except standing in front of the panel.

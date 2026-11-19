@@ -121,7 +121,7 @@ class TestTheStateIsReported:
         await daemon.tick()
 
         assert display(wall_dir) == ("showing_art", "w2")
-        # The older field keeps its meaning: this plane's own confirmed selection.
+        # The older field keeps its meaning: the Player's own confirmed selection.
         assert heartbeat(wall_dir)["current_work_id"] == "w1"
 
     async def test_a_picture_this_wall_did_not_put_there_is_art_with_no_work(self, daemon, tv, publish, wall_dir, clock):

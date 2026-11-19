@@ -205,7 +205,7 @@ class TestTheLabelFollowsTheWall:
     async def test_an_unchanged_document_is_drawn_once(self, renderer, link, surface, clock):
         """A redraw flashes the panel: polls that bring nothing new draw nothing.
 
-        Once moved from "this plane's own selection is not drawn twice" — the set
+        Once moved from "the Player's own selection is not drawn twice" — the set
         echoed every selection back, and the rule that redrew on the echo flashed
         the panel twice per rotation. The echo is now a 304.
         """

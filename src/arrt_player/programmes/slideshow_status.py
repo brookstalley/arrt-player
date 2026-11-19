@@ -2,7 +2,7 @@
 
 **Its own module so the page can read it without importing the slideshow.** The
 programme reaches the network client through the media cache, and the
-plane-isolation guard keeps that client's importers to `sources/`, the programme
+isolation guard keeps that client's importers to `sources/`, the programme
 and the entry point. This holds plain values only.
 """
 

@@ -115,7 +115,7 @@ class FrameDisplay:
         self._announcement_taken: SelectionAnnouncement | None = None
         tv.observe_selections(self._note_announcement)
 
-        #: The set's id for the picture on the wall: this plane's own confirmed
+        #: The set's id for the picture on the wall: the Player's own confirmed
         #: selection, or one the set announced as shown that somebody chose with
         #: the remote. None until either has happened.
         self._wall_content_id: str | None = None
@@ -272,7 +272,7 @@ class FrameDisplay:
         WARNING a second until morning buries every other line in the journal. The
         recovery is logged too, so the pair reads as an episode with a length.
         """
-        # **Not cleared by a good pass.** A plane that dropped its error the
+        # **Not cleared by a good pass.** A Player that dropped its error the
         # moment anything succeeded would report itself fine while failing every
         # other minute. It is overwritten by the next failure, so it is always
         # the latest rather than the first.
@@ -435,7 +435,7 @@ class FrameDisplay:
         if self._not_our_wall.begin():
             # Said once for the same reason a dark wall is: somebody watches
             # television for hours, and a line per attempt would bury the ERRORs
-            # that are this plane's only failure channel.
+            # that are the Player's only failure channel.
             log.info(
                 "the television is not in art mode; leaving the wall alone until it is",
                 extra={"event": "rotation.wall_not_ours"},
@@ -505,7 +505,7 @@ class FrameDisplay:
         no lock, nothing that can raise. Everything this could trigger happens on
         the wall's own task instead — see `_take_the_sets_news`.
 
-        **It records announcements this plane did not cause**, which is the point
+        **It records announcements the Player did not cause**, which is the point
         of subscribing at all: somebody using the remote changes the wall, and
         the display state — which every label of the wall follows — should say
         what is actually up rather than what we last put there.
@@ -518,7 +518,7 @@ class FrameDisplay:
 
         Two kinds of news, both already heard and neither a new question put to
         the set on a timer. **A picture announced as shown** is the wall changing
-        — this plane's own selection echoed back, or somebody with the remote —
+        — the Player's own selection echoed back, or somebody with the remote —
         and it is art on the wall, resolved to a work through the bindings. **An
         art-mode announcement** (which connecting also counts as) is the set
         saying its mode may have changed: it clears the wall's wait, as it always

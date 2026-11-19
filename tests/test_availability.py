@@ -1,7 +1,7 @@
-"""A television that is asleep, and a curation plane that is gone.
+"""A television that is asleep, and a the server that is gone.
 
 Neither is an incident. The set is asleep most of the time, and the ratified norm
-says this plane's ability to show art never depends on the other one being
+says the Player's ability to show art never depends on the other one being
 reachable — so "curation stopped" has to be indistinguishable, from here, from
 "curation has nothing new to say".
 """
@@ -39,7 +39,7 @@ async def test_a_manifest_that_never_arrives_is_waited_on_quietly(daemon: Wall, 
             await daemon.tick()
 
     assert tv.selected == []
-    assert tv.connects == 0, "a plane with nothing to show opened a connection to the television"
+    assert tv.connects == 0, "a Player with nothing to show opened a connection to the television"
     assert [record.levelno for record in caplog.records] == []
 
 
@@ -220,7 +220,7 @@ async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(
 ):
     """The manifest is local file I/O and cannot fail on account of the television.
 
-    A set that is asleep must not stop this plane from *knowing* what it will show
+    A set that is asleep must not stop the Player from *knowing* what it will show
     when the set comes back — otherwise a theme switched at midnight is lost.
     """
     publish(["w1"])

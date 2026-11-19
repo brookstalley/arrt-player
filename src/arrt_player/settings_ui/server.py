@@ -1,7 +1,7 @@
 """The settings page: a first-run password, a login, and the settings themselves.
 
 **The one module in the Player that listens on a socket.** It takes only
-`aiohttp.web` from aiohttp, and never a client: the plane-isolation guard allows
+`aiohttp.web` from aiohttp, and never a client: the isolation guard allows
 this file `aiohttp.web` and nothing else, so the Player's one channel to the
 server stays the pull (`tests/test_plane_isolation.py`).
 

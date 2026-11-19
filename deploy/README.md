@@ -223,7 +223,7 @@ wall goes on showing the work it has. Then check, in this order:
 **Settings.** The server no longer reads `TV_PANEL_*`, `MAT_WIDTH_INCHES` or
 `MAT_BOTTOM_WEIGHT`; they are the Player's, under the same names, and stay in the
 Pi's `.env`. The Player no longer reads `ROTATION_INTERVAL_SECONDS` or
-`ROTATION_SHUFFLE`; they are the server's. Neither plane refuses the other's
+`ROTATION_SHUFFLE`; they are the server's. Neither the Player nor the server refuses the other's
 keys, so a shared `.env` needs no edit.
 
 **The way back** is the catalogue copy and the previous image together on the
@@ -566,7 +566,7 @@ colour from the 2024 index and adopts the renders already in the tree:
 
 Then create a theme and activate it, over the JSON API or the browser interface —
 **activation is what publishes the manifest**, and until one is published the
-display plane has nothing to rotate and says so.
+Player has nothing to rotate and says so.
 
 **Re-run the same command on a machine that is already seeded, whenever the
 catalogue gains a field.** It creates no works the second time; what it does is
@@ -588,7 +588,7 @@ units after a seed re-run saw the old label text and had no reason to suspect th
 instructions. The § Moving a running deployment section below states the same rule
 from the other direction; the two now agree.
 
-**Then restart the display plane, and this step is not optional if the wall is
+**Then restart the Player, and this step is not optional if the wall is
 sitting on one work.** The republished manifest is adopted on the next poll, but
 the *label already drawn* is not redrawn with it: the panel captions what the set
 announces, and it skips the draw while the announced work is the one it last
@@ -631,7 +631,7 @@ say.** Checking out a newer revision on a machine that is already serving a wall
 is not the same act as the first cutover above, and it took the wall down for the
 better part of an hour.
 
-**Settings arrive with revisions, and an unset one refuses to start the plane.**
+**Settings arrive with revisions, and an unset one refuses to start the Player.**
 `.env` is not in the repository, so nothing carries a new key onto the machine and
 nothing warns that one is owed. Diff before restarting:
 
@@ -641,13 +641,13 @@ nothing warns that one is owed. Diff before restarting:
 **A wall has to exist before `WALL_ID` can name one.** The revision that made
 manifests per-wall also made `WALL_ID` required, and the id is a UUID minted when
 the wall is created — so there is an ordering: set `WALL_NAME` and start the
-curation plane, which establishes the wall and carries whatever theme was active
+the server, which establishes the wall and carries whatever theme was active
 onto it; read the id back from `curl -s localhost:"$CURATION_PORT"/api/walls`; put
-it in `.env`; then start the display plane. Starting the display plane first gets
+it in `.env`; then start the Player. Starting the Player first gets
 a refusal naming the variable, which is correct and is not a fault to debug.
 
 **Activate the theme again after any upgrade that changes what the label
-carries.** The manifest is written at activation, not at startup, so a plane that
+carries.** The manifest is written at activation, not at startup, so a Player that
 restarts against an existing manifest serves the old label text — including after
 a seed re-run that has just filled in new fields. **The block above this one is a
 read** — it recovers `WALL_ID` from `/api/walls`. The activation is this `POST`:
@@ -740,16 +740,16 @@ the sitting costs one more prompt next time and nothing else.
 
 Read as evidence that the arrangement works, not as a promise about your machine:
 
-- The curation plane marked the art root on its own — it holds a catalogue but had
+- The server marked the art root on its own — it holds a catalogue but had
   no marker, and a directory holding a catalogue is an art root by the only
   evidence that matters.
-- The display plane adopted the 40-entry manifest, **disabled the television's own
+- The Player adopted the 40-entry manifest, **disabled the television's own
   slideshow**, and **removed 40 images the binding table could not account for**.
   That last one is startup reconciliation working as designed: this device had no
   prior state, so nothing on the set was accounted for, and it re-uploaded all 40.
   **Expect a fresh device to re-upload the whole theme**, which took about three
   and a half minutes for 40 works.
-- The set was in standby, and the plane logged *"the television is not in art
+- The set was in standby, and the Player logged *"the television is not in art
   mode; leaving the wall alone until it is"* rather than acting. The heartbeat said
   `television_reachable: true`, `television_showing_art: false`,
   `label_surface_working: null` — which is the honest reading of a device that has
@@ -758,7 +758,7 @@ Read as evidence that the arrangement works, not as a promise about your machine
 ### How to tell your own install worked
 
 > *2026-09-30: every check below reads files under `/srv/art`, meaning the
-> manifest, the heartbeat and the catalogue, because both planes share that
+> manifest, the heartbeat and the catalogue, because the Player and the server share that
 > directory today. From wave 3 the Pi holds none of them. The equivalent checks
 > become an HTTP `GET` of the wall's manifest from the server, the server's
 > health view for the heartbeat, and a listing of the Player's cache. Rewrite
@@ -789,14 +789,14 @@ differently from the others, which is the point of having four rather than one.
     sudo -u tvpi test -r /opt/samsung-frame-art-loader/.env && echo ".env readable"
     sudo -u tvpi test -w /srv/art && echo "/srv/art writable"
 
-    # 4. The display plane's own account of itself. This is the honest one: it
+    # 4. The Player's own account of itself. This is the honest one: it
     #    distinguishes a device with no panel from one whose panel will not open,
     #    and a set that is unreachable from one that is simply not showing art.
     sudo cat /srv/art/display-heartbeat-"$WALL_ID".json
 
 **Read the heartbeat rather than the wall.** `television_reachable: false` is a
 network or pairing problem; `television_showing_art: false` with the set awake
-means somebody is watching television and the plane is correctly leaving it alone;
+means somebody is watching television and the Player is correctly leaving it alone;
 the wall heartbeat says nothing about the label panel any more
 (`has_label_surface: false`, `label_surface_working: null` on every wall): the panel
 is a label output of the client, reported in the client heartbeat on the server's
@@ -814,7 +814,7 @@ only that the file parses:
     sudo journalctl -b -u systemd-journald | grep -i 'Journal.*max'
     # expect: "Runtime Journal (...) is 8M, max 256M, 248M free."
 
-**The display plane's panel needs two optional dependency groups, and a sync
+**The Player's panel needs two optional dependency groups, and a sync
 that does not name them installs neither.** They are separate because they install on different
 machines: `raster` is the label's text stack (PyGObject and pycairo, which build
 or wheel on any modern Linux), and `epaper` is the panel driver (`omni_epd`, which
@@ -858,7 +858,7 @@ missing `.env` stops the unit with the path it wanted (Arrt's `operational-spec.
 
 ## The dependency moves the television has confirmed
 
-Two pin moves are described here, made while the 2024 plane still ran the wall
+Two pin moves are described here, made while the 2024 installation still ran the wall
 from `requirements.txt` (retired with it, 2026-10-26). This one is the more
 recent; both have now been exercised against the real television.
 
@@ -876,7 +876,7 @@ the parse was verified against 6.1.1 without it.
 transport — so what was owed was a measurement on the set rather than an argument
 from a resolver. `tv_api_check.py` passed 9 checks and 0 failures against the real
 television on 2026-08-06 on `aiohttp` 3.14.3, `websockets` 16.1.1, `requests`
-2.34.2 and the pinned fork. **The display plane then drove that transport hard on
+2.34.2 and the pinned fork. **The Player then drove that transport hard on
 2026-08-07** — 39 uploads, 41 deletions, brightness writes and confirmed
 selections, unattended, across several hours. `pi-freeze-2024.txt` records the
 pre-move version of all five and remains the rollback.
@@ -892,7 +892,7 @@ pre-move version of all five and remains the rollback.
 > been seen with the set **in art mode and healthy**, after heavy connection churn
 > and a SIGKILLed client that never closed its socket, so it reads as a
 > concurrent-client limit rather than a power state. If you meet it, wait a couple
-> of minutes rather than reconnecting harder, and stop this plane with SIGTERM so
+> of minutes rather than reconnecting harder, and stop the Player with SIGTERM so
 > it closes its own socket.
 >
 > `PowerState` is worth reading as the cheapest thing that separates a dark panel
@@ -902,13 +902,13 @@ pre-move version of all five and remains the rollback.
 >
 > **It cannot tell art mode from somebody watching television** — it reads `on`
 > for both. Only `get_artmode` does that, over the art websocket rather than this
-> REST endpoint, which is why there is no one-liner for it here; the display
-> plane asks it before every selection.
+> REST endpoint, which is why there is no one-liner for it here; the Player
+> asks it before every selection.
 >
 > The bumped set was exercised as far as the wire in the process: a clean 3.12
 > interpreter carrying exactly these pins built the client, reached the set over
 > the LAN, and failed only at pairing. **Everything past the handshake is proven
-> now** — the display plane drove these pins through 39 uploads, 41 deletions and
+> now** — the Player drove these pins through 39 uploads, 41 deletions and
 > confirmed selections against the real television on 2026-08-07.
 
 `samsungtvws` and `websockets` moved together on 2026-08-01 — a two-year-old fork
@@ -992,6 +992,6 @@ check**: confirm the installed `it8951` is `9f13613` before looking anywhere els
 A `pip freeze` of the environment the 2024 loader was running on the Pi, captured
 during the 2026-07-19 archaeology. **Nothing installs from it.** It is kept as
 evidence of which versions the recovered code actually ran against — the frozen
-`samsungtvws` in it is what dictated that plane's interpreter, and the record is
+`samsungtvws` in it is what dictated that installation's interpreter, and the record is
 what makes that traceable rather than remembered. It is also the rollback target
 for the dependency move described above.

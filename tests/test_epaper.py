@@ -100,7 +100,7 @@ class TestTheGreyLevelsAreTakenRatherThanAskedFor:
     """The trap this product's legibility depends on not falling into.
 
     The driver's default is one bit, and `max_colors` reports 16 in both modes, so
-    the obvious check cannot tell them apart. The 2024 plane shipped 1-bit type
+    the obvious check cannot tell them apart. The 2024 installation shipped 1-bit type
     past every check anyone thought to run.
     """
 

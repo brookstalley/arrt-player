@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     parsed.add_argument("--width-px", type=int, default=1448)
     parsed.add_argument("--height-px", type=int, default=1072)
     # **No defaults, and this file names neither number.** They are the two
-    # settings the display plane deliberately ships without a fallback, because a
+    # settings the Player deliberately ships without a fallback, because a
     # guessed viewing distance gives silently illegible type — the one failure the
     # whole derivation exists to prevent, and the one that looks like success from
     # every direction. Defaulting them here would reintroduce it by the back door

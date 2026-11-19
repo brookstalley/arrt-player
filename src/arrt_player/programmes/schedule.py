@@ -8,7 +8,7 @@ republished feed and an hour off the network all come to the same thing: the
 wall shows what the schedule says, as soon as the display lets it.
 
 **What to show** (`what_to_show`) is `player-contract.md` § Time and § Scenes,
-held to `contract/vectors/schedule.json` by this plane's suite:
+held to `contract/vectors/schedule.json` by the Player's suite:
 
 * an active scene wins, at its own absolute times, and is never moved;
 * otherwise the instant is moved into the horizon by whole horizons — forward

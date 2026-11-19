@@ -1,7 +1,7 @@
 """What the settings page and `config` check about a Reddit slideshow: its listing address and its session cookie.
 
 **Apart from `reddit.py` because that module imports the network client.** The
-plane-isolation guard lets only `sources/`, the slideshow programme and the
+isolation guard lets only `sources/`, the slideshow programme and the
 entry point import `fetch.py`, and an import of `reddit.py` from `config` or the
 page would carry the client in with it. Everything here is pure: no network, no
 aiohttp.

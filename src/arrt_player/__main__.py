@@ -295,7 +295,7 @@ async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Cloc
     # to the same question, and the store's is the one that has to survive a
     # restart.
     clock = clock if clock is not None else Clock.system()
-    # **A store from a newer plane parks this wall, and only this wall.** Opening
+    # **A store from a newer Player parks this wall, and only this wall.** Opening
     # it would guess at a shape this code does not know, and restarting cannot
     # change the answer — the fix is a rollout — so the worker says so once and
     # waits to be stopped, rather than crash-looping a traceback per backoff step
@@ -644,7 +644,7 @@ def main() -> int:
         # `.env`. A stack through `load()` points at this codebase, which is the
         # one place the problem is not.
         log.error("%s", exc, extra={"event": "daemon.misconfigured"})  # noqa: TRY400 -- the fix is in .env, not in a frame
-        print(f"display plane cannot start: {exc}", file=sys.stderr)  # noqa: T201 -- the operator is at a terminal
+        print(f"Arrt Player cannot start: {exc}", file=sys.stderr)  # noqa: T201 -- the operator is at a terminal
         return 2
 
 
