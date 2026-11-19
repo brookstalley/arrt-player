@@ -1,16 +1,10 @@
-"""A television that behaves like the real one without being one.
+"""Doubles for the devices a Player draws on: the label panel, a screen, a monitor's DDC/CI.
 
-**Subclasses `TvClient` rather than duck-typing it**, which is the whole reason
-the interface is an abstract base: a verb added to the boundary fails this class
-at import instead of quietly leaving the fake behind while every test stays green.
-
-It models the set's *observable* behaviour, not its protocol: images live in one
-flat category under ids the set invents, selecting one that is not there is an
-error, and each failure the real client can produce can be armed on demand. What
-it deliberately does **not** model is the library's misreporting — an upload that
-lands while returning None is corrected inside `SamsungTv`, below this seam, and a
-fake that reproduced it here would be testing the correction twice and the
-daemon's behaviour not at all.
+Each models the device's *observable* behaviour and the ways it fails, armed on
+demand, rather than its protocol: a label surface that refuses or hangs, a screen
+that records every picture and every blank, a monitor that ignores a write. The
+television's double has a module of its own (`fake_tv.py`) and is re-exported
+here, so a test importing it from this module keeps working.
 """
 
 import math
@@ -185,6 +179,10 @@ class RecordingOutput:
 
     Stands in for the HDMI output behind the `ScreenOutput` interface, which is
     what lets a wall on a connector be tested on a machine that has none.
+
+    **A blank is recorded with how many renders came before it**, so a test can
+    tell a screen drawn black after its wall left from one drawn black before
+    the next wall's first picture, which a count alone cannot.
     """
 
     def __init__(self, *, connected: bool = True, screen: tuple[int, int] | None = (1920, 1080)) -> None:
@@ -199,6 +197,10 @@ class RecordingOutput:
         #: How many times the loop asked for a redraw, and what `refresh` raises when armed.
         self.refreshed = 0
         self.refresh_fails: Exception | None = None
+        #: For each blank, how many renders had been drawn before it.
+        self.blanked: list[int] = []
+        #: Armed to make `blank` raise, as a card another program took would.
+        self.blank_fails: Exception | None = None
 
     def show(self, render: Path) -> None:
         if self.fails is not None:
@@ -209,6 +211,11 @@ class RecordingOutput:
         self.refreshed += 1
         if self.refresh_fails is not None:
             raise self.refresh_fails
+
+    def blank(self) -> None:
+        if self.blank_fails is not None:
+            raise self.blank_fails
+        self.blanked.append(len(self.shown))
 
 
 def drm_tree(root: Path, connectors: dict[str, tuple[str, str]]) -> Path:
