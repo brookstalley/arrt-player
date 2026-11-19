@@ -93,7 +93,9 @@ class FrameDisplay:
     """One television, as a wall's display."""
 
     unavailable: tuple[type[Exception], ...] = (TvUnavailable,)
-    journal_name = "daemon"
+    #: The Frame wall's start, stop and crash lines read `frame.started`,
+    #: `frame.stopped`, `frame.crashed`.
+    journal_name = "frame"
     description = "the Frame"
 
     def __init__(self, *, settings: Settings, tv: TvClient, state: DisplayState, clock: Clock) -> None:

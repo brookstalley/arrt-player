@@ -850,6 +850,36 @@ async def test_held_writes_do_not_ask_the_set_once_a_second(daemon: Wall, tv: Fa
     assert tv.art_mode_reads < 10, f"held writes read art mode {tv.art_mode_reads} times in thirty passes"
 
 
+# -- the Frame's own journal lines -------------------------------------------
+
+
+@pytest.mark.parametrize("ending", ["stopped", "crashed"])
+async def test_the_frame_walls_lines_are_filed_under_frame(daemon: Wall, caplog, ending: str):
+    """`frame.started`, `frame.stopped`, `frame.crashed`: the one-wall daemon's `daemon.*` names are gone from the wall."""
+    import asyncio
+
+    stop = asyncio.Event()
+    if ending == "stopped":
+        stop.set()
+    else:
+
+        async def explode() -> float:
+            raise RuntimeError("something nobody predicted")
+
+        daemon.tick = explode  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO):
+        try:
+            await daemon.run(stop)
+        except RuntimeError:
+            assert ending == "crashed"
+
+    events = [getattr(record, "event", "") for record in caplog.records]
+    assert events.count("frame.started") == 1
+    assert events.count(f"frame.{ending}") == 1
+    assert not [event for event in events if event.startswith("daemon.")]
+
+
 # -- the double, as the set was measured --------------------------------------
 
 
