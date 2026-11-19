@@ -251,6 +251,113 @@ class TestOnePanelIsTheRecordedLimit:
         assert settings.panel.epd_device == "omni_epd.mock"
 
 
+class TestDrawingToFiles:
+    """`FILE_OUTPUT_DIR`: a Player with no hardware, which must be impossible to turn on by accident on a wall.
+
+    Off unless the directory is named; every value of its three keys refused by
+    name when it is unusable; never beside a key that drives hardware, never in
+    slideshow mode, and never inside the cache the Player tidies.
+    """
+
+    def test_unset_a_player_draws_to_no_files(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir))
+
+        assert settings.files is None
+        assert "FILE_OUTPUT_DIR is not set" in str(settings.startup_lines()["files"])
+
+    def test_the_directory_alone_is_a_1080p_screen_and_no_label(self, cache_dir: Path, tmp_path: Path):
+        settings = load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn")))
+
+        assert settings.files == config.FileOutputSettings(directory=tmp_path / "drawn", screen=(1920, 1080), label=False)
+        assert settings.startup_lines()["files"]["directory"] == str(tmp_path / "drawn")
+
+    def test_its_size_and_its_label_are_read(self, cache_dir: Path, tmp_path: Path):
+        settings = load(
+            an_environment(
+                cache_dir,
+                frame=False,
+                FILE_OUTPUT_DIR=str(tmp_path / "drawn"),
+                FILE_OUTPUT_SCREEN="640X360",
+                FILE_OUTPUT_LABEL="on",
+            )
+        )
+
+        assert settings.files is not None
+        assert (settings.files.screen, settings.files.label) == ((640, 360), True)
+
+    @pytest.mark.parametrize(
+        "value", ["0x1080", "1920x0", "-1920x1080", "1920", "1920x1080x3", "widexhigh", "1920 x 1080", "16385x1080", "1e3x1080"]
+    )
+    def test_a_size_that_is_not_one_is_refused_by_name(self, cache_dir: Path, tmp_path: Path, value: str):
+        with pytest.raises(ConfigError, match="FILE_OUTPUT_SCREEN"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn"), FILE_OUTPUT_SCREEN=value))
+
+    def test_the_largest_side_is_accepted(self, cache_dir: Path, tmp_path: Path):
+        side = config.FILE_OUTPUT_MAX_SIDE_PX
+        settings = load(
+            an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn"), FILE_OUTPUT_SCREEN=f"{side}x1")
+        )
+
+        assert settings.files is not None
+        assert settings.files.screen == (side, 1)
+
+    @pytest.mark.parametrize("value", ["yes", "true", "1", "label"])
+    def test_a_label_switch_that_is_not_on_or_off_is_refused_by_name(self, cache_dir: Path, tmp_path: Path, value: str):
+        with pytest.raises(ConfigError, match="FILE_OUTPUT_LABEL"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn"), FILE_OUTPUT_LABEL=value))
+
+    @pytest.mark.parametrize("key", ["FILE_OUTPUT_SCREEN", "FILE_OUTPUT_LABEL"])
+    def test_its_other_keys_without_the_directory_are_refused_by_name(self, cache_dir: Path, key: str):
+        value = "on" if key == "FILE_OUTPUT_LABEL" else "640x360"
+
+        with pytest.raises(ConfigError) as refused:
+            load(an_environment(cache_dir, frame=False, **{key: value}))
+
+        assert key in str(refused.value)
+        assert "FILE_OUTPUT_DIR is not" in str(refused.value)
+
+    def test_a_relative_directory_is_refused_by_name(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="FILE_OUTPUT_DIR must be an absolute path"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR="drawn"))
+
+    @pytest.mark.parametrize("hardware", list(config.FILE_OUTPUT_EXCLUDES))
+    def test_it_is_refused_beside_a_key_that_drives_hardware(self, cache_dir: Path, tmp_path: Path, hardware: str):
+        environment = an_environment(cache_dir, frame=True, FILE_OUTPUT_DIR=str(tmp_path / "drawn"))
+        environment.pop("TV_ADDRESS")
+        environment[hardware] = "10.0.0.1" if hardware == "TV_ADDRESS" else "omni_epd.mock"
+
+        with pytest.raises(ConfigError) as refused:
+            load(environment)
+
+        assert "FILE_OUTPUT_DIR" in str(refused.value)
+        assert hardware in str(refused.value)
+
+    @pytest.mark.parametrize("where", ["the cache", "inside it", "around it"])
+    def test_it_is_refused_where_the_player_tidies(self, cache_dir: Path, where: str):
+        directory = {"the cache": cache_dir, "inside it": cache_dir / "drawn", "around it": cache_dir.parent}[where]
+
+        with pytest.raises(ConfigError, match=r"FILE_OUTPUT_DIR .*CACHE_DIR"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(directory)))
+
+    @pytest.mark.parametrize("key", list(config.FILE_OUTPUT_KEYS))
+    def test_a_slideshow_refuses_each_of_its_keys_by_name(self, cache_dir: Path, tmp_path: Path, key: str):
+        value = {"FILE_OUTPUT_DIR": str(tmp_path / "drawn"), "FILE_OUTPUT_SCREEN": "640x360", "FILE_OUTPUT_LABEL": "on"}[key]
+
+        with pytest.raises(ConfigError) as refused:
+            load(a_slideshow(cache_dir, **{key: value}))
+
+        assert key in str(refused.value)
+        assert "arrt mode only" in str(refused.value)
+
+    @pytest.mark.parametrize("key", list(config.FILE_OUTPUT_KEYS))
+    def test_each_key_is_documented_under_the_heading_the_servers_test_quotes(self, key: str):
+        example = (Path(config.__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
+        section = example.split("# --- Drawing to files: a Player with no hardware", 1)
+
+        assert len(section) == 2, "the heading the server's test quotes is gone from .env.example"
+        assert re.search(rf"^{key}=$", section[1].split("\n# --- ", 1)[0], re.MULTILINE), f"{key} is not under the heading"
+
+
 class TestTheFrameIsAnOutputAClientMayHave:
     def test_tv_address_present_is_a_frame(self, cache_dir: Path):
         settings = load(an_environment(cache_dir))

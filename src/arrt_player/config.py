@@ -23,6 +23,11 @@ ruling of 2026-11-19, and not the design's**: a label is an output a Player has
 zero or more of, as a display is, and everything past this module holds its
 panels by output name. A value naming more than one panel is refused (`_panel`).
 
+**A Player may instead draw to a directory and drive no hardware at all**
+(`FILE_OUTPUT_DIR`, `FileOutputSettings`), so a real Player can run where there
+is no screen, television or panel. Off unless that key is set, and never beside
+a key that drives hardware.
+
 **A Player runs in one of two modes, never both** (`PLAYER_MODE`, owner
 2026-11-10). In `arrt` mode it is the client described above. In `slideshow`
 mode it needs no server: it plays a Reddit listing on one HDMI screen and
@@ -292,6 +297,27 @@ _HDMI_OUTPUT: Final = re.compile(r"hdmi-a-[1-9]")
 SLIDESHOW_MEDIA_DIRNAME: Final[str] = ".slideshow"
 SLIDESHOW_LISTING_FILENAME: Final[str] = ".slideshow-listing.json"
 MPV_RUNTIME_DIRNAME: Final[str] = ".mpv"
+
+#: The screen output a Player drawing to files reports (`FILE_OUTPUT_DIR`), as a
+#: curator places a wall on it. Its own word, never `hdmi-a-…` or `frame`, so no
+#: wall placed on it can be mistaken for one on hardware.
+FILE_SCREEN_OUTPUT: Final[str] = "file-screen-0"
+#: The label output a Player drawing to files reports (`FILE_OUTPUT_LABEL`).
+FILE_LABEL_OUTPUT: Final[str] = "file-label-0"
+#: The file screen's size when `FILE_OUTPUT_SCREEN` states none: a 1080p screen,
+#: the commonest mode an HDMI connector lists.
+DEFAULT_FILE_OUTPUT_SCREEN: Final[tuple[int, int]] = (1920, 1080)
+#: The largest side `FILE_OUTPUT_SCREEN` takes. A typo of one digit too many
+#: would otherwise compose every work at a size that fills the disk and the memory
+#: before it says anything; this is the 8K side twice over.
+FILE_OUTPUT_MAX_SIDE_PX: Final[int] = 16384
+#: The keys that drive hardware, which `FILE_OUTPUT_DIR` refuses beside it: a
+#: Player drawing to files drives nothing else.
+FILE_OUTPUT_EXCLUDES: Final[tuple[str, ...]] = ("TV_ADDRESS", "EPD_DEVICE")
+#: Every key of the file outputs, so a mode or a configuration that does not read
+#: them refuses them by name rather than ignoring them.
+FILE_OUTPUT_KEYS: Final[tuple[str, ...]] = ("FILE_OUTPUT_DIR", "FILE_OUTPUT_SCREEN", "FILE_OUTPUT_LABEL")
+_SIZE: Final = re.compile(r"([0-9]+)x([0-9]+)")
 
 
 #: Every name this Player keeps directly under `CACHE_DIR`, beside the walls'
@@ -610,6 +636,40 @@ class PanelSettings:
 
 
 @dataclass(frozen=True)
+class FileOutputSettings:
+    """A Player that draws to a directory and drives no screen, television or panel (`FILE_OUTPUT_DIR`).
+
+    **An output kind the product ships, for running a real Player where there is
+    no hardware**: the test of a Player against a real server, a development
+    machine, a container. It reports one screen output, `FILE_SCREEN_OUTPUT`, and
+    with `label` one label output, `FILE_LABEL_OUTPUT`; the supervisor places
+    walls and labels on them as on any other, the wall composes for the screen's
+    size, and each picture and label drawing is written under `directory`
+    (`displays.file_output`, `panel.file_surface`, where the layout is described).
+
+    **Never beside hardware.** While this is set the Player lists no HDMI
+    connector, and `load` refuses `TV_ADDRESS` and `EPD_DEVICE` beside it, so a
+    wall cannot be placed on a file while a screen on the same Player waits for
+    it, and a wall's `.env` that gained the key by mistake stops by name.
+    """
+
+    #: Where the outputs write, one directory per output beneath it. Outside
+    #: `CACHE_DIR`, which the Player tidies of anything no wall claims.
+    directory: Path
+    screen: tuple[int, int] = DEFAULT_FILE_OUTPUT_SCREEN
+    #: Whether the file label output is held too.
+    label: bool = False
+
+    def file_lines(self) -> dict[str, object]:
+        """The file outputs' part of the startup line."""
+        return {
+            "directory": str(self.directory),
+            "screen": f"{FILE_SCREEN_OUTPUT} {self.screen[0]}x{self.screen[1]}",
+            "label": FILE_LABEL_OUTPUT if self.label else "(none — FILE_OUTPUT_LABEL is off)",
+        }
+
+
+@dataclass(frozen=True)
 class Location:
     """Where the sun is seen from: the Frame's brightness and a screen's both follow it."""
 
@@ -754,6 +814,8 @@ class ClientSettings:
     mat_bottom_weight: float = DEFAULT_MAT_BOTTOM_WEIGHT
     #: Brightness on the HDMI screens; off with no location.
     screen_brightness: ScreenBrightnessSettings = field(default_factory=lambda: ScreenBrightnessSettings(location=None))
+    #: The file outputs, or None for a Player that draws on hardware (the default).
+    files: FileOutputSettings | None = None
 
     @property
     def client_document_path(self) -> Path:
@@ -798,6 +860,7 @@ class ClientSettings:
             "panel": self.panel.panel_lines(),
             "mat": f"{self.mat_width_inches} in, bottom x{self.mat_bottom_weight}",
             "screen_brightness": self.screen_brightness.screen_brightness_line(),
+            "files": self.files.file_lines() if self.files is not None else "(none — FILE_OUTPUT_DIR is not set)",
         }
 
 
@@ -880,6 +943,12 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings | SlideshowSet
     if said := player_mode_problem(mode):
         raise ConfigError(said)
     if mode == SLIDESHOW_MODE:
+        if named := [name for name in FILE_OUTPUT_KEYS if env.get(name)]:
+            raise ConfigError(
+                f"{', '.join(named)} {'is' if len(named) == 1 else 'are'} read in arrt mode only: a slideshow plays "
+                "through mpv on an HDMI screen, and a slideshow Player drawing to files would still drive that screen. "
+                "Remove it, or set PLAYER_MODE=arrt."
+            )
         return _slideshow(env, cache_dir)
     missing = tuple(name for name in SERVER_KEYS if not env.get(name))
     if missing:
@@ -903,6 +972,7 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings | SlideshowSet
         mat_width_inches=_positive_float(env, "MAT_WIDTH_INCHES", DEFAULT_MAT_WIDTH_INCHES),
         mat_bottom_weight=_positive_float(env, "MAT_BOTTOM_WEIGHT", DEFAULT_MAT_BOTTOM_WEIGHT),
         screen_brightness=_screen_brightness(env),
+        files=_files(env, cache_dir),
     )
 
 
@@ -1071,6 +1141,69 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_panel_height_px=_positive_int(env, "TV_PANEL_HEIGHT_PX", DEFAULT_TV_PANEL_HEIGHT_PX),
         tv_panel_diagonal_inches=_positive_float(env, "TV_PANEL_DIAGONAL_INCHES", DEFAULT_TV_PANEL_DIAGONAL_INCHES),
     )
+
+
+def _files(env: dict[str, str], cache_dir: Path) -> FileOutputSettings | None:
+    """The file outputs when `FILE_OUTPUT_DIR` is set, None when it is not. Every refusal names its key.
+
+    **Off unless the directory is named**, and the other two keys are refused
+    without it rather than ignored: a size or a label switch with nowhere to draw
+    is a half-made configuration, and a Player started from one would draw on
+    whatever hardware it has while its operator believes it draws to files.
+    **Never beside a key that drives hardware** (`FILE_OUTPUT_EXCLUDES`), and never
+    inside `CACHE_DIR` or around it: the Player removes what no wall or label
+    claims there, and a wall's directory may take the name of an output's.
+    """
+    raw = (env.get("FILE_OUTPUT_DIR") or "").strip()
+    if not raw:
+        if named := [name for name in FILE_OUTPUT_KEYS if env.get(name)]:
+            raise ConfigError(
+                f"{', '.join(named)} {'is' if len(named) == 1 else 'are'} set and FILE_OUTPUT_DIR is not: "
+                "the file outputs draw nothing without a directory. Set FILE_OUTPUT_DIR, or remove it."
+            )
+        return None
+    directory = _absolute(raw, "FILE_OUTPUT_DIR")
+    if hardware := [name for name in FILE_OUTPUT_EXCLUDES if (env.get(name) or "").strip()]:
+        raise ConfigError(
+            f"FILE_OUTPUT_DIR is set beside {' and '.join(hardware)}: a Player drawing to files drives no "
+            "television or panel, so a wall placed on its file screen could never be the one on the hardware. "
+            "Remove one or the other."
+        )
+    resolved, cache = directory.resolve(), cache_dir.resolve()
+    if resolved == cache or cache in resolved.parents or resolved in cache.parents:
+        raise ConfigError(
+            f"FILE_OUTPUT_DIR is {raw!r}, which is CACHE_DIR, inside it or around it: the Player removes from "
+            "CACHE_DIR what no wall claims, so the file outputs need a directory of their own."
+        )
+    return FileOutputSettings(
+        directory=directory,
+        screen=_size(env, "FILE_OUTPUT_SCREEN", DEFAULT_FILE_OUTPUT_SCREEN),
+        label=_switch(env, "FILE_OUTPUT_LABEL", default=False),
+    )
+
+
+def _size(env: dict[str, str], name: str, default: tuple[int, int]) -> tuple[int, int]:
+    """A size in pixels written `WIDTHxHEIGHT`, refused by name unless both sides are whole and in range."""
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    matched = _SIZE.fullmatch(raw.lower())
+    if matched is None:
+        raise ConfigError(f"{name} is {raw!r}, and it must be a size in pixels written WIDTHxHEIGHT, as 1920x1080.")
+    width, height = int(matched.group(1)), int(matched.group(2))
+    if not (0 < width <= FILE_OUTPUT_MAX_SIDE_PX and 0 < height <= FILE_OUTPUT_MAX_SIDE_PX):
+        raise ConfigError(f"{name} is {raw!r}, and each side must be above zero and at most {FILE_OUTPUT_MAX_SIDE_PX}.")
+    return (width, height)
+
+
+def _switch(env: dict[str, str], name: str, *, default: bool) -> bool:
+    """`on` or `off`, as `SCREEN_BRIGHTNESS` is written; anything else is refused by name."""
+    raw = (env.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    if raw not in ("on", "off"):
+        raise ConfigError(f"{name} is {raw!r}, and it must be on or off.")
+    return raw == "on"
 
 
 #: The keys that place this Player under the sun. Any one set asks for all of
