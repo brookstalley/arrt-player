@@ -62,7 +62,13 @@ _ADDRESS_SHAPES = {
     ),
 }
 
+#: A loopback host after `user@`: a login there names no deployment. Whole
+#: literals only (`127.0.0.0/8`, `localhost`; `[::1]` never starts a host the
+#: login shape reads), so `127.0.0.1.<name>.lan` is still that name's login.
+_LOOPBACK = r"(?:127(?:\.\d{1,3}){3}|localhost)(?![\w.-]|\.\w)"
+
 #: Host-name and login shapes: a `.local` or `.lan` name, and `user@host`.
+#: A login at a loopback host (`_LOOPBACK`) is not one.
 #:
 #: `user@host` is a target when the host is an IPv4 address or a `.local`/`.lan`
 #: name, or when the line is an `ssh`, `scp`, `rsync` or `sftp` command, where any
@@ -71,15 +77,24 @@ _ADDRESS_SHAPES = {
 _HOST_SHAPES = {
     ".local or .lan host name": re.compile(r"[\w-]\.(?:local|lan)\b(?![(\w-]|\.\w)"),
     "user@host login": re.compile(
-        r"[A-Za-z_][\w.-]*@(?:\d{1,3}(?:\.\d{1,3}){3}\b|[A-Za-z0-9][\w.-]*\.(?:local|lan)\b)"
-        r"|\b(?:ssh|scp|rsync|sftp)\b.*?(?<![\w./<])[A-Za-z_][\w.-]*@[A-Za-z0-9][\w.-]*"
+        r"[A-Za-z_][\w.-]*@(?!" + _LOOPBACK + r")(?:\d{1,3}(?:\.\d{1,3}){3}\b|[A-Za-z0-9][\w.-]*\.(?:local|lan)\b)"
+        r"|\b(?:ssh|scp|rsync|sftp)\b.*?(?<![\w./<])[A-Za-z_][\w.-]*@(?!" + _LOOPBACK + r")[A-Za-z0-9][\w.-]*"
     ),
 }
 
-#: The one host name the product's own words use as an example (`SERVER_URL` is
-#: "e.g. http://arrt.local:8770" in a validation message and a settings hint, and
-#: in tests). Named exactly, so a second `.local` name is still a hit.
-_EXAMPLE_HOSTS = ("arrt.local",)
+#: The host names the product's own words use as examples: `arrt.local`
+#: (`SERVER_URL` is "e.g. http://arrt.local:8770" in a validation message and a
+#: settings hint, and in tests), and the settings page's `wall.lan` (the
+#: `UI_ALLOWED_HOSTS` example) and `studio.local` (a machine's own name, written
+#: `Studio.local` where its case folding is the test). Named exactly and compared
+#: without case, so a second `.local` or `.lan` name, or one with a further label
+#: before or after (`my` + `wall.lan`, `my-` + `wall.lan`), is still a hit. A
+#: leading hyphen alone (`-wall.lan`, the settings page's refused-name case) is
+#: no other name, since no label starts with one.
+_EXAMPLE_HOSTS = ("arrt.local", "wall.lan", "studio.local")
+_EXAMPLE_HOST = re.compile(
+    r"(?<![\w.])(?<![\w.]-)(?:" + "|".join(re.escape(host) for host in _EXAMPLE_HOSTS) + r")(?![\w-]|\.\w)", re.IGNORECASE
+)
 
 #: Trees whose test doubles carry private, CGNAT, link-local and ULA addresses on
 #: purpose: `tests/test_fetch.py` proves the downloader refuses each, and the
@@ -193,8 +208,7 @@ def _working_tree() -> list[str]:
 
 def _kinds_in(line: str, name: str) -> list[str]:
     """The kinds of deployment value `line` carries, for a file at `name`."""
-    for host in _EXAMPLE_HOSTS:
-        line = line.replace(host, "example-host")
+    line = _EXAMPLE_HOST.sub("example-host", line)
     shapes = dict(_HOST_SHAPES)
     if not name.startswith(_FIXTURE_TREES):
         shapes = {**_ADDRESS_SHAPES, **shapes}
@@ -282,6 +296,14 @@ _SEEDS = [
     ("user@host login", "then rsync -a x " + "brooks@" + "somewhere.example.com:/y"),
     ("user@host login", "mail " + "pi@" + _NAS),
     ("user@host login", "run " + "pi@" + "10.0.0.5"),
+    # Beside the loopback and example-host exemptions: what each must not excuse.
+    ("user@host login", "run " + "pi@" + "192." + "168.4.5"),
+    ("user@host login", "mail " + "pi@" + "other" + ".local"),
+    ("user@host login", "ssh " + "pi@" + "127.0.0.1." + "other" + ".lan"),
+    (".local or .lan host name", "ping " + "other" + ".lan"),
+    (".local or .lan host name", "open http://" + "my" + "wall.lan" + ":8771"),
+    (".local or .lan host name", "open http://" + "x." + "studio.local"),
+    (".local or .lan host name", "open http://" + "my-" + "wall.lan"),
 ]
 
 #: Documentation forms and near-misses that are not deployment values.
@@ -302,6 +324,9 @@ _LOOKALIKES = [
     "ssh <user@host>",
     "ssh into the box",
     "http://arrt.local:8770 and user:pw@arrt.local",
+    "UI_ALLOWED_HOSTS=wall.lan,WALL.LAN. and gethostname Studio.local and studio.local",
+    "http://user@127.0.0.1:8771 and pi@127.255.0.9 and mail pi@localhost",
+    "ssh pi@127.0.0.1 and ssh pi@localhost and scp f pi@[::1]:/x",
 ]
 
 
