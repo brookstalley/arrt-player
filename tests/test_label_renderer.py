@@ -128,7 +128,14 @@ def panel(surface) -> LabelPanel:
 
 
 def renderer_for(panel: LabelPanel, link, clock) -> LabelRenderer:
-    return LabelRenderer(assignment=ASSIGNMENT, link=link, panel=panel, now=clock.as_clock().now, poll_seconds=1.0)
+    return LabelRenderer(
+        assignment=ASSIGNMENT,
+        link=link,
+        panel=panel,
+        now=clock.as_clock().now,
+        monotonic=clock.as_clock().monotonic,
+        poll_seconds=1.0,
+    )
 
 
 @pytest.fixture
@@ -322,6 +329,36 @@ class TestTheServerGoneAway:
         await renderer.tick()
         await renderer.tick()
         assert surface.last_text == []
+        assert len(surface.shown) == 2, "the blank was drawn more than once"
+
+    async def test_a_wall_clock_that_jumps_forward_does_not_blank_a_hold_that_is_a_minute_old(
+        self, renderer, link, surface, clock
+    ):
+        """**The hold is an interval, so it is the monotonic clock's.** An NTP
+        correction on a Pi that came up believing it was 1970 steps the wall clock
+        by hours; 31 minutes of it is one minute of the hold."""
+        await show(renderer, link, a_document())
+        link.reachable = False
+
+        clock.advance(61.3)
+        clock.move_to(clock.as_clock().now() + timedelta(minutes=31, seconds=7.3))
+        await renderer.tick()
+        await renderer.tick()
+
+        assert surface.last_text[:1] == ["Ruscha, Ed"], "the wall clock's step blanked a hold that was a minute old"
+        assert len(surface.shown) == 1
+
+    async def test_a_wall_clock_that_steps_back_does_not_extend_the_hold(self, renderer, link, surface, clock):
+        """The other direction: 31 minutes passed, whatever the wall clock says."""
+        await show(renderer, link, a_document())
+        link.reachable = False
+
+        clock.advance(HOLD.total_seconds() + 61.7)
+        clock.move_to(clock.as_clock().now() - timedelta(hours=2, seconds=13.1))
+        await renderer.tick()
+        await renderer.tick()
+
+        assert surface.last_text == [], "a wall clock stepped back held the caption past thirty minutes"
         assert len(surface.shown) == 2, "the blank was drawn more than once"
 
     async def test_a_server_that_comes_back_brings_the_caption_back(self, renderer, link, surface, clock):
@@ -693,6 +730,74 @@ class TestRunningAndStopping:
         panel.close()
 
         assert surface.closed == 1
+
+
+class _RecordsWhenItWasClosed(FakeSurface):
+    """A surface that notes whether a draw was inside it when `close` arrived."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed_inside_a_draw: list[bool] = []
+
+    def close(self) -> None:
+        self.closed_inside_a_draw.append(self.entered.is_set() and not self.left.is_set())
+        super().close()
+
+
+class TestClosingThePanelUnderADraw:
+    """**`close` is the e-paper power-down**, and a draw past its budget is left running on purpose."""
+
+    async def test_a_draw_past_the_budget_is_not_closed_under(self, link, clock, caplog, monkeypatch):
+        monkeypatch.setattr(renderer_module, "LABEL_DRAW_BUDGET_SECONDS", 0.05)
+        surface = _RecordsWhenItWasClosed()
+        surface.blocks = True
+        panel = panel_on(surface)
+        try:
+            link.serve(a_document())
+            await asyncio.wait_for(renderer_for(panel, link, clock).tick(), timeout=10)
+            assert surface.entered.is_set()
+            assert not surface.left.is_set(), "the draw came back, so this is not the in-flight case"
+
+            with caplog.at_level("WARNING"):
+                panel.close()
+                panel.close()
+
+            assert surface.closed == 0, "the panel was powered down under a draw still in the driver"
+            left_open = [r for r in caplog.records if getattr(r, "event", None) == "label.close_abandoned"]
+            assert len(left_open) == 1, "leaving the panel was not said exactly once"
+        finally:
+            surface.release.set()
+            assert await _comes_back(surface.left), "the draw thread never came back"
+
+    async def test_a_draw_inside_the_budget_is_waited_for_and_then_the_panel_is_closed(self, link, clock, monkeypatch):
+        monkeypatch.setattr(renderer_module, "LABEL_DRAW_BUDGET_SECONDS", 5.0)
+        surface = _RecordsWhenItWasClosed()
+        surface.draw_takes_seconds = 0.3
+        panel = panel_on(surface)
+        link.serve(a_document())
+        ticking = asyncio.create_task(renderer_for(panel, link, clock).tick())
+        assert await _comes_back(surface.entered), "the draw never began"
+
+        await asyncio.to_thread(panel.close)
+        await ticking
+
+        assert surface.left.is_set(), "close returned with the draw still in the driver"
+        assert surface.closed_inside_a_draw == [False]
+        assert len(surface.shown) == 1, "the draw close waited for was lost"
+
+    async def test_a_draw_queued_behind_the_close_puts_nothing_on_a_closed_panel(self, link, clock):
+        surface = _RecordsWhenItWasClosed()
+        panel = panel_on(surface)
+        panel.close()
+
+        link.serve(a_document())
+        await asyncio.wait_for(renderer_for(panel, link, clock).tick(), timeout=10)
+
+        assert surface.draws_begun == 0, "a draw reached the driver after the panel was powered down"
+        assert surface.closed == 1
+
+    def test_closing_a_panel_that_never_opened_is_nothing(self):
+        panel_on(None, error="no such device").close()
 
 
 class TestThePanelAsALabelOutput:

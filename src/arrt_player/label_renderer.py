@@ -21,16 +21,18 @@ posture the label had while the Frame loop drew it, kept now that it does not.
 import asyncio
 import contextlib
 import logging
+import threading
+import time
 from collections.abc import Callable
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Final, Protocol
 
 from arrt_player.client import EPAPER_KIND, LabelAssignment, LabelOutputReport
 from arrt_player.episodes import ReportOnce
 from arrt_player.label_rule import Drawing, LabelDocument, Outcome, drawing_for, offline
 from arrt_player.logs import work_context
-from arrt_player.panel import Candidate, LabelSurface, Layout, Run, Tier, lay_out, read_label
+from arrt_player.panel import Candidate, LabelSurface, Layout, Run, SurfaceUnavailable, Tier, lay_out, read_label
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +83,16 @@ class LabelPanel:
         #: it cannot stop the thread, and a renderer restarted for a new mapping
         #: must not dispatch a second draw into a driver the first is still in.
         self._draw: asyncio.Future[Layout] | None = None
+        #: **Held by a worker for as long as it is inside the driver**, which is
+        #: what `close` waits on. The asyncio future above cannot be waited on
+        #: from `close` (a plain function, called on the loop's own thread), and
+        #: it does not cover a draw still *queued* for a thread; this does both,
+        #: because a worker takes it before it touches the surface and not after.
+        self._in_driver = threading.Lock()
+        #: Set by `close`, read by a worker once it holds the lock: a draw that
+        #: was queued behind the one `close` waited for finds the panel gone and
+        #: puts nothing on it.
+        self._closed = False
 
     def report(self) -> LabelOutputReport:
         """This panel as the client heartbeat states it."""
@@ -92,9 +104,33 @@ class LabelPanel:
         )
 
     def close(self) -> None:
-        """Release the panel. **On e-paper this is the sleep/power-down**, not bookkeeping."""
-        if self.surface is not None:
-            self.surface.close()
+        """Release the panel. **On e-paper this is the sleep/power-down**, not bookkeeping.
+
+        **Waits for a draw in flight, up to the label budget.** Powering a panel
+        down under a transaction is the one way this call could do harm, and a
+        draw is left running past its budget on purpose (`draw`), so "no draw is
+        in flight" is the caller's hope and not a fact. Past the budget it says so
+        once and leaves the panel open: a thread parked in the driver cannot be
+        stopped from here, and the unit's stop window already covers that case.
+        The wait blocks the caller's thread, which is the loop's at shutdown, for
+        at most the budget and with every wall already stopped.
+        """
+        surface = self.surface
+        if surface is None or self._closed:
+            return
+        if not self._in_driver.acquire(timeout=LABEL_DRAW_BUDGET_SECONDS):
+            self._closed = True
+            log.warning(
+                "the label panel was left open: a draw was still in the driver after the %gs label budget",
+                LABEL_DRAW_BUDGET_SECONDS,
+                extra={"event": "label.close_abandoned"},
+            )
+            return
+        try:
+            self._closed = True
+            surface.close()
+        finally:
+            self._in_driver.release()
 
     async def draw(  # noqa: C901, PLR0912 -- every way a draw can fail is answered in place
         self, drawing: Drawing, *, label_id: str
@@ -116,7 +152,7 @@ class LabelPanel:
         # the thread never starts, so a flag cleared inside it would close the
         # gate for good. Asking the task whether it is finished is right for both
         # the queued case and the running one.
-        draw = asyncio.ensure_future(asyncio.to_thread(_lay_out_and_show, surface, drawing))
+        draw = asyncio.ensure_future(asyncio.to_thread(self._lay_out_and_show, surface, drawing))
         self._draw = draw
         finished, _ = await asyncio.wait({draw}, timeout=LABEL_DRAW_BUDGET_SECONDS)
         if not finished:
@@ -220,17 +256,19 @@ class LabelPanel:
                 extra={"event": "label.failed", "label_id": label_id},
             )
 
+    def _lay_out_and_show(self, surface: LabelSurface, drawing: Drawing) -> Layout:
+        """Lay a drawing out and put it on the surface. **Runs on a worker thread.**
 
-def _lay_out_and_show(surface: LabelSurface, drawing: Drawing) -> Layout:
-    """Lay a drawing out and put it on the surface. **Runs on a worker thread.**
-
-    Measuring and drawing are one unit of work because both reach the same text
-    stack. Nothing here touches shared state; the caller reads the outcome
-    through the task it holds.
-    """
-    layout = lay_out(_facts(drawing), surface.geometry, surface.measure, surface.type_scale)
-    surface.show(layout)
-    return layout
+        Measuring and drawing are one unit of work because both reach the same text
+        stack. The panel's own state it touches is the lock `close` waits on and the
+        flag `close` sets; the caller reads the outcome through the task it holds.
+        """
+        with self._in_driver:
+            if self._closed:
+                raise SurfaceUnavailable("the panel was closed before this draw began")
+            layout = lay_out(_facts(drawing), surface.geometry, surface.measure, surface.type_scale)
+            surface.show(layout)
+            return layout
 
 
 def _facts(drawing: Drawing) -> tuple[Candidate, ...]:
@@ -271,17 +309,25 @@ class LabelRenderer:
         panel: LabelPanel,
         now: Callable[[], datetime],
         poll_seconds: float,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._assignment = assignment
         self._link = link
         self._panel = panel
         self._now = now
+        #: **The offline hold's clock.** Thirty minutes is an interval, so it is
+        #: measured on the clock that cannot step (`wall.Clock`'s rule): a Pi with
+        #: no RTC comes up believing it is 1970 and is corrected by NTP mid-hold,
+        #: and wall time would then blank the caption at once or never. `now` is
+        #: still the sun's and the server's `since`'s clock, which the contract
+        #: accepts unreconciled (`player-contract.md` § Transport).
+        self._monotonic = monotonic
         self._poll = poll_seconds
         #: The last document the server sent, kept through every failure.
         self._document: LabelDocument | None = None
-        #: When the server last answered at all; the hold runs from here once it
-        #: stops answering.
-        self._last_answer: datetime | None = None
+        #: When the server last answered at all, on the monotonic clock; the hold
+        #: runs from here once it stops answering.
+        self._last_answer: float | None = None
         #: What the panel was last asked to show. **Recorded on the attempt
         #: rather than the success**, so a refusing panel is not re-asked every
         #: second: it gets its next chance when the drawing next changes.
@@ -318,13 +364,19 @@ class LabelRenderer:
         """One poll: ask for the document, decide, and draw if the decision changed."""
         answer = await self._link.fetch()
         now = self._now()
+        elapsed = self._monotonic()
         if answer.reachable:
-            self._last_answer = now
+            self._last_answer = elapsed
             if answer.document is not None:
                 self._document = answer.document
             reading = self._document
         else:
-            reading = offline(self._document, self._last_answer)
+            # The rule compares `since` with `now`, so the last answer is handed
+            # over as the wall-clock instant that is as far behind `now` as the
+            # answer is behind on the monotonic clock: one clock, however the
+            # wall clock has moved in between.
+            silent_for = timedelta(seconds=max(0.0, elapsed - self._last_answer)) if self._last_answer is not None else None
+            reading = offline(self._document, now - silent_for if silent_for is not None else None)
         await self._show(drawing_for(reading, now))
 
     async def _show(self, drawing: Drawing) -> None:
