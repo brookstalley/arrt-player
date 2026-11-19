@@ -48,7 +48,7 @@ def a_watcher(wall_dir: Path, wall_id: str = WALL_ID) -> Watcher:
 
 
 def _named(name: str) -> dict:
-    """The builder's document under another playlist name, which is how these tests tell two documents apart."""
+    """The builder's document under another theme name, which is how these tests tell two documents apart."""
     return a_document(playlist={"id": "t1", "name": name})
 
 
