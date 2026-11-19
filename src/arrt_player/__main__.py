@@ -41,6 +41,13 @@ port costs the page and nothing else, because a wall never waits on its settings
 Until a password is set the page needs the setup code minted here and printed with
 its address; it is new on every start and dies once a password is set.
 
+**A Player with `FILE_OUTPUT_DIR` set drives no hardware at all**: its outputs
+are a screen and a label drawn to that directory (`player_outputs`,
+`label_panels`, `run_wall`), placed, composed for and drawn by the same
+supervisor, schedule and renderer as any other, so a real Player process can be
+tested against a real server where there is no screen, television or panel. It
+says so once at start, at WARNING, because on a wall it would be a fault.
+
 **In slideshow mode there is no server, supervisor or pull** (`run_slideshow`).
 One programme plays a Reddit listing on one HDMI screen through mpv and
 captions it on the panel, beside the same page. Its parts are composed in
@@ -72,10 +79,12 @@ from arrt_player.client import (
 )
 from arrt_player.config import (
     ARRT_MODE,
+    FILE_SCREEN_OUTPUT,
     PANEL_OUTPUT,
     SLIDESHOW_MODE,
     ClientSettings,
     ConfigError,
+    FileOutputSettings,
     FrameSettings,
     PanelSettings,
     ScreenBrightnessSettings,
@@ -88,6 +97,7 @@ from arrt_player.config import (
     load_ui,
 )
 from arrt_player.ddc import Ddc, DdcBus, I2cTransport, bus_for
+from arrt_player.displays import file_output
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import ScreenOutput, go_dark, screen_wall
 from arrt_player.displays.screen_brightness import ScreenBrightness
@@ -244,16 +254,35 @@ def label_panel(settings: PanelSettings) -> LabelPanel | None:
     return LabelPanel(name=PANEL_OUTPUT, surface=surface, error=None, size=size)
 
 
-def label_panels(settings: PanelSettings) -> dict[str, LabelPanel]:
-    """Every label panel this client holds, by output name: none, or the one the configuration describes.
+def label_panels(settings: ClientSettings) -> dict[str, LabelPanel]:
+    """Every label panel this client holds, by output name: the e-paper one, the file label, or none.
 
     **A mapping, not a panel**, so that what holds, reports, draws on and closes
     the panels never assumes there is one: the configuration's limit
     (`config.PANEL_OUTPUT`) is the configuration's, and a second panel would be
-    a second entry here and nothing more.
+    a second entry here and nothing more. The file label (`FILE_OUTPUT_LABEL`)
+    is one such entry; the configuration never gives a Player both it and a panel.
     """
-    panel = label_panel(settings)
-    return {panel.name: panel} if panel is not None else {}
+    panels: dict[str, LabelPanel] = {}
+    panel = label_panel(settings.panel)
+    if panel is not None:
+        panels[panel.name] = panel
+    if settings.files is not None and settings.files.label:
+        drawn = file_output.file_label_panel(settings.files)
+        panels[drawn.name] = drawn
+    return panels
+
+
+def player_outputs(settings: ClientSettings, *, frame_identity: str | None = None) -> list[OutputReport]:
+    """Every output this client reports and drives: its file screen alone when it draws to files, else its hardware's.
+
+    **Instead of the hardware, never beside it.** With `FILE_OUTPUT_DIR` set no
+    HDMI connector is listed (and the configuration refuses a Frame beside it),
+    so the server can place a wall only where this Player will draw it.
+    """
+    if settings.files is not None:
+        return [file_output.output_report(settings.files)]
+    return client_outputs(settings, frame_identity=frame_identity)
 
 
 def frame_tv(settings: FrameSettings) -> SamsungTv:
@@ -310,7 +339,8 @@ async def run_label(
         monotonic=clock.monotonic,
         poll_seconds=settings.label_poll_seconds,
     )
-    await renderer.run(stop)
+    with file_output.captioning(assignment):
+        await renderer.run(stop)
 
 
 class LabelCacheSweep:
@@ -413,6 +443,7 @@ async def run_screen_wall(
     *,
     clock: Clock | None = None,
     brightness: ScreenBrightnessSettings | None = None,
+    output_for: Callable[[WallSettings, str], ScreenOutput] | None = None,
 ) -> None:
     """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped.
 
@@ -421,15 +452,19 @@ async def run_screen_wall(
     the connector starts only once this worker has finished. Called already
     stopped, which is the supervisor's last call for a wall taken away between
     restarts, it does only that.
+
+    `output_for` builds what the wall draws on: an HDMI connector's
+    (`screen_output`) unless the caller names another.
     """
+    build = output_for if output_for is not None else screen_output
     if stop.is_set():
         if is_retired(stop):
-            await go_dark(screen_output(wall, output), wall_id=wall.wall_id, output_name=output)
+            await go_dark(build(wall, output), wall_id=wall.wall_id, output_name=output)
         return
     wall.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(wall.manifest_path)
     clock = clock if clock is not None else Clock.system()
-    drawn_on = screen_output(wall, output)
+    drawn_on = build(wall, output)
     screen = screen_wall(
         wall=wall,
         output=drawn_on,
@@ -491,10 +526,21 @@ def screen_output(
     return KmsOutput(output)
 
 
+def file_screen_output(settings: FileOutputSettings, wall: WallSettings, output: str) -> ScreenOutput:
+    """What a wall on the file screen draws on: a directory, named for the output, under `FILE_OUTPUT_DIR`."""
+    return file_output.FileScreenOutput(settings, wall_id=wall.wall_id, name=output)
+
+
 async def run_wall(settings: ClientSettings, wall: WallSettings, output: OutputReport, stop: asyncio.Event) -> None:
-    """The supervisor's worker: the wall on the Frame for the Frame, on a screen this host draws for anything else."""
+    """The supervisor's worker: the wall on the Frame for the Frame, on a screen this host draws for anything else.
+
+    The file screen is a screen like a connector's, drawn to a directory, and
+    with no brightness to follow: it has no DDC/CI bus.
+    """
     if output.kind == FRAME_KIND:
         await run_frame_wall(settings.frame_wall(wall.wall_id), stop)
+    elif settings.files is not None and output.name == FILE_SCREEN_OUTPUT:
+        await run_screen_wall(wall, output.name, stop, output_for=partial(file_screen_output, settings.files))
     else:
         await run_screen_wall(wall, output.name, stop, brightness=settings.screen_brightness)
 
@@ -688,14 +734,21 @@ async def _run() -> int:
     if isinstance(settings, SlideshowSettings):
         return await run_slideshow(settings, ui, stop)
 
+    if settings.files is not None:
+        # Once, and loud: on a wall this would be a Player showing nothing.
+        log.warning(
+            "this Player draws its walls and labels to files in %s, and drives no screen, television or panel",
+            settings.files.directory,
+            extra={"event": "files.drawing", **settings.files.file_lines()},
+        )
     clock = Clock.system()
     identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
-    panels = label_panels(settings.panel)
+    panels = label_panels(settings)
     supervisor = Supervisor(
         settings=settings,
         link=ClientPull(settings),
         worker=partial(run_wall, settings),
-        outputs=lambda: client_outputs(settings, frame_identity=identity.value if identity is not None else None),
+        outputs=lambda: player_outputs(settings, frame_identity=identity.value if identity is not None else None),
         now=clock.now,
         monotonic=clock.monotonic,
         label_worker=partial(run_label, settings, panels, clock=clock) if panels else None,
