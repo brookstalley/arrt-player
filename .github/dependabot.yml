@@ -1,0 +1,18 @@
+# Dependabot watches one thing here: the GitHub Actions the workflow pins.
+#
+# Each `uses:` in `.github/workflows/suites.yml` names a commit with its tag in a
+# comment (wave 1), because a tag moves and a commit does not. That also means a
+# pin never learns that its tag moved to a fixed release. Dependabot is how it
+# does: once a month, for each pinned action whose tag has moved, it opens a pull
+# request that changes the commit and the tag comment together.
+#
+# **Actions only, and that is a decision, not an omission.** `uv.lock` stays a
+# hand step: a lock update moves the Waveshare pin and the contract's git source,
+# and a bot does not exercise their call sites first. `tests/test_ci_scope.py`
+# holds this file to exactly that: the one ecosystem, monthly.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
