@@ -57,7 +57,15 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 
 from arrt_player import logs
-from arrt_player.client import FRAME_KIND, FrameIdentity, LabelAssignment, OutputReport, Supervisor, client_outputs
+from arrt_player.client import (
+    FRAME_KIND,
+    FrameIdentity,
+    LabelAssignment,
+    OutputReport,
+    Supervisor,
+    client_outputs,
+    wall_retired,
+)
 from arrt_player.config import (
     ARRT_MODE,
     PANEL_OUTPUT,
@@ -77,7 +85,7 @@ from arrt_player.config import (
 )
 from arrt_player.ddc import Ddc, DdcBus, I2cTransport, bus_for
 from arrt_player.displays.frame import frame_wall
-from arrt_player.displays.screen import ScreenOutput, screen_wall
+from arrt_player.displays.screen import ScreenOutput, go_dark, screen_wall
 from arrt_player.displays.screen_brightness import ScreenBrightness
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
@@ -269,7 +277,12 @@ async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Cloc
 
     The Frame draws no label: the panel is a label output of the client,
     mapped to a wall by the server and drawn by `run_label`.
+
+    **Called already stopped, it returns at once**: the supervisor's last call
+    for a wall taken away between restarts, and the Frame has nothing to leave.
     """
+    if stop.is_set():
+        return
     settings.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(settings.manifest_path)
     tv = frame_tv(settings)
@@ -314,18 +327,34 @@ async def run_screen_wall(
     clock: Clock | None = None,
     brightness: ScreenBrightnessSettings | None = None,
 ) -> None:
-    """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped."""
+    """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped.
+
+    **Retired, it leaves the screen black** once the loop and the pull have
+    ended, so no draw of its own can land after the black, and the next wall on
+    the connector starts only once this worker has finished. Called already
+    stopped, which is the supervisor's last call for a wall taken away between
+    restarts, it does only that.
+    """
+    if stop.is_set():
+        if wall_retired(stop):
+            await go_dark(screen_output(wall, output), wall_id=wall.wall_id, output_name=output)
+        return
     wall.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(wall.manifest_path)
     clock = clock if clock is not None else Clock.system()
+    drawn_on = screen_output(wall, output)
     screen = screen_wall(
         wall=wall,
-        output=screen_output(wall, output),
+        output=drawn_on,
         watcher=watcher,
         clock=clock,
         brightness=screen_brightness(wall, output, brightness, clock),
     )
-    await _beside_its_pull(wall, stop, screen.run)
+    try:
+        await _beside_its_pull(wall, stop, screen.run)
+    finally:
+        if wall_retired(stop):
+            await go_dark(drawn_on, wall_id=wall.wall_id, output_name=output)
 
 
 def screen_ddc(output: str) -> DdcBus:

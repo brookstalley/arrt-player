@@ -460,3 +460,21 @@ async def test_a_store_from_a_newer_plane_parks_its_wall_and_says_so_once(monkey
     assert "schema 9" in said[0].getMessage()
     assert said[0].exc_info is None, "a rollout fault was logged with a traceback into this codebase"
     assert _PullRecorder.started == []
+
+
+async def test_a_frame_wall_called_once_more_after_it_was_taken_away_touches_nothing(monkeypatch, settings, tv):
+    """The supervisor calls a worker once more, already stopped, when its wall is taken
+    away while it waits to restart; for the Frame that is no loop, no pull and no set."""
+    from arrt_player.client import WallStop
+
+    async def must_not_run(stop) -> None:
+        raise AssertionError("the Frame's loop ran for a wall that was taken away")
+
+    _wire(monkeypatch, tv, daemon_run=must_not_run)
+    stop = WallStop()
+    stop.retire()
+
+    await asyncio.wait_for(entry.run_frame_wall(settings, stop), timeout=5)
+
+    assert _PullRecorder.started == []
+    assert not settings.state_path.exists(), "the wall's store was opened for a wall that was taken away"

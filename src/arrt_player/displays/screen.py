@@ -12,6 +12,12 @@ again on its first pass.
 back, which is what turns a monitor plugged in after the wall started — or a
 television switched back to this input — into the wall's picture rather than a
 black screen until the next slot.
+
+**A screen its wall has left is drawn black** (`go_dark`), by the wall's worker
+on its way out, when the supervisor says the wall was retired from the output
+rather than merely stopped. Black is what the screen showed before the wall's
+first picture, which this display already reports as `dark`; a Player that is
+only stopping leaves its screens as they are, as it leaves its labels.
 """
 
 import asyncio
@@ -50,6 +56,13 @@ class ScreenOutput(Protocol):
 
         Called on every poll, so it must be cheap when nothing changed, and like
         `show` it blocks and must not raise for a screen that is off or unplugged.
+        """
+
+    def blank(self) -> None:
+        """Draw the screen black and forget the last render, for a wall that has left this output.
+
+        Blocks like `show`, and like it must not raise for a screen that is off
+        or unplugged; it may raise for a device that refuses.
         """
 
     @property
@@ -95,6 +108,28 @@ def screen_wall(
         },
         watcher=watcher,
         clock=clock,
+    )
+
+
+async def go_dark(output: ScreenOutput, *, wall_id: str, output_name: str) -> None:
+    """Draw a screen black because wall `wall_id` has left it. Never raises: the wall is gone either way."""
+    try:
+        await asyncio.to_thread(output.blank)
+    # Whatever the device says, the wall has already left; its failure is said and nothing else.
+    except Exception as exc:  # noqa: BLE001  # prawduct:allow prawduct/broad-except -- see above
+        log.warning(
+            "wall %s has left %s, and its screen could not be drawn black (%s); it keeps its last picture",
+            wall_id,
+            output_name,
+            exc,
+            extra={"event": "screen.blank_failed", "wall_id": wall_id, "output": output_name},
+        )
+        return
+    log.info(
+        "wall %s has left %s; its screen is drawn black",
+        wall_id,
+        output_name,
+        extra={"event": "screen.blanked", "wall_id": wall_id, "output": output_name},
     )
 
 
