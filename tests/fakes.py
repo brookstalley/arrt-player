@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Final
 
-from fake_tv import FOREIGN_IMAGE, FakeTv  # noqa: F401  (re-exported: no importer changes)
+from fake_tv import FOREIGN_IMAGE, FakeTv  # noqa: F401 -- re-exported, so no importer changes
 
 from arrt_player.ddc import BRIGHTNESS, NoAnswer, Reading, Unsupported
 from arrt_player.panel import (
