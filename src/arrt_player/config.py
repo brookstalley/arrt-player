@@ -16,9 +16,12 @@ means it has one, named `frame`, and the television's settings are read; absent
 means it has none, and none of them are required.
 
 **So is a label panel, and the two are independent** (`labels-and-surfaces.md`).
-`EPD_DEVICE` set means this client holds one label output, named `epd-0`, which
+`EPD_DEVICE` set means this client holds a label output, named `epd-0`, which
 the server may map to any wall on any client; a client with a panel and no Frame
-is an ordinary client.
+is an ordinary client. **One panel is this configuration's limit, by the owner's
+ruling of 2026-11-19, and not the design's**: a label is an output a Player has
+zero or more of, as a display is, and everything past this module holds its
+panels by output name. A value naming more than one panel is refused (`_panel`).
 
 **A Player runs in one of two modes, never both** (`PLAYER_MODE`, owner
 2026-11-10). In `arrt` mode it is the client described above. In `slideshow`
@@ -91,8 +94,28 @@ TV_TOKEN_FILENAME: Final[str] = "token_file"  # noqa: S105 -- a file's name, not
 FRAME_OUTPUT: Final[str] = "frame"
 
 #: The name of this client's e-paper panel, as it reports it among its label
-#: outputs and as a curator maps a wall's label to it. One panel per client today.
+#: outputs and as a curator maps a wall's label to it.
+#:
+#: **One panel per client is the recorded limit, by the owner's ruling of
+#: 2026-11-19, not by design**: "we shouldn't design anything that precludes
+#: having multiple labels, just as we don't prevent having multiple displays per
+#: player." So the limit lives here, where the configuration defines the panel,
+#: and nowhere else: the entry point holds its panels by output name, a label
+#: renderer draws only on the panel its label names, and the client heartbeat
+#: reports a list. A configuration naming a second panel is refused by name
+#: (`EPD_DEVICE_LIMIT`), never driven on this one.
 PANEL_OUTPUT: Final[str] = "epd-0"
+
+#: What a value naming more than one panel is told. Quoted by the refusal and by
+#: nothing else, so the ruling it cites is stated once.
+EPD_DEVICE_LIMIT: Final[str] = (
+    "this Player drives one label panel: that is the recorded limit for now, by the owner's ruling of "
+    "2026-11-19, not a limit of the design. Name one panel"
+)
+
+#: What separates two panels in a value somebody typed as a list. omni-epd's
+#: identifiers (`waveshare_epd.it8951`, `omni_epd.mock`) hold none of these.
+_EPD_DEVICE_SEPARATORS: Final = re.compile(r"[\s,;]+")
 
 #: How often a label renderer asks the server for its label document. **The
 #: label's latency budget is 15 s from a picture changing**
@@ -1093,7 +1116,18 @@ def _screen_brightness(env: dict[str, str]) -> ScreenBrightnessSettings:
 
 
 def _panel(env: dict[str, str]) -> PanelSettings:
-    """The label panel, on any client. `EPD_DEVICE` empty is a client with none."""
+    """The label panel, on any client. `EPD_DEVICE` empty is a client with none.
+
+    **A value naming two panels is refused, not read as one.** Taken whole it
+    would be handed to the driver as one identifier, fail there, and be reported
+    as a panel that would not open, which reads as broken hardware; and taking
+    the first would leave the second silently undriven. Every other unusable
+    value stops the Player by name, so this one does too.
+    """
+    device = (env.get("EPD_DEVICE") or "").strip()
+    named = [part for part in _EPD_DEVICE_SEPARATORS.split(device) if part]
+    if len(named) > 1:
+        raise ConfigError(f"EPD_DEVICE names {len(named)} panels ({', '.join(named)}); {EPD_DEVICE_LIMIT}.")
     return PanelSettings(
         epd_panel_width_px=_int(env, "EPD_PANEL_WIDTH_PX", DEFAULT_EPD_PANEL_WIDTH_PX),
         epd_panel_height_px=_int(env, "EPD_PANEL_HEIGHT_PX", DEFAULT_EPD_PANEL_HEIGHT_PX),
@@ -1101,7 +1135,7 @@ def _panel(env: dict[str, str]) -> PanelSettings:
         epd_viewing_distance_inches=_optional_float(env, "EPD_VIEWING_DISTANCE_INCHES"),
         epd_margin_px=_optional_int(env, "EPD_MARGIN_PX"),
         epd_rotate_degrees=_int(env, "EPD_ROTATE_DEGREES", DEFAULT_EPD_ROTATE_DEGREES),
-        epd_device=(env.get("EPD_DEVICE") or "").strip(),
+        epd_device=device,
     )
 
 
