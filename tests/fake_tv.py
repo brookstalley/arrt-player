@@ -6,14 +6,25 @@ at import instead of quietly leaving the fake behind while every test stays gree
 
 It models the set's *observable* behaviour, not its protocol: images live in one
 flat category under ids the set invents, selecting one that is not there is an
-error, and each failure the real client can produce can be armed on demand. What
+error, and each failure the real client can produce can be armed on demand.
+
+**It implements only the `_send_*` half of each write.** The art-mode gate is
+`TvClient`'s and runs above this, against this double's own `showing_art` and
+`power_state`, so every test through the double runs through the real gate. What
+a selection does when it gets past the gate onto a set that is not showing art is
+the set's measured behaviour, and is modelled in `_send_show`. What the other
+writes do in the television state has never been measured, so they do here what
+they do in art mode; nothing in this suite may depend on that.
+
+**And it has time**, so a state can change while a verb is running: `seconds_for`
+arms how long a verb takes, and `at` arms somebody picking up the remote part-way
+through. What
 it deliberately does **not** model is the library's misreporting — an upload that
 lands while returning None is corrected inside `SamsungTv`, below this seam, and a
 fake that reproduced it here would be testing the correction twice and the
 daemon's behaviour not at all.
 """
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -34,6 +45,11 @@ from arrt_player.tv import (
 #: is displaying one of these before the daemon has shown anything.
 FOREIGN_IMAGE: Final[str] = "SAM-F0000"
 
+#: What somebody in the room can change about the set while it works: whether it
+#: shows art (`art_mode`) and whether its panel is lit (`power`). Nothing else,
+#: because nothing else changes without this product asking.
+_CHANGEABLE: Final[frozenset[str]] = frozenset({"art_mode", "power"})
+
 
 class FakeTv(TvClient):
     """One television's worth of observable state, plus arming for each failure."""
@@ -50,8 +66,29 @@ class FakeTv(TvClient):
         #: for minutes, so a daemon that skipped it could not reconnect after a crash.
         self.closed = 0
         self.slideshow_disabled = 0
+        #: Every file the set accepted an upload of, in order. Kept apart from
+        #: `holding`, which a removal or a forgetting set shrinks.
+        self.uploaded: list[Path] = []
+        #: How many selections took the screen off somebody watching a programme.
+        #: **Measured on 2026-08-07**: `select_image` sent to a set showing a
+        #: programme switches it into art mode (`samsung-tv-state-findings.md`
+        #: § Selecting an image takes the screen). A double that just recorded the
+        #: selection let a suite assert "nothing was selected" without being able
+        #: to see what selecting would have cost.
+        self.took_the_screen = 0
         self._next_id = 0
         self._connected = False
+
+        #: **Time, so that "while the upload ran" is a thing a test can say.** The
+        #: set's own working seconds, advanced only by verbs armed to take time in
+        #: `seconds_for`, never by the wall's clock: an upload costs the real set
+        #: the better part of ten seconds, and somebody can pick up the remote
+        #: inside them. Every verb is instantaneous unless armed.
+        self.seconds_for: dict[str, float] = {}
+        self.elapsed = 0.0
+        #: Changes somebody makes to the set, each at a point in its working time.
+        #: Armed through `at`.
+        self._changes: list[tuple[float, dict[str, object]]] = []
 
         #: Everyone listening for what this set says about its wall, and every
         #: announcement it has made. **Both survive `close()`**, matching the real
@@ -148,7 +185,7 @@ class FakeTv(TvClient):
         self.closed += 1
         self._connected = False
 
-    async def disable_native_slideshow(self) -> None:
+    async def _send_disable_native_slideshow(self) -> None:
         self._check_usable()
         self.slideshow_disabled += 1
 
@@ -156,16 +193,18 @@ class FakeTv(TvClient):
         self._check_usable()
         return frozenset(self.holding)
 
-    async def upload(self, path: Path) -> str:
+    async def _send_upload(self, path: Path) -> str:
         self._check_usable()
         if self.refuse_uploads:
             raise TvUploadFailed(f"{path.name} is not on the television after an upload attempt")
+        self._spend("upload")
         self._next_id += 1
         content_id = f"MY-F{self._next_id:04d}"
         self.holding[content_id] = path
+        self.uploaded.append(path)
         return content_id
 
-    async def show(self, content_id: str) -> bool:
+    async def _send_show(self, content_id: str) -> bool:
         self._check_usable()
         if content_id not in self.holding:
             # The real set answers an unknown id with an error rather than a
@@ -175,6 +214,15 @@ class FakeTv(TvClient):
         if content_id in self.refuse_selection_of:
             raise self._dropping(TvUnavailable(f"the television refused {content_id}"))
         self.selected.append(content_id)
+        if self.art_mode != "on":
+            if self.power == "standby":
+                # The dark state: accepted and ignored, with no announcement —
+                # measured, and the same silence as `displays_nothing_selected`.
+                return False
+            # The television state: the set switches itself into art mode and
+            # the person watching loses their programme. Measured, not assumed.
+            self.art_mode = "on"
+            self.took_the_screen += 1
         if self.displays_nothing_selected:
             # Silence: the set took the request, emitted nothing, and the wall did
             # not move. No announcement, because the real one made none.
@@ -210,6 +258,29 @@ class FakeTv(TvClient):
                 # product actually has, and the fix would have been to weaken the
                 # test.
                 self.observer_failures += 1
+
+    def at(self, seconds: float, **change: object) -> None:
+        """Somebody changes the set `seconds` into its working time: `art_mode=` or `power=`.
+
+        The change lands inside whichever verb is running when the set's time
+        passes that point, which is how "art mode went off during the upload" is
+        armed: `seconds_for["upload"] = 10`, then `at(5, art_mode="off")`. A name
+        outside what a person can change fails here by name, rather than setting
+        an attribute nothing reads.
+        """
+        unknown = set(change) - _CHANGEABLE
+        if unknown:
+            raise TypeError(f"FakeTv.at cannot change {sorted(unknown)}; a person changes only {sorted(_CHANGEABLE)}")
+        self._changes.append((seconds, change))
+
+    def _spend(self, verb: str) -> None:
+        """Let the time `verb` takes pass, and apply whatever somebody changed inside it."""
+        self.elapsed += self.seconds_for.get(verb, 0.0)
+        due = sorted((change for change in self._changes if change[0] <= self.elapsed), key=lambda change: change[0])
+        self._changes = [change for change in self._changes if change[0] > self.elapsed]
+        for _, change in due:
+            for name, value in change.items():
+                setattr(self, name, value)
 
     def _dropping(self, exc: TvUnavailable) -> TvUnavailable:
         """Mark the connection gone, the way the real client does on any failure.
@@ -266,18 +337,18 @@ class FakeTv(TvClient):
     async def reported_art_mode(self) -> str | None:
         return self.art_mode
 
-    async def remove(self, content_ids: Sequence[str]) -> RemovalOutcome:
+    async def _send_remove(self, content_ids: tuple[str, ...]) -> RemovalOutcome:
         self._check_usable()
         if self.removal_unconfirmable:
             raise TvRemovalUnconfirmed("the removal request was refused; what the set holds is unknown")
-        requested = tuple(content_ids)
+        requested = content_ids
         self.removed.append(requested)
         for content_id in requested:
             if content_id not in self.unremovable:
                 self.holding.pop(content_id, None)
         return RemovalOutcome(requested=requested, surviving=tuple(c for c in requested if c in self.holding))
 
-    async def set_brightness(self, value: int) -> None:
+    async def _send_set_brightness(self, value: int) -> None:
         self._check_usable()
         self.brightness.append(value)
 

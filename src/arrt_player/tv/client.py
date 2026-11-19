@@ -20,13 +20,24 @@ here is the corrected form:
 * Everything that can go wrong with the connection arrives as `TvUnavailable`,
   regardless of which of the library's seven exception types produced it. An
   asleep television is an expected operating condition here, not an incident.
+
+**And it is where the household's rule is kept.** The television belongs to
+whoever is using it (Arrt's `nonfunctional-requirements.md`), so every verb that
+changes what the set shows or stores is a concrete method here that reads the
+set's state immediately before it is sent, and is refused with `TvNotOurs` when
+that state is not one the verb was measured safe in (`WRITES`). A client
+implements only what goes on the wire, as `_send_<verb>`; it cannot redefine the
+verb itself (`__init_subclass__`), so a verb added later inherits the read rather
+than relying on its caller to have asked a minute earlier.
 """
 
+import enum
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from types import MappingProxyType
+from typing import Final, final
 
 #: The category every image this product uploads lands in. Samsung exposes no way
 #: to create another — 2 is my-pictures, 4 favourites, 8 the store — and the
@@ -43,6 +54,22 @@ class TvUnavailable(Exception):
     daemon that branched on which library exception arrived would be encoding the
     library's internals into the loop that exists to be independent of them.
     """
+
+
+class TvNotOurs(Exception):
+    """The set is somebody else's right now, so a verb that would change it was not sent.
+
+    **Not a `TvUnavailable`**, because the set answered and nothing is wrong: it
+    is showing somebody's programme, or it could not say whether it is. The wall
+    holds the change and asks again later, without the outage backoff and
+    without recording the work as failed. Nothing was sent, so the set holds
+    exactly what it held before.
+    """
+
+    def __init__(self, verb: str, reason: str) -> None:
+        super().__init__(f"{verb} was not sent: {reason}")
+        #: The verb that was held, as `WRITES` names it.
+        self.verb = verb
 
 
 class TvUploadFailed(Exception):
@@ -123,6 +150,58 @@ class SelectionAnnouncement:
 SelectionObserver = Callable[[SelectionAnnouncement], None]
 
 
+class Gate(enum.Enum):
+    """The set's states a write may be sent in, as `samsung-tv-state-findings.md` § What works in each state measured them."""
+
+    #: Only when `get_artmode` says `on`. A selection sent to a set showing a
+    #: programme switches it into art mode and takes the screen; sent to a dark
+    #: one, it is accepted and ignored.
+    ART_MODE = "art_mode"
+    #: When `get_artmode` says `on`, or says `off` while `PowerState` says
+    #: `standby` (the dark state), the two states these verbs were measured
+    #: working in. **Held in the television state**, where they were never tried,
+    #: and whenever `PowerState` cannot be read, which cannot tell the two apart.
+    ART_MODE_OR_DARK = "art_mode_or_dark"
+
+
+#: **Every verb that changes what the set shows or stores, and the gate it
+#: passes.** The one place a write is declared: `TvClient` gives each a concrete
+#: method that reads the set and then calls the client's `_send_<verb>`, and a
+#: test ranges over this to check every one is held. A verb added to the
+#: boundary that writes goes here, or it is a read in `READS`; a method that is
+#: neither fails a test by name.
+WRITES: Final[Mapping[str, Gate]] = MappingProxyType(
+    {
+        "show": Gate.ART_MODE,
+        "upload": Gate.ART_MODE_OR_DARK,
+        "remove": Gate.ART_MODE_OR_DARK,
+        "set_brightness": Gate.ART_MODE_OR_DARK,
+        "disable_native_slideshow": Gate.ART_MODE_OR_DARK,
+    }
+)
+
+#: Every other verb a client implements: reads of the set, and the connection's
+#: own coming and going. **None of them changes what the set shows or stores**,
+#: which is why none is gated: they are measured answering in every state
+#: (`samsung-tv-state-findings.md`), and the gate itself is built from two of them.
+READS: Final[frozenset[str]] = frozenset(
+    {
+        "connect",
+        "close",
+        "listed_content_ids",
+        "showing_art",
+        "art_mode_announcement_pending",
+        "power_state",
+        "read_identity",
+        "reported_art_mode",
+        "observe_selections",
+    }
+)
+
+#: What the set says `PowerState` is when it is switched off at the remote.
+_STANDBY: Final[str] = "standby"
+
+
 class TvClient(ABC):
     """What the daemon may ask of a television.
 
@@ -130,7 +209,89 @@ class TvClient(ABC):
     double subclasses it, so a method added here fails the fake loudly at import
     instead of passing every test while the real client grew a capability nothing
     exercised.
+
+    **The writes are concrete, and final.** Each reads the set, then sends; a
+    subclass supplies `_send_<verb>` and may not define the verb itself, which is
+    refused when the class is made rather than discovered when somebody's
+    programme is interrupted.
     """
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        bypassing = sorted(verb for verb in WRITES if verb in vars(cls))
+        if bypassing:
+            raise TypeError(
+                f"{cls.__name__} defines {bypassing}, which would send past the art-mode gate; " "implement _send_<verb> instead"
+            )
+
+    # -- the writes, each behind the gate ------------------------------------
+
+    @final
+    async def show(self, content_id: str) -> bool:
+        """Put an image the set already holds on the wall, and say whether it appeared.
+
+        Refused with `TvNotOurs` unless the set says, now, that it is showing
+        art. See `_send_show` for what the return value means.
+        """
+        await self._permit("show")
+        return await self._send_show(content_id)
+
+    @final
+    async def upload(self, path: Path) -> str:
+        """Put an image on the television and return the id it was given. Held in the television state."""
+        await self._permit("upload")
+        return await self._send_upload(path)
+
+    @final
+    async def remove(self, content_ids: Sequence[str]) -> RemovalOutcome:
+        """Remove images, and report what the television holds afterwards. Held in the television state.
+
+        Removing nothing sends nothing, so it asks the set nothing either.
+        """
+        requested = tuple(content_ids)
+        if not requested:
+            return RemovalOutcome(requested=(), surviving=())
+        await self._permit("remove")
+        return await self._send_remove(requested)
+
+    @final
+    async def set_brightness(self, value: int) -> None:
+        """Set the panel's brightness on the set's own scale. Held in the television state."""
+        await self._permit("set_brightness")
+        await self._send_set_brightness(value)
+
+    @final
+    async def disable_native_slideshow(self) -> None:
+        """Stop the set's own slideshow, so it cannot fight host-driven selection. Held in the television state."""
+        await self._permit("disable_native_slideshow")
+        await self._send_disable_native_slideshow()
+
+    async def _permit(self, verb: str) -> None:
+        """Read the set now, and raise `TvNotOurs` unless `verb`'s gate admits what it says.
+
+        **Immediately before the send, every time, and never from a cache.** A
+        read taken earlier in the pass is not this read: an upload can run for a
+        minute, and somebody can pick up the remote inside it. `showing_art` is
+        asked first because it is the one read that admits every write; only a
+        no is followed by `PowerState`, and only for a verb whose gate it can
+        open, so a wall in art mode spends one read per write and no more.
+
+        `TvUnavailable` from either read propagates: a set that cannot be asked is
+        the outage path, not a refusal.
+        """
+        gate = WRITES[verb]
+        if await self.showing_art():
+            return
+        if gate is Gate.ART_MODE:
+            raise TvNotOurs(verb, "the set is not showing art")
+        try:
+            power = await self.power_state()
+        except PowerStateUnreadable as exc:
+            raise TvNotOurs(verb, f"the set is not showing art and its panel power could not be read ({exc})") from exc
+        if power != _STANDBY:
+            raise TvNotOurs(verb, f"the set is not showing art and its panel is lit (PowerState {power!r})")
+
+    # -- what a client implements ----------------------------------------------
 
     @abstractmethod
     async def connect(self) -> None:
@@ -141,24 +302,24 @@ class TvClient(ABC):
         """Let the connection go. Never raises — this runs on the way out."""
 
     @abstractmethod
-    async def disable_native_slideshow(self) -> None:
-        """Stop the set's own slideshow, so it cannot fight host-driven selection."""
+    async def _send_disable_native_slideshow(self) -> None:
+        """Stop the set's own slideshow. Reached only through `disable_native_slideshow`."""
 
     @abstractmethod
     async def listed_content_ids(self) -> frozenset[str]:
         """Every id the television currently lists in the uploaded category."""
 
     @abstractmethod
-    async def upload(self, path: Path) -> str:
-        """Put an image on the television and return the id it was given.
+    async def _send_upload(self, path: Path) -> str:
+        """Put an image on the television and return the id it was given. Reached only through `upload`.
 
         Raises `TvUploadFailed` only when the image is confirmed *not* to be
         there — never merely because the library said so.
         """
 
     @abstractmethod
-    async def show(self, content_id: str) -> bool:
-        """Put an image the set already holds on the wall, and say whether it appeared.
+    async def _send_show(self, content_id: str) -> bool:
+        """Put an image the set already holds on the wall, and say whether it appeared. Reached only through `show`.
 
         **Asking and confirming are one call because they cannot safely be two.**
         The television reports a selection by *emitting* an event, not by
@@ -182,7 +343,8 @@ class TvClient(ABC):
         a set that is showing a television programme does not fail politely — it
         switches the set into art mode and takes the screen off the person
         watching (measured; `samsung-tv-state-findings.md`). So nothing may be put
-        on the wall without asking this first.
+        on the wall without asking this first, and `_permit` asks it before every
+        write.
 
         **False on anything short of a clear yes**, including a reply this seam
         cannot read. The two errors are not symmetric: a wall that waits is late,
@@ -214,9 +376,10 @@ class TvClient(ABC):
         **The one thing that tells somebody watching television from a set that is
         off**, both of which `showing_art` answers no to
         (`samsung-tv-state-findings.md` § The states). It says whether the panel is
-        lit and nothing else, so it is never a permission question: it is asked
-        only after `showing_art` has already said no, to report which of the two
-        the wall is in.
+        lit and nothing else, so it is never asked on its own: only after
+        `showing_art` has already said no, to report which of the two the wall is
+        in, and in `_permit`, where `standby` is what opens the writes measured
+        working in the dark state.
 
         **A read, never a press.** It is a GET of the set's device description, the
         same one `power_probe.py` samples; it changes nothing on the set, so the
@@ -252,12 +415,12 @@ class TvClient(ABC):
         """
 
     @abstractmethod
-    async def remove(self, content_ids: Sequence[str]) -> RemovalOutcome:
-        """Remove images, and report what the television holds afterwards."""
+    async def _send_remove(self, content_ids: tuple[str, ...]) -> RemovalOutcome:
+        """Remove images, never none, and report what the set holds afterwards. Reached only through `remove`."""
 
     @abstractmethod
-    async def set_brightness(self, value: int) -> None:
-        """Set the panel's brightness on the set's own scale."""
+    async def _send_set_brightness(self, value: int) -> None:
+        """Set the panel's brightness. Reached only through `set_brightness`."""
 
     @abstractmethod
     def observe_selections(self, observer: SelectionObserver) -> None:

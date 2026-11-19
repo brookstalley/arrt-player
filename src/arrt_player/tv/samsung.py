@@ -49,7 +49,8 @@ has no maintained alternative carrying an async art client.
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Sequence
+import re
+from collections.abc import Awaitable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, TypeVar
@@ -432,7 +433,7 @@ class SamsungTv(TvClient):
             # connection for minutes, and this line is the only trace of why.
             log.warning("closing the television connection raised %s", _named(exc), extra={"event": "tv.close_failed"})
 
-    async def disable_native_slideshow(self) -> None:
+    async def _send_disable_native_slideshow(self) -> None:
         """Tell the set to stop rotating on its own.
 
         Its slideshow can only be scoped to a whole category — there is no
@@ -451,7 +452,7 @@ class SamsungTv(TvClient):
             raise TvUnavailable(f"the television listed its uploads as a {type(entries).__name__}, not a list")
         return [entry for entry in entries if isinstance(entry, dict)]
 
-    async def upload(self, path: Path) -> str:
+    async def _send_upload(self, path: Path) -> str:
         """Put an image on the television, and establish whether it landed.
 
         The library returns None when the acknowledgement does not arrive inside
@@ -529,7 +530,7 @@ class SamsungTv(TvClient):
             return str(arrived[0]["content_id"])
         return None
 
-    async def show(self, content_id: str) -> bool:
+    async def _send_show(self, content_id: str) -> bool:
         """Select an image and wait for the set to announce that it is displayed.
 
         **The waiter is armed before the request goes out**, which is the whole
@@ -670,19 +671,17 @@ class SamsungTv(TvClient):
             return None
         return mode if isinstance(mode, str) else None
 
-    async def remove(self, content_ids: Sequence[str]) -> RemovalOutcome:
+    async def _send_remove(self, content_ids: tuple[str, ...]) -> RemovalOutcome:
         """Remove images, then read the set's own list to find out what happened.
 
         Confirmation cannot come from the call: the library sends the request and
         discards the reply, so "it worked" and "it was refused" are the same
         return value. Reading the list back is also stronger than an
         acknowledgement would be — it reports the state the set is actually in
-        rather than what it said it would do.
+        rather than what it said it would do. Never handed an empty list:
+        `TvClient.remove` answers that without asking the set.
         """
-        requested = tuple(content_ids)
-        if not requested:
-            return RemovalOutcome(requested=(), surviving=())
-
+        requested = content_ids
         try:
             await self._client().delete_list(list(requested))
         except _LIBRARY_FAILURES as exc:
@@ -705,7 +704,7 @@ class SamsungTv(TvClient):
             )
         return outcome
 
-    async def set_brightness(self, value: int) -> None:
+    async def _send_set_brightness(self, value: int) -> None:
         await self._call("set_brightness", self._client().set_brightness(value))
 
     def _client(self) -> SamsungTVAsyncArt:
@@ -754,9 +753,23 @@ class _RestOnly(SamsungTVAsyncArt):
         return None
 
 
+#: The pairing token, wherever a library failure quotes it: the art channel's URL
+#: carries it as a query parameter (`…/api/v2/channels/<app>?name=…&token=…`,
+#: `samsungtvws/connection.py`), and the set's replies carry it as a `"token"`
+#: field, which the library's exceptions repr as a dict or quote as JSON. The
+#: value runs to the next separator any of those shapes uses.
+_TOKEN: Final[re.Pattern[str]] = re.compile(r"""(token["']?\s*[=:]\s*["']?)[^&\s"',}]+""", re.IGNORECASE)
+
+
 def _named(exc: Exception) -> str:
-    """`TypeName: message`, because several of these carry an empty message."""
-    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    """`TypeName: message`, because several of these carry an empty message, with any token withheld.
+
+    **Every message this seam builds from a library failure goes through here**,
+    and the message is not only a log line: it is `TvUnavailable`'s text, which
+    the wall keeps as its `last_error` and the heartbeat carries to the server.
+    """
+    text = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return _TOKEN.sub(r"\1<withheld>", text)
 
 
 def _announced(response: dict[str, Any]) -> "SelectionAnnouncement | None":
