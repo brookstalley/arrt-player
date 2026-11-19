@@ -56,6 +56,7 @@ import math
 import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Final
@@ -267,6 +268,28 @@ DEFAULT_UI_BIND: Final[str] = "0.0.0.0"  # noqa: S104 -- the page is reached fro
 #: Beside the server's 8770, and distinct from it, so one host can run both.
 DEFAULT_UI_PORT: Final[int] = 8771
 
+#: The setting that lists the names the page answers to beyond its own, as
+#: `load_ui` reads it and as the page's refusal tells a person to add a name to.
+ALLOWED_HOSTS_SETTING: Final[str] = "UI_ALLOWED_HOSTS"
+
+#: A DNS name: dot-separated labels of letters, digits and inner hyphens.
+_HOST_NAME: Final = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
+
+
+def normal_host_name(value: str) -> str:
+    """A host name as the page compares names: lowercased, without a trailing dot. Nothing else is changed."""
+    return value.rstrip(".").lower()
+
+
+def is_ip_address(value: str) -> bool:
+    """Whether `value` is an IPv4 or IPv6 address as written, unbracketed."""
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
 #: The keys without which there is no server to pull from. Missing either starts
 #: setup mode rather than refusing: the page is how they get set.
 SERVER_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN")
@@ -320,13 +343,22 @@ FILE_OUTPUT_KEYS: Final[tuple[str, ...]] = ("FILE_OUTPUT_DIR", "FILE_OUTPUT_SCRE
 _SIZE: Final = re.compile(r"([0-9]+)x([0-9]+)")
 
 
-#: Every name this Player keeps directly under `CACHE_DIR`, beside the walls'
-#: directories. **A wall id may take none of them** (`ClientSettings.wall`): a
-#: wall named `token_file` would put its manifest inside the television's pairing
-#: token, or its directory where the token is written. Built from the constants
-#: that name the files, so a file added later is reserved by naming it here.
-#: Those with a leading dot are refused by the rule against a leading dot too;
-#: listing them as well keeps the set true if that rule changes.
+#: **The names a wall id may not take** (`ClientSettings.wall`), because this
+#: Player keeps a file or directory by that name directly under `CACHE_DIR`,
+#: beside the walls' directories: a wall named `token_file` would put its
+#: manifest inside the television's pairing token, or its directory where the
+#: token is written. Built from the constants that name the files.
+#:
+#: **What it is not: a list of everything kept there.** A name with a leading
+#: dot can never be a wall id (`PLAIN_COMPONENT`), so the dotted names kept
+#: under `CACHE_DIR` by other modules (the label cache and the client document's
+#: ETag in `pull.py`, a wall's directory being removed in `client.py`, each
+#: file's write in progress) are not listed, and need not be. The dotted names
+#: this module defines are listed as well, so the set stays true of them if that
+#: rule ever loosens. `tests/test_config.py` holds every name kept under
+#: `CACHE_DIR` to be in this set or to be no possible wall id, read from the
+#: code that makes the paths, so a plain name added later and not listed here
+#: fails there.
 CACHE_DIR_NAMES: Final[frozenset[str]] = frozenset(
     {
         TV_TOKEN_FILENAME,
@@ -374,6 +406,34 @@ def client_token_problem(value: str) -> str | None:
     if not value or any(character.isspace() for character in value):
         return "CLIENT_TOKEN must be the token as issued, with no spaces or line breaks."
     return None
+
+
+#: The television's address as `TV_ADDRESS` takes it, and as the settings page
+#: refuses it, in one sentence each.
+_TV_ADDRESS_SHAPE: Final[str] = (
+    "TV_ADDRESS is the television's address on this network, an IPv4 address or a host name such as 192.0.2.20 "
+    "or tv.example.com, with no http:// and no port (that is TV_PORT)"
+)
+
+
+def tv_address_problem(value: str) -> str | None:
+    """Why `value` cannot be `TV_ADDRESS`, or None when it can. Empty is allowed: no Frame.
+
+    **The library puts it into a URL as it stands** (`samsungtvws`'
+    `wss://{host}:{port}/…`), so a scheme, a port or a path in it makes an
+    address nothing answers, and a bare IPv6 address makes one whose port reads
+    as part of it. An IPv6 address is refused rather than bracketed, because a
+    set reached that way has never been tried.
+    """
+    if not value:
+        return None
+    if is_ip_address(value):
+        if ipaddress.ip_address(value).version == 6:  # noqa: PLR2004 -- IP version 6
+            return f"{_TV_ADDRESS_SHAPE}; {value!r} is an IPv6 address, which this Player has never reached a set at."
+        return None
+    if _HOST_NAME.fullmatch(value.lower()):
+        return None
+    return f"{_TV_ADDRESS_SHAPE}; {value!r} is not one."
 
 
 def player_name_problem(value: str) -> str | None:
@@ -445,6 +505,15 @@ class UiSettings:
     #: address, `localhost`, this machine's own name and `<name>.local`), from
     #: `UI_ALLOWED_HOSTS`. Lowercased, without a trailing dot.
     allowed_hosts: frozenset[str] = frozenset()
+    #: The environment the Player started with, `.env` included, so a save can be
+    #: judged by the same `resolve` the next start will run (`resolve`). Out of
+    #: `repr` and every startup line: it holds `CLIENT_TOKEN` when `.env` does.
+    environment: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
+    #: Where the television's pairing token is kept, as the Frame would keep it
+    #: (`tv_token_path`), so a save that changes `TV_ADDRESS` forgets the old
+    #: set's pairing. None when `TV_TOKEN_FILE` is not an absolute path, which a
+    #: Frame refuses at start anyway.
+    tv_token_file: Path | None = None
 
     def startup_lines(self) -> dict[str, object]:
         return {"bind": self.bind, "port": self.port, "pinned": sorted(self.pinned), "allowed_hosts": sorted(self.allowed_hosts)}
@@ -932,13 +1001,30 @@ def load(environ: dict[str, str] | None = None) -> ClientSettings | SlideshowSet
     """
     load_dotenv()
     env = dict(os.environ) if environ is None else dict(environ)
+    return _resolve(env, page_values=None)
 
+
+def resolve(environment: Mapping[str, str], page_values: Mapping[str, str]) -> ClientSettings | SlideshowSettings:
+    """What `load` would give with the settings page's file holding `page_values`, the file itself unread.
+
+    **The settings page's one validator.** Before it writes, the page asks this
+    whether the Player would start on what it is about to write, beneath the
+    environment the Player started with. It raises exactly as `load` raises, in
+    `load`'s words, because it is `load` with one input swapped: so a value
+    refused at start is refused at the save, and the page cannot write a file
+    that stops the Player starting. Reads no `.env`, and writes nothing.
+    """
+    return _resolve(dict(environment), page_values=page_values)
+
+
+def _resolve(env: dict[str, str], *, page_values: Mapping[str, str] | None) -> ClientSettings | SlideshowSettings:
+    """`load`'s body: `page_values` stands for the page's file when given, else the file is read."""
     for name, replaced_by in RETIRED_SETTINGS.items():
         if env.get(name):
             raise ConfigError(f"{name} is retired: {replaced_by}.")
 
     cache_dir = _absolute(_require(env, "CACHE_DIR"), "CACHE_DIR")
-    env = _beneath_the_environment(env, cache_dir)
+    env = _beneath_the_environment(env, _stored_values(cache_dir) if page_values is None else dict(page_values))
     mode = (env.get("PLAYER_MODE") or "").strip()
     if said := player_mode_problem(mode):
         raise ConfigError(said)
@@ -1023,6 +1109,28 @@ _PINNED_SHOWN: Final[dict[str, object]] = {
     "SLIDESHOW_MIN_SECONDS": str.strip,
     "SLIDESHOW_MAX_SECONDS": str.strip,
     "SLIDESHOW_OUTPUT": str.strip,
+    "TV_ADDRESS": str.strip,
+}
+
+#: The page's keys each running mode reads, so a save can say which of its
+#: changes wait for the other mode (#46: a listing saved in Arrt mode). Whether
+#: a save restarts the Player is decided by `resolve`, not by this: it compares
+#: what the Player would run on before and after. `PLAYER_MODE` is in both,
+#: because it is what switches. `tests/test_config.py` holds `load` to this: a
+#: page key outside a mode's set, changed, changes nothing `load` gives there.
+PAGE_KEYS_READ: Final[dict[str, frozenset[str]]] = {
+    ARRT_MODE: frozenset({"PLAYER_MODE", "SERVER_URL", "CLIENT_TOKEN", "PLAYER_NAME", "TV_ADDRESS"}),
+    SLIDESHOW_MODE: frozenset(
+        {
+            "PLAYER_MODE",
+            "PLAYER_NAME",
+            "SLIDESHOW_URL",
+            "REDDIT_SESSION",
+            "SLIDESHOW_MIN_SECONDS",
+            "SLIDESHOW_MAX_SECONDS",
+            "SLIDESHOW_OUTPUT",
+        }
+    ),
 }
 
 
@@ -1040,8 +1148,14 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
     port = _int(env, "UI_PORT", DEFAULT_UI_PORT)
     if not 0 < port < 65536:  # noqa: PLR2004 -- the range of a TCP port
         raise ConfigError(f"UI_PORT must be a TCP port, not {port}.")
+    try:
+        token_file: Path | None = tv_token_path(env, cache_dir)
+    except ConfigError:
+        token_file = None
     return UiSettings(
-        allowed_hosts=_host_names(env, "UI_ALLOWED_HOSTS"),
+        environment=dict(env),
+        tv_token_file=token_file,
+        allowed_hosts=_host_names(env, ALLOWED_HOSTS_SETTING),
         cache_dir=cache_dir,
         bind=(env.get("UI_BIND") or "").strip() or DEFAULT_UI_BIND,
         port=port,
@@ -1052,11 +1166,7 @@ def load_ui(environ: dict[str, str] | None = None) -> UiSettings:
     )
 
 
-#: A DNS name: dot-separated labels of letters, digits and inner hyphens.
-_HOST_NAME: Final = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*")
-
-
-def _host_names(env: dict[str, str], name: str) -> frozenset[str]:
+def _host_names(env: Mapping[str, str], name: str) -> frozenset[str]:
     """Comma-separated host names, lowercased; a URL, a port or a path among them is refused by name.
 
     Refused rather than reduced to its name, because `http://wall.lan` or
@@ -1064,19 +1174,11 @@ def _host_names(env: dict[str, str], name: str) -> frozenset[str]:
     do, and quietly keeping half of it would hide that. An IP address is
     accepted, though the page answers to every one anyway.
     """
-    names = frozenset(part.strip().rstrip(".").lower() for part in (env.get(name) or "").split(",") if part.strip())
+    names = frozenset(normal_host_name(part.strip()) for part in (env.get(name) or "").split(",") if part.strip())
     for host in names:
-        if not (_HOST_NAME.fullmatch(host) or _is_ip_address(host)):
+        if not (_HOST_NAME.fullmatch(host) or is_ip_address(host)):
             raise ConfigError(f"{name} lists host names only, as in wall.lan,wall.example.com; got {host!r}, which is not one.")
     return names
-
-
-def _is_ip_address(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value)
-    except ValueError:
-        return False
-    return True
 
 
 def _stored_values(cache_dir: Path) -> dict[str, str]:
@@ -1086,14 +1188,17 @@ def _stored_values(cache_dir: Path) -> dict[str, str]:
         raise ConfigError(f"the settings page's file cannot be read: {exc}. Fix or remove it.") from exc
 
 
-def _beneath_the_environment(env: dict[str, str], cache_dir: Path) -> dict[str, str]:
+def _beneath_the_environment(env: dict[str, str], page_values: Mapping[str, str]) -> dict[str, str]:
     """The environment, with the page's values filling only the keys it leaves empty.
 
-    Empty counts as unset, because `.env.example` ships `SERVER_URL=` and a `.env`
-    copied from it would otherwise pin an empty value over the page's.
+    **The one precedence rule for a key the page manages**: a value in the
+    environment (`.env` included) wins, and the page's fills a key it leaves
+    empty. Empty counts as unset, because `.env.example` ships `SERVER_URL=` and
+    `TV_ADDRESS=`, and a `.env` copied from it would otherwise pin an empty value
+    over the page's.
     """
     merged = dict(env)
-    for name, value in _stored_values(cache_dir).items():
+    for name, value in page_values.items():
         if not merged.get(name):
             merged[name] = value
     return merged
@@ -1114,15 +1219,18 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
     """
     if not env.get("TV_ADDRESS"):
         return None
+    address = env["TV_ADDRESS"].strip()
+    said = tv_address_problem(address) if address else f"{_TV_ADDRESS_SHAPE}; it is only spaces."
+    if said:
+        raise ConfigError(said)
     location = _location(env)
     if location is None:
         raise ConfigError("LATITUDE, LONGITUDE and LOCATION_NAME are not set, and a Frame follows the sun they place.")
 
-    token_file = env.get("TV_TOKEN_FILE") or ""
     return FrameSettings(
-        tv_address=_require(env, "TV_ADDRESS"),
+        tv_address=address,
         tv_port=_int(env, "TV_PORT", 8002),
-        tv_token_file=_absolute(token_file, "TV_TOKEN_FILE") if token_file else cache_dir / TV_TOKEN_FILENAME,
+        tv_token_file=tv_token_path(env, cache_dir),
         tv_client_name=env.get("TV_CLIENT_NAME") or DEFAULT_TV_CLIENT_NAME,
         latitude=location.latitude,
         longitude=location.longitude,
@@ -1141,6 +1249,17 @@ def _frame(env: dict[str, str], cache_dir: Path) -> FrameSettings | None:
         tv_panel_height_px=_positive_int(env, "TV_PANEL_HEIGHT_PX", DEFAULT_TV_PANEL_HEIGHT_PX),
         tv_panel_diagonal_inches=_positive_float(env, "TV_PANEL_DIAGONAL_INCHES", DEFAULT_TV_PANEL_DIAGONAL_INCHES),
     )
+
+
+def tv_token_path(env: Mapping[str, str], cache_dir: Path) -> Path:
+    """Where the Frame keeps the television's pairing token: `TV_TOKEN_FILE`, else `CACHE_DIR/token_file`.
+
+    One derivation for the Frame and for the settings page, which forgets the
+    pairing there when it changes `TV_ADDRESS`. Raises `ConfigError` for a
+    `TV_TOKEN_FILE` that is not absolute.
+    """
+    token_file = env.get("TV_TOKEN_FILE") or ""
+    return _absolute(token_file, "TV_TOKEN_FILE") if token_file else cache_dir / TV_TOKEN_FILENAME
 
 
 def _files(env: dict[str, str], cache_dir: Path) -> FileOutputSettings | None:

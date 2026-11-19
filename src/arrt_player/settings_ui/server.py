@@ -45,7 +45,6 @@ cookie, or waiting.
 import asyncio
 import hashlib
 import html
-import ipaddress
 import logging
 import re
 import socket
@@ -53,6 +52,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from aiohttp.web import (
@@ -67,21 +67,32 @@ from aiohttp.web import (
     middleware,
 )
 
-from arrt_player.client import OutputReport, hdmi_outputs, player_name
+from arrt_player.client import ClientDocumentUnreadable, OutputReport, hdmi_outputs, parse_client_document, player_name
 from arrt_player.config import (
+    ALLOWED_HOSTS_SETTING,
     ARRT_MODE,
+    CLIENT_DOCUMENT_FILENAME,
     DEFAULT_SLIDESHOW_MAX_SECONDS,
     DEFAULT_SLIDESHOW_MIN_SECONDS,
     DEFAULT_SLIDESHOW_OUTPUT,
     FRAME_OUTPUT,
+    PAGE_KEYS_READ,
     SLIDESHOW_MODE,
+    ClientSettings,
+    ConfigError,
+    SetupRequired,
+    SlideshowSettings,
     UiSettings,
     client_token_problem,
     dwell_problem,
+    is_ip_address,
+    normal_host_name,
     player_mode_problem,
     player_name_problem,
+    resolve,
     server_url_problem,
     slideshow_output_problem,
+    tv_address_problem,
 )
 from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.settings_ui import auth, store
@@ -132,9 +143,6 @@ def stylesheet_href(directory: Path = STATIC_DIRECTORY) -> str:
     return f"/static/settings.css?v={digest}"
 
 
-#: The setting a refused name is told to add itself to.
-ALLOWED_HOSTS_SETTING: Final[str] = "UI_ALLOWED_HOSTS"
-
 #: `421 Misdirected Request` for a name this page does not answer to, as Arrt's
 #: server answers the same case: the request reached the wrong server as far as
 #: this one is concerned.
@@ -174,10 +182,10 @@ def _split_authority(value: str) -> tuple[str, int | None]:
     else:
         name, port_text = value, ""
     if not port_text:
-        return name.rstrip(".").lower(), None
+        return normal_host_name(name), None
     if not (port_text.isascii() and port_text.isdigit()) or not 1 <= int(port_text) <= _LARGEST_PORT:
         return "", None
-    return name.rstrip(".").lower(), int(port_text)
+    return normal_host_name(name), int(port_text)
 
 
 def own_names(bind: str = "") -> frozenset[str]:
@@ -200,13 +208,7 @@ def name_allowed(name: str, allowed: frozenset[str]) -> bool:
     """Whether `name`, already reduced by `hostname`, is one this page answers to. Any IP address is."""
     if not name:
         return False
-    if name in allowed:
-        return True
-    try:
-        ipaddress.ip_address(name)
-    except ValueError:
-        return False
-    return True
+    return name in allowed or is_ip_address(name)
 
 
 #: A refused name is said once, and again at most once in this long while it
@@ -522,10 +524,18 @@ async def _home(request: Request) -> Response:
 _SERVER_PAIR: Final[frozenset[str]] = frozenset({"SERVER_URL", "CLIENT_TOKEN"})
 
 
+def _server_name(state: PageState) -> str:
+    """What the server calls this Player, from its cached client document; empty before it is paired."""
+    return player_name(state.ui.cache_dir, "")
+
+
 def _locked(state: PageState) -> frozenset[str]:
-    """The keys the page may not change: those the environment pins, and the pair with either."""
+    """The keys the page may not change: those the environment pins, the pair with either, and a name the server gives."""
     pinned = state.ui.pinned
-    return pinned | _SERVER_PAIR if pinned & _SERVER_PAIR else pinned
+    locked = pinned | _SERVER_PAIR if pinned & _SERVER_PAIR else pinned
+    # Once the server names this Player its name wins, so the page shows that
+    # one read-only and leaves the Player's own, the fallback, as it was saved.
+    return locked | {"PLAYER_NAME"} if _server_name(state) else locked
 
 
 def _shown(state: PageState, stored: store.Stored, name: str) -> str:
@@ -533,49 +543,123 @@ def _shown(state: PageState, stored: store.Stored, name: str) -> str:
     return state.ui.pinned_values.get(name, "") if name in state.ui.pinned else stored.values.get(name, "")
 
 
+def _in_use(state: PageState, values: Mapping[str, str], name: str) -> str:
+    """A key's value as the next start will read it, the page's file holding `values`. See `config.resolve`."""
+    return state.ui.pinned_values.get(name, "") if name in state.ui.pinned else values.get(name, "")
+
+
 async def _save(request: Request) -> Response:
-    """Save the form, then restart onto it. Nothing changed means nothing written and no restart."""
+    """Save the form, then say what changed and what happens next. Nothing changed means nothing written.
+
+    **Judged as the next start will judge it** (`config.resolve`), so the page
+    never writes a file the Player would refuse to start on; a field is also
+    judged on its own first, so one form says every field's problem at once.
+    **A new television address forgets the old set's pairing** before the file
+    is written: the token belongs to the set that issued it, and is never sent
+    to another address. **It restarts the Player only when what it runs on
+    changes**: in setup mode, or when `config.resolve` gives the file after the
+    save something other than it gives the file before.
+    """
     state = _state(request)
     stored = state.stored()
     if stored.password is None or not _signed_in(request, stored):
         return _redirect("/login")
-    form = await request.post()
+    values, problems = _form_values(state, stored, await request.post())
+    if problems:
+        return _settings_page(state, stored, problem=" ".join(problems), status=400)
+    if values == dict(stored.values):
+        return _settings_page(state, stored, notice=_NOTHING_CHANGED)
+    return _commit(state, stored, values)
+
+
+def _form_values(state: PageState, stored: store.Stored, form: Mapping[str, object]) -> tuple[dict[str, str], list[str]]:
+    """The page's values after the form, and what is wrong with the form; the values mean nothing if anything is."""
     locked = _locked(state)
     url = str(form.get("server_url", "")).strip().rstrip("/")
     token = str(form.get("client_token", "")).strip()
-    name = str(form.get("player_name", "")).strip()
+    # A field the form does not carry is left as it is, as the slideshow's are:
+    # the page draws the name read-only once the server names the Player.
+    name = _entry(form, "player_name", "PLAYER_NAME", locked)
+    television = _entry(form, "tv_address", "TV_ADDRESS", locked)
 
     entries = _slideshow_entries(form, locked)
     session = "" if "REDDIT_SESSION" in locked else clean_session(str(form.get("reddit_session", "")))
 
-    problems = _problems(locked, url=url, token=token, name=name)
+    problems = _problems(locked, url=url, token=token, name=name, television=television)
     problems += _slideshow_problems(entries, session, lambda key: _shown(state, stored, key))
-    if problems:
-        return _settings_page(state, stored, problem=" ".join(problems), status=400)
-    values = _next_values(stored.values, locked, url=url, token=token, name=name)
+    values = _next_values(stored.values, locked, url=url, token=token, name=name, television=television)
     for key, value in entries.items():
         _put(values, key, value)
     if session:
         values["REDDIT_SESSION"] = session
-    if values == dict(stored.values):
-        return _settings_page(state, stored, notice="Nothing changed.")
+    return values, problems
 
+
+def _commit(state: PageState, stored: store.Stored, values: dict[str, str]) -> Response:
+    """Judge, forget the old set's pairing if the address moves, write, restart if the running mode reads a change."""
+    try:
+        outcome: ClientSettings | SlideshowSettings | SetupRequired = resolve(_environment(state), values)
+    except SetupRequired as missing:
+        outcome = missing
+    except ConfigError as exc:
+        return _settings_page(state, stored, problem=f"{_WOULD_NOT_START} {exc}", status=400)
+
+    moved = stored.values.get("TV_ADDRESS", "") != values.get("TV_ADDRESS", "")
+    forgotten = _forget_pairing(state) if moved else False
+    if forgotten is None:
+        return _settings_page(state, stored, problem=_PAIRING_NOT_FORGOTTEN, status=500)
     if not _wrote(state, stored.with_values(values)):
-        return _settings_page(state, stored, problem=_WRITE_FAILED, status=500)
+        return _settings_page(state, stored, problem=_WRITE_FAILED_AFTER_FORGETTING if forgotten else _WRITE_FAILED, status=500)
+
+    changed = _changed(stored.values, values)
+    restarting = bool(state.missing) or _judged(state, stored.values) != outcome
     log.info(
-        "the settings page saved new settings; restarting onto them",
-        extra={"event": "settings_page.saved", "changed": sorted(_changed(stored.values, values))},
+        "the settings page saved new settings; %s",
+        "restarting onto them" if restarting else "nothing restarts, since the running mode reads none of them",
+        extra={
+            "event": "settings_page.saved",
+            "changed": sorted(changed),
+            "restarting": restarting,
+            "pairing_forgotten": forgotten,
+        },
     )
-    # After the answer has gone out, so the browser sees the page say so.
-    asyncio.get_running_loop().call_later(_RESTART_DELAY_SECONDS, state.restart)
-    return _page(
-        "Saved",
-        "<p>Saved. The Player is restarting onto the new settings; under systemd it is back in a few seconds. "
-        'Started by hand, start it again.</p><p><a href="/">Back to the settings</a></p>',
-    )
+    if restarting:
+        # After the answer has gone out, so the browser sees the page say so.
+        asyncio.get_running_loop().call_later(_RESTART_DELAY_SECONDS, state.restart)
+    said = _what_the_save_did(state, stored.values, values, restarting=restarting, outcome=outcome, forgotten=forgotten)
+    return _page("Saved", "".join(f"<p>{html.escape(sentence)}</p>" for sentence in said) + _BACK)
 
 
-def _problems(locked: frozenset[str], *, url: str, token: str, name: str) -> list[str]:
+def _judged(state: PageState, values: Mapping[str, str]) -> object:
+    """What the Player runs on with its file holding `values`, or the refusal, which equals nothing else."""
+    try:
+        return resolve(_environment(state), values)
+    except (ConfigError, SetupRequired) as refused:
+        return refused
+
+
+def _running_mode(state: PageState) -> str:
+    """The mode the Player runs in, or in setup mode lacks keys for.
+
+    **A running slideshow is known by its status**, not by `mode`: the entry
+    point hands the page a slideshow's status and leaves `mode` at its default.
+    Read from `mode` alone, a slideshow's own settings would be taken for keys
+    it does not read, and saved without the restart that applies them.
+    """
+    return SLIDESHOW_MODE if state.slideshow is not None else state.mode
+
+
+def _entry(form: Mapping[str, object], field_name: str, key: str, locked: frozenset[str]) -> str | None:
+    """A field's value, or None when the form does not carry it or the page may not change its key."""
+    return None if key in locked or field_name not in form else str(form[field_name]).strip()
+
+
+def _environment(state: PageState) -> dict[str, str]:
+    """The environment the next start will read, as `config.resolve` takes it."""
+    return {**state.ui.environment, "CACHE_DIR": str(state.ui.cache_dir)}
+
+
+def _problems(locked: frozenset[str], *, url: str, token: str, name: str | None, television: str | None) -> list[str]:
     """What is wrong with the form, judged as `config.load` judges the same values. A locked key is not read."""
     found = []
     if "SERVER_URL" not in locked:
@@ -585,12 +669,22 @@ def _problems(locked: frozenset[str], *, url: str, token: str, name: str) -> lis
             found.append(said)
         if token and not url:
             found.append("A token belongs to a server: set the server's address with it.")
-    if "PLAYER_NAME" not in locked and (said := player_name_problem(name)):
+    if name is not None and (said := player_name_problem(name)):
+        found.append(said)
+    if television is not None and (said := tv_address_problem(television)):
         found.append(said)
     return found
 
 
-def _next_values(before: Mapping[str, str], locked: frozenset[str], *, url: str, token: str, name: str) -> dict[str, str]:
+def _next_values(
+    before: Mapping[str, str],
+    locked: frozenset[str],
+    *,
+    url: str,
+    token: str,
+    name: str | None,
+    television: str | None,
+) -> dict[str, str]:
     """The page's values after the form. A new server never inherits the old one's token."""
     values = dict(before)
     if "SERVER_URL" not in locked:
@@ -599,9 +693,175 @@ def _next_values(before: Mapping[str, str], locked: frozenset[str], *, url: str,
         _put(values, "SERVER_URL", url)
         if token and url:
             values["CLIENT_TOKEN"] = token
-    if "PLAYER_NAME" not in locked:
+    if name is not None:
         _put(values, "PLAYER_NAME", name)
+    if television is not None:
+        _put(values, "TV_ADDRESS", television)
     return values
+
+
+def _forget_pairing(state: PageState) -> bool | None:
+    """Remove the television's pairing token: True if one was removed, False if there was none, None if it would not go.
+
+    **Removed, never emptied**: a missing file is what a first pairing starts
+    from, while the library reads an empty one differently, in a way never tried
+    against a set (`tv.samsung.SamsungTv._keep_the_token_private`). A path the
+    Frame would refuse (`UiSettings.tv_token_file` None) holds no token in use.
+    """
+    path = state.ui.tv_token_file
+    if path is None:
+        return False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        log.error(  # noqa: TRY400 -- a permission or a read-only disk is the fact; a stack adds nothing
+            "the settings page could not remove the television's pairing token at %s (%s), so it saved nothing",
+            path,
+            type(exc).__name__,
+            extra={"event": "settings_page.pairing_not_forgotten", "tv_token_file": str(path)},
+        )
+        return None
+    log.info(
+        "the settings page forgot the television's pairing, because its address changed",
+        extra={"event": "settings_page.pairing_forgotten", "tv_token_file": str(path)},
+    )
+    return True
+
+
+def _what_the_save_did(
+    state: PageState,
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+    *,
+    restarting: bool,
+    outcome: ClientSettings | SlideshowSettings | SetupRequired,
+    forgotten: bool,
+) -> list[str]:
+    """In sentences: what changed, what restarts, which mode it is in, and whether a television will ask to pair."""
+    changed = _changed_in_meaning(before, after)
+    labels = [label for key, label in _LABELS.items() if key in changed]
+    said = [f"Saved: {_listed(labels)}." if labels else "Saved, though nothing it does changes."]
+    mode, running = _in_use(state, after, "PLAYER_MODE") or ARRT_MODE, _running_mode(state)
+    if restarting:
+        start = "The Player is restarting onto them"
+        if mode != running:
+            start = f"The Player is restarting as {_MODE_NAMES[mode]}"
+        walls = _wall_names(state) if running == ARRT_MODE and not state.missing else []
+        if walls:
+            start += f", and with it every wall it shows: {_listed(walls)}"
+        said.append(f"{start}. Under systemd it is back in a few seconds; started by hand, start it again.")
+        if isinstance(outcome, SetupRequired):
+            verb = "is" if len(outcome.missing) == 1 else "are"
+            missing = [_LABELS.get(key, key) for key in outcome.missing]
+            said.append(f"Until {_listed(missing)} {verb} set, it serves only this page.")
+    waiting = changed - PAGE_KEYS_READ[mode]
+    if waiting and mode == running:
+        said.append(("" if restarting else "Nothing restarts. ") + _STAYS[mode])
+
+    old, new = before.get("TV_ADDRESS", ""), after.get("TV_ADDRESS", "")
+    if old != new:
+        if new:
+            runs_now = restarting and isinstance(outcome, ClientSettings) and outcome.frame is not None
+            when = "as the Player starts again" if runs_now else "the next time the Player runs its Frame"
+            said.append(
+                f"The television at {new} will be asked to pair {when}: expect a prompt on that set, even over a "
+                "programme, and accept it there. Until then this Player shows nothing new on it."
+            )
+        else:
+            said.append("This Player no longer drives a Frame: a wall placed on its Samsung Frame waits for an address.")
+        if forgotten:
+            said.append(
+                f"The pairing with the television at {old} is forgotten."
+                if old
+                else "The pairing kept from an earlier television is forgotten."
+            )
+    return said
+
+
+#: What an empty value means, for the keys whose field always posts one (a
+#: choice and a menu): a form saved untouched writes them, and that is no change.
+_MEANT_WHEN_EMPTY: Final[dict[str, str]] = {"PLAYER_MODE": ARRT_MODE, "SLIDESHOW_OUTPUT": DEFAULT_SLIDESHOW_OUTPUT}
+
+
+def _changed_in_meaning(before: Mapping[str, str], after: Mapping[str, str]) -> set[str]:
+    """The keys whose value means something else after the save: `_changed`, with an empty choice its default."""
+    return {
+        name
+        for name in _changed(before, after)
+        if (before.get(name) or _MEANT_WHEN_EMPTY.get(name, "")) != (after.get(name) or _MEANT_WHEN_EMPTY.get(name, ""))
+    }
+
+
+def _wall_names(state: PageState) -> list[str]:
+    """The walls the cached client document places on this Player, by name; none when it cannot be read."""
+    try:
+        document = parse_client_document((state.ui.cache_dir / CLIENT_DOCUMENT_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ClientDocumentUnreadable):
+        return []
+    return [wall.name for wall in document.walls]
+
+
+def _listed(items: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+#: The words the page labels the two pairing fields with, **and the only place
+#: they are written**. The server's dialog that issues a token must say the same:
+#: in wave 1 each repository "fixed" these to the other's old wording. The
+#: contract's vocabulary file (contract 1.2.0) is to own them, and the change that
+#: moves this Player's pin to that tag replaces this mapping with the package's
+#: words, here and nowhere else.
+PAIRING_LABELS: Final[Mapping[str, str]] = MappingProxyType({"SERVER_URL": "Server address", "CLIENT_TOKEN": "Token"})
+
+#: Each key the page manages, by the label of its field, in the order the page
+#: draws them. What a save says it saved is said in these words.
+_LABELS: Final[dict[str, str]] = {
+    "PLAYER_MODE": "Mode",
+    "SERVER_URL": PAIRING_LABELS["SERVER_URL"],
+    "CLIENT_TOKEN": PAIRING_LABELS["CLIENT_TOKEN"],
+    "TV_ADDRESS": "Television address",
+    "SLIDESHOW_URL": "Listing address",
+    "REDDIT_SESSION": "Reddit cookie",
+    "SLIDESHOW_MIN_SECONDS": "Shortest time on screen",
+    "SLIDESHOW_MAX_SECONDS": "Longest time on screen",
+    "SLIDESHOW_OUTPUT": "Screen",
+    "PLAYER_NAME": "Name",
+}
+
+#: Each mode as the Mode section's choices name it.
+_MODE_CHOICES: Final[dict[str, str]] = {ARRT_MODE: "Walls from an Arrt server", SLIDESHOW_MODE: "A Reddit slideshow"}
+
+#: Each mode as a save says the Player restarts into it.
+_MODE_NAMES: Final[dict[str, str]] = {ARRT_MODE: "a Player of walls from its Arrt server", SLIDESHOW_MODE: "a Reddit slideshow"}
+
+#: What a save says when it changed what the running mode does not read (#46).
+_STAYS: Final[dict[str, str]] = {
+    ARRT_MODE: (
+        "The Player stays in Arrt mode, showing walls from its server: the slideshow's settings wait until the "
+        f"mode is {_MODE_CHOICES[SLIDESHOW_MODE]}."
+    ),
+    SLIDESHOW_MODE: (
+        "The Player stays a Reddit slideshow: the server's and the television's settings wait until the mode is "
+        f"{_MODE_CHOICES[ARRT_MODE]}."
+    ),
+}
+
+#: Said when a save would change nothing.
+_NOTHING_CHANGED: Final[str] = "Nothing changed, so nothing was saved and nothing restarts."
+
+#: Said before `config.load`'s own words, when the Player would not start on the form.
+_WOULD_NOT_START: Final[str] = "Not saved: with these settings the Player would not start."
+
+#: Said when the old set's token could not be removed, so the new address is not saved.
+_PAIRING_NOT_FORGOTTEN: Final[str] = (
+    "Not saved: the pairing with the television at the old address could not be forgotten, and the set at a new "
+    "address must not be sent it. Nothing changed. The journal says why."
+)
+
+_BACK: Final[str] = '<p><a href="/">Back to the settings</a></p>'
 
 
 #: The slideshow's form fields, by the key each sets. The cookie is apart: it is never shown back.
@@ -645,6 +905,13 @@ _RESTART_DELAY_SECONDS: Final[float] = 0.5
 
 #: Said when the settings file could not be written: nothing changed, and why to look.
 _WRITE_FAILED: Final[str] = "The settings could not be saved, so nothing changed. The journal says why."
+
+#: Said when the file could not be written after the old set's token was removed:
+#: the address is as it was, and the set there will ask to pair again.
+_WRITE_FAILED_AFTER_FORGETTING: Final[str] = (
+    "The settings could not be saved, so the television's address is as it was; but the pairing with that set "
+    "was already forgotten, so it will ask to pair again. The journal says why."
+)
 
 
 def _wrote(state: PageState, stored: store.Stored) -> bool:
@@ -814,10 +1081,10 @@ def _settings_page(
     notice: str | None = None,
     status: int = 200,
 ) -> Response:
-    """The page's own: the Player's name, a line of facts, its toolbar, then Server, This Player and Password."""
+    """The page's own: the Player's name, a line of facts, its toolbar, then every setting, one save, and Password."""
     locked = _locked(state)
     local = _shown(state, stored, "PLAYER_NAME")
-    name = player_name(state.ui.cache_dir, local)
+    name = _server_name(state) or local
     token_set = "CLIENT_TOKEN" in state.ui.pinned or bool(stored.values.get("CLIENT_TOKEN"))
 
     if state.missing:
@@ -842,28 +1109,23 @@ def _settings_page(
         + _mode_section(state, stored)
         + '<section class="panel"><h2>Server</h2>'
         + _field(
-            "Server address",
+            PAIRING_LABELS["SERVER_URL"],
             "server_url",
             _shown(state, stored, "SERVER_URL"),
             locked="SERVER_URL" in locked,
-            pinned="SERVER_URL" in state.ui.pinned,
+            pinned=_pinned_note(state, stored, "SERVER_URL"),
             hint="For example http://arrt.local:8770. Changing it clears the token unless you enter one with it. "
             "In .env, SERVER_URL.",
         )
-        + _token_field(locked="CLIENT_TOKEN" in locked, pinned="CLIENT_TOKEN" in state.ui.pinned, token_set=token_set)
+        + _token_field(locked="CLIENT_TOKEN" in locked, pinned=_pinned_note(state, stored, "CLIENT_TOKEN"), token_set=token_set)
         + "</section>"
+        + _frame_section(state, stored)
         + _slideshow_section(state, stored)
         + '<section class="panel"><h2>This Player</h2>'
-        + _field(
-            "Name",
-            "player_name",
-            local,
-            locked="PLAYER_NAME" in locked,
-            pinned="PLAYER_NAME" in state.ui.pinned,
-            hint="Used until a server names this Player, and whenever its name cannot be read.",
-        )
-        + _captioned_act("Save and restart", "Restarts the Player onto what is saved; it is back in a few seconds.")
-        + '</section></form><section class="panel"><h2>Password</h2><form method="post" action="/password">'
+        + _name_field(state, stored, local=local)
+        + "</section>"
+        + _captioned_act("Save settings", _SAVE_CAPTION)
+        + '</form><section class="panel"><h2>Password</h2><form method="post" action="/password">'
         + _password_input("current", "Current password", "current-password")
         + _password_input("password", "New password", "new-password", hint=_PASSWORD_HINT)
         + _password_input("again", "New password again", "new-password")
@@ -901,14 +1163,17 @@ _OUTCOME_WORDS: Final[dict[Outcome, tuple[str, str, str]]] = {
 def _mode_section(state: PageState, stored: store.Stored) -> str:
     """The mode: an Arrt server's walls, or a Reddit slideshow. One or the other, never both."""
     current = _shown(state, stored, "PLAYER_MODE") or ARRT_MODE
-    pinned = "PLAYER_MODE" in state.ui.pinned
+    pinned = _pinned_note(state, stored, "PLAYER_MODE")
     disabled = " disabled" if pinned else ""
     choices = "".join(
         f'<label class="choice"><input type="radio" name="player_mode" value="{value}"'
         f'{" checked" if value == current else ""}{disabled}>{html.escape(words)}</label>'
-        for value, words in ((ARRT_MODE, "Walls from an Arrt server"), (SLIDESHOW_MODE, "A Reddit slideshow"))
+        for value, words in _MODE_CHOICES.items()
     )
-    note = _PINNED_HINT if pinned else "The Player runs one or the other. Saving restarts it in the mode chosen."
+    note = pinned or (
+        "The Player runs one or the other. Saving a new choice restarts it in that mode; the settings of the other "
+        "mode are kept for when it is chosen."
+    )
     return (
         '<section class="panel"><h2>Mode</h2><fieldset class="choices" aria-describedby="player_mode-hint">'
         f"<legend>What this Player shows</legend>{choices}</fieldset>"
@@ -923,30 +1188,30 @@ def _slideshow_section(state: PageState, stored: store.Stored) -> str:
         '<section class="panel"><h2>Slideshow</h2>'
         + _slideshow_status(state.slideshow, now=state.now())
         + _field(
-            "Listing address",
+            _LABELS["SLIDESHOW_URL"],
             "slideshow_url",
             _shown(state, stored, "SLIDESHOW_URL"),
             locked="SLIDESHOW_URL" in pinned,
-            pinned="SLIDESHOW_URL" in pinned,
+            pinned=_pinned_note(state, stored, "SLIDESHOW_URL"),
             hint="A subreddit or multireddit as your browser shows it, such as "
             "https://www.reddit.com/r/EarthPorn/top/?t=month. Shown in its order, looped.",
         )
         + _cookie_field(state, stored)
         + _COOKIE_STEPS
         + _field(
-            "Shortest time on screen, in seconds",
+            f"{_LABELS['SLIDESHOW_MIN_SECONDS']}, in seconds",
             "slideshow_min_seconds",
             _shown(state, stored, "SLIDESHOW_MIN_SECONDS"),
             locked="SLIDESHOW_MIN_SECONDS" in pinned,
-            pinned="SLIDESHOW_MIN_SECONDS" in pinned,
+            pinned=_pinned_note(state, stored, "SLIDESHOW_MIN_SECONDS"),
             hint=f"A still shows this long; a short clip plays again until it has. Empty is {DEFAULT_SLIDESHOW_MIN_SECONDS:g}.",
         )
         + _field(
-            "Longest time on screen, in seconds",
+            f"{_LABELS['SLIDESHOW_MAX_SECONDS']}, in seconds",
             "slideshow_max_seconds",
             _shown(state, stored, "SLIDESHOW_MAX_SECONDS"),
             locked="SLIDESHOW_MAX_SECONDS" in pinned,
-            pinned="SLIDESHOW_MAX_SECONDS" in pinned,
+            pinned=_pinned_note(state, stored, "SLIDESHOW_MAX_SECONDS"),
             hint=f"A long clip is cut here. Empty is {DEFAULT_SLIDESHOW_MAX_SECONDS:g}.",
         )
         + _output_field(state, stored)
@@ -1010,18 +1275,19 @@ def _ago(seconds: float) -> str:
 
 def _cookie_field(state: PageState, stored: store.Stored) -> str:
     """The cookie can be written here and never read back. Its expiry is said, and warned of two weeks ahead."""
-    pinned = "REDDIT_SESSION" in state.ui.pinned
+    pinned = _pinned_note(state, stored, "REDDIT_SESSION")
     if pinned:
         expiry, have = state.ui.pinned_session_expiry, True
     else:
         value = stored.values.get("REDDIT_SESSION")
         expiry, have = (session_expiry(value) if value else None), bool(value)
     said, warn = _expiry_words(have=have, expiry=expiry, now=state.now())
-    note = _PINNED_HINT if pinned else "Leave empty to keep the current one."
+    # Plainly when there is none (#46): an empty field keeps a cookie only if one is kept.
+    note = pinned or ("Leave empty to keep the current one." if have else _NO_COOKIE)
     disabled = " disabled" if pinned else ""
     shown = (_state_word("warn", "Expiring") + " " if warn else "") + html.escape(f"{said} {note}")
     return (
-        '<div class="field"><label for="reddit_session">Reddit cookie (reddit_session)</label>'
+        f'<div class="field"><label for="reddit_session">{html.escape(_LABELS["REDDIT_SESSION"])} (reddit_session)</label>'
         '<input class="secret" id="reddit_session" type="password" name="reddit_session" value="" autocomplete="off"'
         f'{disabled} aria-describedby="reddit_session-hint">'
         f'<p class="hint" id="reddit_session-hint">{shown}</p></div>'
@@ -1066,11 +1332,11 @@ def _output_field(state: PageState, stored: store.Stored) -> str:
         f"{html.escape(_output_words(name, reports.get(name)))}</option>"
         for name in names
     )
-    pinned = "SLIDESHOW_OUTPUT" in state.ui.pinned
-    note = _PINNED_HINT if pinned else _ONE_SCREEN
+    pinned = _pinned_note(state, stored, "SLIDESHOW_OUTPUT")
+    note = pinned or _ONE_SCREEN
     disabled = " disabled" if pinned else ""
     return (
-        '<div class="field"><label for="slideshow_output">Screen</label>'
+        f'<div class="field"><label for="slideshow_output">{html.escape(_LABELS["SLIDESHOW_OUTPUT"])}</label>'
         f'<select id="slideshow_output" name="slideshow_output"{disabled} aria-describedby="slideshow_output-hint">'
         f'{options}</select><p class="hint" id="slideshow_output-hint">{html.escape(note)}</p></div>'
     )
@@ -1109,11 +1375,101 @@ def _output_words(name: str, report: OutputReport | None) -> str:
 
 
 _PINNED_HINT: Final[str] = "Set in the environment or .env, which wins over this page. Remove it there to manage it here."
+
+#: Added to `_PINNED_HINT` when the page's own file also holds the key: the one
+#: precedence rule (`config._beneath_the_environment`) said where it bites.
+_OVERRIDDEN: Final[str] = "This page holds {held} for it too, which is not used while .env sets it."
 _PAIR_HINT: Final[str] = "Locked because the server's address and token are managed together, and one is set in .env."
 _PASSWORD_HINT: Final[str] = f"At least {auth.MINIMUM_PASSWORD_LENGTH} characters."
 
 #: Glyphs as Arrt's client draws them (its `core/glyphs.js`): one meaning each.
 _GLYPHS: Final[dict[str, str]] = {"good": "\u25cf", "warn": "\u25b2"}
+
+
+def _pinned_note(state: PageState, stored: store.Stored, key: str) -> str:
+    """Why a key is read-only, when the environment pins it, and what of the page's it overrides; empty otherwise."""
+    if key not in state.ui.pinned:
+        return ""
+    held = stored.values.get(key, "")
+    if not held or (key not in store.SECRET_KEYS and held == state.ui.pinned_values.get(key)):
+        return _PINNED_HINT
+    shown = "a value" if key in store.SECRET_KEYS else repr(held)
+    return f"{_PINNED_HINT} {_OVERRIDDEN.format(held=shown)}"
+
+
+def _frame_section(state: PageState, stored: store.Stored) -> str:
+    """The Samsung Frame's address, and before any save what changing it does at the set."""
+    pinned = _pinned_note(state, stored, "TV_ADDRESS")
+    files = bool((state.ui.environment.get("FILE_OUTPUT_DIR") or "").strip())
+    hint = (
+        "This Player draws to files (FILE_OUTPUT_DIR in .env), so it drives no television, and an address is refused."
+        if files
+        else "The set's address on this network, such as 192.0.2.20. Empty, this Player drives no Frame. "
+        "Read in Arrt mode. In .env, TV_ADDRESS; its port, its token's file and its panel stay there."
+    )
+    return (
+        f'<section class="panel"><h2>{html.escape(screen_name(FRAME_OUTPUT))}</h2>'
+        + _field(
+            _LABELS["TV_ADDRESS"],
+            "tv_address",
+            _shown(state, stored, "TV_ADDRESS"),
+            locked="TV_ADDRESS" in state.ui.pinned,
+            pinned=pinned,
+            hint=hint,
+        )
+        # Only where the page can change it: a pinned address is changed in `.env`,
+        # which forgets no pairing.
+        + ("" if pinned else f'<p class="note" id="tv_address-pairing">{html.escape(_PAIRING_NOTE)}</p>')
+        + "</section>"
+    )
+
+
+#: Said beside the Frame's address before any save: what a new address costs at the set.
+_PAIRING_NOTE: Final[str] = (
+    "Saving a new address forgets this Player's pairing with the set at the old one, and the television at the "
+    "new address is asked to pair: expect a prompt on that set, even over a programme, to be accepted there. "
+    "The Player then manages the pictures uploaded to that set, and removes any it did not put there."
+)
+
+
+def _name_field(state: PageState, stored: store.Stored, *, local: str) -> str:
+    """The Player's name: its own until a server names it, then the server's, read-only, with where to rename it."""
+    pinned = _pinned_note(state, stored, "PLAYER_NAME")
+    given = _server_name(state)
+    if given and not pinned:
+        own = f" Its own name, used whenever the server's cannot be read, is {local}." if local else ""
+        return _field(
+            _LABELS["PLAYER_NAME"],
+            "player_name",
+            given,
+            locked=True,
+            pinned="",
+            hint="",
+            locked_hint=f"{_NAMED_BY_THE_SERVER}{own}",
+        )
+    return _field(
+        _LABELS["PLAYER_NAME"],
+        "player_name",
+        local,
+        locked="PLAYER_NAME" in state.ui.pinned,
+        pinned=pinned,
+        hint="Used until a server names this Player, and whenever its name cannot be read.",
+    )
+
+
+#: Where a Player the server names is renamed, in the server's own words for its screen.
+_NAMED_BY_THE_SERVER: Final[str] = (
+    "Named by its server, whose name wins. To rename it, rename it on the server, under Settings › Players."
+)
+
+#: Under the one save, which is the whole form's (#46): it saves every section.
+_SAVE_CAPTION: Final[str] = (
+    "Saves every section above. The Player restarts only if what it runs on changed, and the page then says what "
+    "was saved and what happens next."
+)
+
+#: Said in the cookie's field when none is kept, rather than "keep the current one" (#46).
+_NO_COOKIE: Final[str] = "A slideshow cannot play without one: paste it here."
 
 
 def _state_word(kind: str, word: str) -> str:
@@ -1124,8 +1480,9 @@ def _state_word(kind: str, word: str) -> str:
     )
 
 
-def _field(label: str, name: str, value: str, *, locked: bool, pinned: bool, hint: str) -> str:
-    note = _PINNED_HINT if pinned else _PAIR_HINT if locked else hint
+def _field(label: str, name: str, value: str, *, locked: bool, pinned: str, hint: str, locked_hint: str | None = None) -> str:
+    """A text field: read-only when locked, with why. `pinned` is the environment's note, empty when it does not pin it."""
+    note = pinned or ((_PAIR_HINT if locked_hint is None else locked_hint) if locked else hint)
     disabled = " disabled" if locked else ""
     return (
         f'<div class="field"><label for="{name}">{html.escape(label)}</label>'
@@ -1134,16 +1491,17 @@ def _field(label: str, name: str, value: str, *, locked: bool, pinned: bool, hin
     )
 
 
-def _token_field(*, locked: bool, pinned: bool, token_set: bool) -> str:
+def _token_field(*, locked: bool, pinned: str, token_set: bool) -> str:
     """The token can be written here and never read back: the field is always empty."""
     said = "A token is set." if token_set else "No token is set."
-    note = _PINNED_HINT if pinned else _PAIR_HINT if locked else "Leave empty to keep the current one."
+    # "Keep the current one" only when there is one, as the cookie's field says.
+    note = pinned or (_PAIR_HINT if locked else "Leave empty to keep the current one." if token_set else "")
     disabled = " disabled" if locked else ""
     return (
-        '<div class="field"><label for="client_token">Token</label>'
+        f'<div class="field"><label for="client_token">{html.escape(PAIRING_LABELS["CLIENT_TOKEN"])}</label>'
         '<input class="secret" id="client_token" type="password" name="client_token" value="" autocomplete="off"'
         f'{disabled} aria-describedby="client_token-hint">'
-        f'<p class="hint" id="client_token-hint">{html.escape(said)} {html.escape(note)} '
+        f'<p class="hint" id="client_token-hint">{html.escape(" ".join(part for part in (said, note) if part))} '
         f"{html.escape(_ISSUED_BY_THE_SERVER)}</p></div>"
     )
 
