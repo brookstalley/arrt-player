@@ -262,11 +262,14 @@ async def run_label(
     clock: Clock | None = None,
 ) -> None:
     """The supervisor's label worker: one renderer on this client's panel, until stopped."""
+    # One clock for both: the pull stamps the server's last answer by `now`, and
+    # the renderer reads that stamp back against its own `now`.
+    clock = clock if clock is not None else Clock.system()
     renderer = LabelRenderer(
         assignment=assignment,
-        link=LabelPull(settings, assignment.label_id),
+        link=LabelPull(settings, assignment.label_id, now=clock.now, monotonic=clock.monotonic),
         panel=panel,
-        now=(clock if clock is not None else Clock.system()).now,
+        now=clock.now,
         poll_seconds=settings.label_poll_seconds,
     )
     await renderer.run(stop, retired)
