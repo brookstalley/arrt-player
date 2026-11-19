@@ -850,6 +850,416 @@ async def test_held_writes_do_not_ask_the_set_once_a_second(daemon: Wall, tv: Fa
     assert tv.art_mode_reads < 10, f"held writes read art mode {tv.art_mode_reads} times in thirty passes"
 
 
+# -- what reaches the set, verb by verb ----------------------------------------
+#
+# The household's rule is a count as much as a gate: every read the wall sends
+# is a request at a set somebody may be using, and wave 1's hold refactor once
+# changed that count without a test noticing. Each scenario is a run of passes,
+# and the pin is every verb that reached the set in each pass, reads and writes
+# alike, in order. A write the seam held shows as the reads that held it, with
+# no send after them. Measured on f0138b0; a change to any of them is a change
+# to what the household's television is sent, and is made here on purpose.
+
+
+class _TracingTv(FakeTv):
+    """The double, recording each verb that reaches the set, in order. A held write records only its gate's reads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trace: list[str] = []
+
+    async def connect(self) -> None:
+        connected = self._connected
+        await super().connect()
+        if not connected:
+            self.trace.append("connect")
+
+    async def showing_art(self) -> bool:
+        self.trace.append("get_artmode")
+        return await super().showing_art()
+
+    async def reported_art_mode(self) -> str | None:
+        # The same `get_artmode` request on the wire (`SamsungTv.reported_art_mode`),
+        # named apart because only the still wall's line asks it.
+        self.trace.append("get_artmode for the line")
+        return await super().reported_art_mode()
+
+    async def power_state(self) -> str:
+        self.trace.append("PowerState")
+        return await super().power_state()
+
+    async def listed_content_ids(self) -> frozenset[str]:
+        self.trace.append("list")
+        return await super().listed_content_ids()
+
+    async def _send_upload(self, path):
+        self.trace.append("upload")
+        return await super()._send_upload(path)
+
+    async def _send_show(self, content_id: str) -> bool:
+        self.trace.append("select")
+        return await super()._send_show(content_id)
+
+    async def _send_remove(self, content_ids):
+        self.trace.append("remove")
+        return await super()._send_remove(content_ids)
+
+    async def _send_set_brightness(self, value: int) -> None:
+        self.trace.append("brightness")
+        return await super()._send_set_brightness(value)
+
+    async def _send_disable_native_slideshow(self) -> None:
+        self.trace.append("slideshow off")
+        return await super()._send_disable_native_slideshow()
+
+
+def _passes(*passes):
+    """A scenario: before each pass, the changes made to the set, the feed or the clock."""
+    return list(passes)
+
+
+def _feed(*works: str, seconds: int = 3600):
+    return lambda tv, publish, clock: publish(list(works), interval_seconds=seconds)
+
+
+def _the_set(**change):
+    def apply(tv, publish, clock):
+        for name, value in change.items():
+            setattr(tv, name, value)
+
+    return apply
+
+
+def _later(seconds: float):
+    return lambda tv, publish, clock: clock.advance(seconds)
+
+
+def _then(*steps):
+    def apply(tv, publish, clock):
+        for step in steps:
+            step(tv, publish, clock)
+
+    return apply
+
+
+def _the_remote_shows(content_id: str):
+    """Somebody picks a picture: the set announces it shown, with no art-mode announcement."""
+    return lambda tv, publish, clock: tv.announce(content_id, is_shown=True)
+
+
+#: The first pass of a fresh wall in art mode: the news read, the selection's
+#: gate, the slideshow switch, the reconciliation, the brightness, the first
+#: upload and selection, and the next upload, each write behind its own read.
+_A_FRESH_WALL_IN_ART_MODE = [
+    "connect",
+    "get_artmode",
+    "get_artmode",
+    "slideshow off",
+    "list",
+    "get_artmode",
+    "brightness",
+    "get_artmode",
+    "get_artmode",
+    "upload",
+    "get_artmode",
+    "select",
+    "get_artmode",
+    "upload",
+]
+
+_WHAT_REACHES_THE_SET = {
+    "art mode, and nothing due": (
+        _passes(_feed("w1", "w2"), _later(1), _later(1)),
+        [_A_FRESH_WALL_IN_ART_MODE, [], []],
+    ),
+    "a programme on a fresh wall": (
+        _passes(_then(_feed("w1", "w2"), _the_set(art_mode="off")), _later(1), _later(10)),
+        [
+            ["connect", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
+            [],
+            ["get_artmode", "PowerState", "get_artmode", "PowerState"],
+        ],
+    ),
+    "a dark set": (
+        _passes(_then(_feed("w1", "w2"), _the_set(art_mode="off", power="standby")), _later(1), _later(10)),
+        [
+            [
+                "connect",
+                "get_artmode",
+                "PowerState",
+                "get_artmode",
+                "PowerState",
+                "slideshow off",
+                "list",
+                "get_artmode",
+                "PowerState",
+                "brightness",
+                "get_artmode",
+                "PowerState",
+                "get_artmode",
+                "PowerState",
+                "upload",
+            ],
+            ["get_artmode", "PowerState", "upload"],
+            ["get_artmode", "PowerState"],
+        ],
+    ),
+    "a set whose power cannot be read": (
+        _passes(_then(_feed("w1", "w2"), _the_set(art_mode="off", power_unreadable=True)), _later(1), _later(10)),
+        [
+            ["connect", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
+            [],
+            ["get_artmode", "PowerState", "get_artmode", "PowerState"],
+        ],
+    ),
+    "a still wall, the set's news, and the next ignored selection": (
+        _passes(
+            _feed("w1", "w2"),
+            _then(_the_set(displays_nothing_selected=True), _feed("w2", "w1")),
+            _then(_feed("w1", "w2"), _the_set(art_mode_announced=True)),
+            _feed("w2", "w1"),
+            _later(1),
+        ),
+        [
+            _A_FRESH_WALL_IN_ART_MODE,
+            ["list", "get_artmode", "get_artmode", "select", "get_artmode for the line"],
+            ["get_artmode", "list"],
+            ["list", "get_artmode", "get_artmode", "select", "get_artmode for the line"],
+            [],
+        ],
+    ),
+    "a programme the set announces while nothing is due": (
+        _passes(_feed("w1", "w2"), _the_set(art_mode="off", art_mode_announced=True), _later(1)),
+        [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "PowerState"], []],
+    ),
+    "a picture announced as shown, then a selection due": (
+        _passes(
+            _feed("w1", "w2"),
+            _the_set(art_mode="off", art_mode_announced=True),
+            _then(_the_set(art_mode="on"), _the_remote_shows("MY-F0001")),
+            _feed("w2", "w1"),
+        ),
+        [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "PowerState"], [], ["list", "get_artmode", "get_artmode", "select"]],
+    ),
+    "a picture announced as shown while the set is not showing art": (
+        _passes(
+            _feed("w1", "w2"),
+            _the_set(art_mode="off", art_mode_announced=True),
+            _the_remote_shows("MY-F0001"),
+            _feed("w2", "w1"),
+        ),
+        [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "PowerState"], [], ["list", "get_artmode", "PowerState"]],
+    ),
+    "an evening of television ended by the set's announcement": (
+        _passes(
+            _then(_feed("w1", "w2"), _the_set(art_mode="off")),
+            _later(5),
+            _later(5),
+            _then(_the_set(art_mode="on", art_mode_announced=True), _later(1)),
+        ),
+        [
+            ["connect", "get_artmode", "PowerState", "get_artmode", "PowerState", "get_artmode", "PowerState"],
+            ["get_artmode", "PowerState", "get_artmode", "PowerState"],
+            [],
+            [
+                "get_artmode",
+                "get_artmode",
+                "slideshow off",
+                "list",
+                "get_artmode",
+                "get_artmode",
+                "upload",
+                "get_artmode",
+                "select",
+                "get_artmode",
+                "upload",
+            ],
+        ],
+    ),
+    "an upload held for a programme, then made": (
+        _passes(
+            _feed("w1", "w2", "w3"),
+            _the_set(art_mode="off"),
+            _later(1),
+            _the_set(art_mode="on", art_mode_announced=True),
+        ),
+        [_A_FRESH_WALL_IN_ART_MODE, ["get_artmode", "PowerState"], [], ["get_artmode", "get_artmode", "upload"]],
+    ),
+}
+
+
+@pytest.mark.parametrize("scenario", sorted(_WHAT_REACHES_THE_SET))
+async def test_what_reaches_the_set_in_each_pass_is_unchanged(scenario: str, settings, state: DisplayState, clock, publish):
+    passes, expected = _WHAT_REACHES_THE_SET[scenario]
+    tv = _TracingTv()
+    wall = _a_wall(settings, tv, state, clock)
+
+    sent = []
+    for before in passes:
+        before(tv, publish, clock)
+        start = len(tv.trace)
+        await wall.tick()
+        sent.append(tv.trace[start:])
+
+    assert sent == expected
+
+
+# -- the set's own news (the wave-1 review's last observation) -------------------
+
+
+async def test_a_programme_the_set_announces_is_said_once_though_nothing_was_due(
+    settings, state: DisplayState, clock, publish, caplog, wall_dir
+):
+    """Pinned as intended: the set's news alone begins the wall's not-ours episode.
+
+    The schedule wants nothing new, so the gate is never asked; the set announces
+    a change of mode and the one read that news costs says no. The wall is left
+    alone, the display state follows the set, and the journal says so once, as
+    it does when the gate finds the same thing: the episode is about the set,
+    not about which read found it out. One read and one `PowerState`, and none
+    on the quiet passes after.
+    """
+    from test_display_state import display
+
+    tv = _TracingTv()
+    wall = _a_wall(settings, tv, state, clock)
+    publish(["w1", "w2"], interval_seconds=3600)
+    await wall.tick()  # w1 up
+
+    tv.art_mode = "off"
+    tv.art_mode_announced = True
+    start = len(tv.trace)
+    with caplog.at_level(logging.INFO):
+        await wall.tick()
+        clock.advance(1)
+        await wall.tick()
+
+    assert tv.trace[start:] == ["get_artmode", "PowerState"]
+    assert len(_events(caplog, "rotation.wall_not_ours")) == 1
+    assert display(wall_dir) == ("in_use", None)
+    assert tv.selected == ["MY-F0001"], "a selection reached a set showing a programme"
+
+
+async def test_a_picture_the_set_announces_as_shown_ends_the_episode_on_its_word(
+    settings, state: DisplayState, clock, publish, caplog, wall_dir
+):
+    """Pinned as intended: an announced picture is art on the wall, and ends the not-ours episode with no read.
+
+    It is the set's own word, already heard; asking again would be a read the
+    news does not need. **It licenses nothing**: the next selection is still
+    preceded by the gate's read, which the next test shows holding when the
+    announcement and the set disagree.
+    """
+    from test_display_state import display
+
+    tv = _TracingTv()
+    wall = _a_wall(settings, tv, state, clock)
+    publish(["w1", "w2"], interval_seconds=3600)
+    await wall.tick()  # w1 up, as MY-F0001
+    tv.art_mode = "off"
+    tv.art_mode_announced = True
+    await wall.tick()  # somebody's programme
+
+    tv.art_mode = "on"
+    tv.announce("MY-F0001", is_shown=True)
+    start = len(tv.trace)
+    with caplog.at_level(logging.INFO):
+        await wall.tick()
+
+    assert tv.trace[start:] == [], "the announcement was answered with a read it did not need"
+    assert len(_events(caplog, "rotation.wall_returned")) == 1
+    assert display(wall_dir) == ("showing_art", "w1")
+
+
+async def test_an_announced_picture_the_set_contradicts_selects_nothing(settings, state: DisplayState, clock, publish, caplog):
+    """The announcement ends the episode; the gate still decides. If the set says
+    a picture is shown while `get_artmode` says no, the next selection is held,
+    and the episode is said again."""
+    tv = _TracingTv()
+    wall = _a_wall(settings, tv, state, clock)
+    publish(["w1", "w2"], interval_seconds=3600)
+    await wall.tick()
+    tv.art_mode = "off"
+    tv.art_mode_announced = True
+    with caplog.at_level(logging.INFO):
+        await wall.tick()
+        tv.announce("MY-F0001", is_shown=True)
+        await wall.tick()
+        publish(["w2", "w1"], interval_seconds=3600)
+        await wall.tick()
+
+    assert tv.selected == ["MY-F0001"], "an announcement licensed a selection the gate refused"
+    assert tv.took_the_screen == 0
+    assert len(_events(caplog, "rotation.wall_not_ours")) == 2
+    assert len(_events(caplog, "rotation.wall_returned")) == 1
+
+
+async def test_a_still_wall_after_the_sets_news_costs_one_read_for_its_line(
+    settings, state: DisplayState, clock, publish, caplog
+):
+    """Pinned with a count, not removed: each still-wall episode's line reads the set once.
+
+    The set ignores a selection; the line saying so reads what the set claims
+    about itself (`reported_art_mode`, one `get_artmode` on the wire). The set's
+    news ends that episode, so the next ignored selection opens another, and its
+    line reads the set again: two episodes, two lines, two reads for them, and
+    none on a pass that says nothing. The read is the line's evidence, taken
+    after the selection the gate admitted, and kept: removing it would change
+    what is sent to the set for a log line's sake.
+    """
+    tv = _TracingTv()
+    wall = _a_wall(settings, tv, state, clock)
+    publish(["w1", "w2"], interval_seconds=3600)
+    await wall.tick()  # w1 on the wall
+    lines = []
+    with caplog.at_level(logging.INFO):
+        tv.displays_nothing_selected = True
+        publish(["w2", "w1"], interval_seconds=3600)
+        for before in (
+            lambda: None,  # w2 is selected and not displayed
+            lambda: (publish(["w1", "w2"], interval_seconds=3600), setattr(tv, "art_mode_announced", True)),
+            lambda: publish(["w2", "w1"], interval_seconds=3600),  # w2 is ignored again
+            lambda: clock.advance(1),
+        ):
+            before()
+            start = len(tv.trace)
+            await wall.tick()
+            lines.append(tv.trace[start:].count("get_artmode for the line"))
+
+    assert lines == [1, 0, 1, 0]
+    assert len(_events(caplog, "rotation.wall_unchanged")) == 2
+
+
+# -- the Frame's own journal lines -------------------------------------------
+
+
+@pytest.mark.parametrize("ending", ["stopped", "crashed"])
+async def test_the_frame_walls_lines_are_filed_under_frame(daemon: Wall, caplog, ending: str):
+    """`frame.started`, `frame.stopped`, `frame.crashed`: the one-wall daemon's `daemon.*` names are gone from the wall."""
+    import asyncio
+
+    stop = asyncio.Event()
+    if ending == "stopped":
+        stop.set()
+    else:
+
+        async def explode() -> float:
+            raise RuntimeError("something nobody predicted")
+
+        daemon.tick = explode  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.INFO):
+        try:
+            await daemon.run(stop)
+        except RuntimeError:
+            assert ending == "crashed"
+
+    events = [getattr(record, "event", "") for record in caplog.records]
+    assert events.count("frame.started") == 1
+    assert events.count(f"frame.{ending}") == 1
+    assert not [event for event in events if event.startswith("daemon.")]
+
+
 # -- the double, as the set was measured --------------------------------------
 
 
