@@ -132,6 +132,26 @@ class TestWatching:
         assert adopted is not None
         assert adopted.playlist_name == "Another theme"
 
+    @pytest.mark.parametrize(
+        ("playlist", "named"),
+        [
+            ({"id": "t1", "name": "Another theme"}, "Another theme"),
+            ({"id": "t7"}, "t7"),
+            ({}, "(unnamed)"),
+        ],
+    )
+    def test_the_journal_says_theme_when_it_adopts_a_feed(self, wall_dir: Path, caplog, playlist: dict, named: str):
+        """A person reads "theme" (2026-11-19); the contract's `playlist` field keeps its name, and so does the event."""
+        write_manifest(wall_dir, a_document(playlist=playlist))
+
+        with caplog.at_level(logging.INFO):
+            assert a_watcher(wall_dir).poll() is not None
+
+        adopted = [record for record in caplog.records if record.__dict__.get("event") == "manifest.adopted"]
+        assert len(adopted) == 1
+        assert adopted[0].getMessage() == f"adopted the feed for theme {named} with 1 slots over 1 works"
+        assert "playlist" not in adopted[0].getMessage().lower()
+
     def test_a_refused_manifest_leaves_the_last_good_one_in_place(self, wall_dir: Path, caplog):
         write_manifest(wall_dir, a_document())
         watcher = a_watcher(wall_dir)
