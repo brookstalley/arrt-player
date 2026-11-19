@@ -49,6 +49,48 @@ UMask=0077
 
 WorkingDirectory=/opt/arrt-player
 
+# **The sandbox the operator's procedure allows unchanged.** The checkout, the
+# venv and `.env` are tvpi's and `uv run` syncs the venv at start, so the code
+# directory stays writable; `ProtectSystem=strict` waits on making them root's.
+# Each line names what the Player opens that it leaves alone. None of them
+# touches `/dev`: the display card, the render node, SPI, GPIO and the DDC bus
+# are reached through the groups above, and nothing here sets `PrivateDevices=`,
+# `DevicePolicy=` or `ProtectKernelModules=`.
+#
+# No exec gains privileges: the Player runs uv, Python and mpv, none of them
+# set-uid or carrying file capabilities.
+NoNewPrivileges=yes
+# A /tmp of its own, emptied at stop. Nothing the Player keeps is there: the
+# cache, the settings file, the television's token (by default) and mpv's
+# socket and pid are all under CACHE_DIR, and uv's cache is under the
+# account's home.
+PrivateTmp=yes
+# /usr, /boot, /efi and /etc read-only. The Player writes under CACHE_DIR,
+# /opt/arrt-player (the venv, bytecode) and /var/lib/tvpi (uv's cache and
+# interpreter), none of them there, and reads /sys/class/drm, which this leaves.
+ProtectSystem=full
+# /home, /root and /run/user empty and unreachable. The account's home is
+# /var/lib/tvpi, and the runbook checks that `.env` names no path under these.
+ProtectHome=yes
+# The sockets the Player and mpv open: AF_INET and AF_INET6 for the server, the
+# television, Reddit and the settings page; AF_UNIX for mpv's IPC socket and the
+# name service's own sockets (mDNS, for a `.local` address); and AF_NETLINK,
+# which glibc's getaddrinfo opens to learn the host's addresses for the
+# AI_ADDRCONFIG flag aiohttp's resolver passes.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# **A bound on memory, so an exhausted Pi loses the Player and not sshd.** As a
+# share of the Pi's RAM, so one line fits any Pi: 4.8 GB and 6 GB on the
+# reference 8 GB Pi 4. Composing one work takes about 1 GB, and walls on one
+# client compose at once, one each, so three walls on that Pi stay under
+# MemoryHigh, where the kernel starts reclaiming from the Player and slowing it.
+# Past MemoryMax the kernel's OOM killer runs inside this unit alone; systemd
+# then stops the rest of it with SIGTERM (OOMPolicy=stop, systemd's default) and
+# `Restart=always` brings it back. The kernel enforces neither without its
+# memory controller, which the runbook checks for.
+MemoryHigh=60%
+MemoryMax=75%
+
 # **Un-prefixed on purpose.** systemd treats a missing un-prefixed
 # EnvironmentFile= as fatal and refuses to start the unit, naming the path it
 # wanted. A `-` prefix would make it optional, which restores exactly the silent
@@ -67,7 +109,14 @@ EnvironmentFile=/opt/arrt-player/.env
 # where the path is written, rather than resolving to whatever a PATH= line
 # happened to inherit — which is how the recovered 2024 unit came to carry pyenv
 # shims and a stray editor directory it never needed.
-ExecStart=/usr/local/bin/uv run python -m arrt_player
+#
+# **Frozen, and without the dev group.** `--frozen` takes the lockfile as it is
+# instead of checking it against `pyproject.toml`, so a start never re-resolves
+# over the network: an offline boot with a synced venv starts from its cache.
+# `--no-dev` keeps pytest and the linters off the Pi, and the two groups are the
+# ones the runbook syncs, so a start finds nothing to install. `uv run` adds what
+# is missing and removes nothing (`--exact` would).
+ExecStart=/usr/local/bin/uv run --frozen --no-dev --group raster --group epaper python -m arrt_player
 
 Restart=always
 

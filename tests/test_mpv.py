@@ -22,6 +22,7 @@ import pytest
 from fakes import drm_tree
 
 from arrt_player.mpv import (
+    MPV_ENVIRONMENT,
     MPV_OPTIONS,
     RESTART_BACKOFF_SECONDS,
     Loaded,
@@ -33,6 +34,10 @@ from arrt_player.mpv import (
 )
 
 FAKE = Path(__file__).with_name("fake_mpv.py")
+
+#: The fake is told how to behave through its environment, which mpv is not
+#: otherwise given, so the bench passes those two variables through as well.
+PASSED_TO_THE_FAKE = (*MPV_ENVIRONMENT, "FAKE_MPV_BEHAVIOUR", "FAKE_MPV_RECORD")
 
 
 class Clock:
@@ -67,6 +72,7 @@ class Bench:
             # in milliseconds, so they only decide how long a real failure takes.
             start_timeout=10.0,
             load_timeout=5.0,
+            environment_names=PASSED_TO_THE_FAKE,
         )
 
     def file(self, name: str, content: str) -> Path:
@@ -569,6 +575,57 @@ def test_mpv_is_handed_the_resolved_path_the_check_approved(bench: Bench) -> Non
     still = bench.file("a.png", "still")
     bench.output.load(bench.media / "sub" / ".." / "a.png")
     assert ["loadfile", str(still.resolve()), "replace"] in bench.commands()
+
+
+#: Run as mpv with a file's path before mpv's options: writes the environment
+#: this process was started with to that file, then is the fake mpv. The path
+#: comes on the command line because the environment is what is being measured.
+REPORTS_ITS_ENVIRONMENT = (
+    "import json, os, runpy, sys; "
+    "record = sys.argv.pop(1); "
+    "open(record, 'w').write(json.dumps(dict(os.environ))); "
+    f"runpy.run_path({str(FAKE)!r}, run_name='__main__')"
+)
+
+
+def test_mpv_is_started_with_none_of_the_players_secrets(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The unit loads `.env` into the Player's environment, so the client token
+    and the Reddit cookie are in it, and mpv decodes files that strangers posted.
+    What mpv is started with is read back from the process itself, started the
+    way the Player starts it, with no allowlist of the test's own."""
+    secrets = {
+        "CLIENT_TOKEN": "sentinel-client-token",
+        "REDDIT_SESSION": "sentinel-reddit-cookie",
+        "A_KEY_ADDED_TO_ENV_LATER": "sentinel-nobody-denied-this",
+    }
+    for name, value in secrets.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HOME", str(root / "home"))
+    bench = Bench(root, monkeypatch)
+    record = root / "environment.json"
+    output = MpvOutput(
+        "hdmi-a-1",
+        runtime_dir=bench.runtime,
+        media_root=bench.media,
+        command=(sys.executable, "-c", REPORTS_ITS_ENVIRONMENT, str(record)),
+        drm_root=bench.drm,
+        dev_root=root / "dev",
+        monotonic=bench.clock,
+        start_timeout=10.0,
+        load_timeout=5.0,
+    )
+    try:
+        assert isinstance(output.load(bench.file("a.png", "still")), Loaded)
+    finally:
+        output.close()
+
+    seen = json.loads(record.read_text())
+    # Names only in the messages: a failure here must not print the runner's environment.
+    assert not secrets.keys() & seen.keys(), sorted(secrets.keys() & seen.keys())
+    assert not [name for name, value in seen.items() if value in secrets.values()], "a secret's value reached mpv"
+    # What mpv does need still reaches it: `Popen` finds mpv on the PATH it is given.
+    assert seen["PATH"] == os.environ["PATH"]
+    assert seen["HOME"] == str(root / "home")
 
 
 def test_a_line_from_mpv_that_is_not_json_is_an_mpv_error(root: Path) -> None:

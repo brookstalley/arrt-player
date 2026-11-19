@@ -20,6 +20,13 @@ records that.
 > deploy), it is there for the order the two had to go in. Arrt's deployment
 > record carries the same section for the server's half.
 
+> **Every `uv` command below that runs on the Pi is written `--frozen`, and the
+> Player's are written `--no-dev` as well (2026-11-19), though the dated runs
+> were made without either.** A sync that is not frozen checks the lock against
+> `pyproject.toml` and re-resolves over the network when they differ, and may
+> rewrite `uv.lock` in the checkout; one that keeps the dev group installs pytest
+> and the linters on the Pi. Repeat the commands as they are written now.
+
 > **Since 2026-10-02 the Pi is a client of the Arrt
 > server on the NAS** (§ The Player as a client of the NAS, below). Its
 > `curation.service` is stopped and disabled. The sections after that one
@@ -64,7 +71,7 @@ Then deploy (`bin/arrt-app.sh` in the homelab repo) and confirm `/healthz`.
 
     cd /opt/samsung-frame-art-loader
     sudo -u tvpi git fetch origin <branch or tag> && sudo -u tvpi git checkout -B <branch> FETCH_HEAD
-    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
+    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
     sudo cp -p ../.env ../.env.pre-clients-<date>      # the way back starts here
     # in .env: set SERVER_URL, CLIENT_TOKEN and CACHE_DIR; remove WALL_ID,
     # WALL_TOKEN and MANIFEST_SOURCE, which the client Player refuses by name
@@ -109,7 +116,7 @@ the television.
    (`pre-clients-<timestamp>.sqlite` in the backups directory). It cannot use
    the migrated catalogue.
 2. On the Pi: `sudo systemctl stop display.service`, check out the release the
-   Pi ran before (`7e211f1`), `uv sync` as above, restore
+   Pi ran before (`7e211f1`), sync as above, restore
    `.env.pre-clients-<date>`, install that revision's `deploy/display.service`,
    and start it again.
 
@@ -157,7 +164,7 @@ one is removed and the new directory gets a fresh one. That also clears the
     find postarr -type f -not -path '*/.venv/*' -not -path '*/__pycache__/*' \
         -not -path '*/.pytest_cache/*' -not -path '*/.ruff_cache/*' -not -path '*/.hypothesis/*'
     sudo rm -rf postarr
-    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
+    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
     cd /opt/samsung-frame-art-loader
     sudo cp deploy/display.service /etc/systemd/system/
     sudo systemctl daemon-reload
@@ -165,7 +172,7 @@ one is removed and the new directory gets a fresh one. That also clears the
 
 Logger names now start `arrt_player.`, so a saved journal filter on `postarr.`
 stops matching. **To go back**, stop the unit, check out the commit you wrote
-down, remove `arrt-player/`, run `uv sync --group raster --group epaper` in `postarr/`, copy that commit's
+down, remove `arrt-player/`, run `uv sync --frozen --no-dev --group raster --group epaper` in `postarr/`, copy that commit's
 `display.service` in, reload and start.
 
 ## The panel's GPIO package (2026-10-08, #181)
@@ -175,7 +182,7 @@ rpi-gpio`.** `jetson-gpio` and `rpi-gpio` both installed `RPi/GPIO/__init__.py`;
 the sync removes `jetson-gpio`, and with it that file, so `rpi-gpio` has to be
 installed again to put the real one back:
 
-    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper --reinstall-package rpi-gpio
+    cd arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper --reinstall-package rpi-gpio
 
 ## Wave 4g: the walls move to manifest major 2 alone (2026-10-10)
 
@@ -266,7 +273,7 @@ its name. Nothing changes on the server, and the walls run as before.
 naming the key) a `SERVER_URL` that is not an http(s) address with a host, or
 that carries a user name, password, query or fragment; a `CLIENT_TOKEN` with
 whitespace in it; and a `PLAYER_NAME` over 64 characters. Check it before
-switching revisions: on the new revision, `uv run python -c 'from
+switching revisions: on the new revision, `uv run --frozen --no-dev python -c 'from
 arrt_player.config import load; load()'` as `tvpi` prints nothing when the
 values are accepted, and names the key when one is not. The reference Pi's
 `.env` passed this on 2026-11-10, when it moved to this release.
@@ -417,6 +424,41 @@ delete the keys `PLAYER_MODE`, `SLIDESHOW_URL`, `REDDIT_SESSION`,
 `SLIDESHOW_MIN_SECONDS`, `SLIDESHOW_MAX_SECONDS` and `SLIDESHOW_OUTPUT` from
 `values`, and set `version` to `1`. The `.slideshow*` and `.mpv` entries can stay.
 
+## The unit is frozen, bounded and partly sandboxed (2026-11-19, audit wave 1)
+
+`deploy/display.service` changes in four ways. The runbook's step 9 shows the
+unit differing, and steps 10–11 install it.
+
+- **It starts frozen and without the dev group:** `uv run --frozen --no-dev
+  --group raster --group epaper`. A start no longer re-resolves the lock, so an
+  offline boot with a synced venv comes up from its cache. The runbook's step 8
+  is the matching sync; the first one after this release removes the dev tools,
+  so expect `Uninstalled` lines naming pytest, ruff and black.
+- **Its memory is bounded:** `MemoryHigh=60%` and `MemoryMax=75%` of the Pi's
+  RAM. Past the second, the kernel kills inside this unit only, and the Player
+  restarts as it does from any crash.
+- **It is sandboxed as far as tvpi owning the checkout allows:**
+  `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=full` (`/usr`, `/boot`,
+  `/efi` and `/etc` read-only), `ProtectHome=yes` (`/home`, `/root` and
+  `/run/user` unreachable) and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+  AF_NETLINK`. The devices are untouched. The unit's comments say what each line
+  was checked against.
+- **mpv's environment holds none of `.env`.** The slideshow's mpv is started
+  with `PATH`, `HOME`, `XDG_CACHE_HOME`, `LANG` and `LC_ALL` from the Player's
+  environment and nothing else (`mpv.MPV_ENVIRONMENT`), so the client token and
+  the Reddit cookie are not handed to the program that decodes strangers' posts.
+  mpv still runs as `tvpi`, and `tvpi` can read `.env` and `.settings.json`;
+  closing that waits on running mpv under an account of its own.
+
+**What the Pi needs:** `.env` must name no path under `/home`, `/root` or
+`/run/user`, which the Player can no longer reach (the runbook's step 9a). After
+the start, the runbook's step 14a checks that the sandbox let the Player draw and
+that the kernel enforces the memory bound. Neither can be checked off the Pi.
+
+**The way back** is the previous revision, whose unit the runbook's *Going back*
+puts back. That unit's `uv run` installs the dev group again at its first start,
+from uv's cache or from PyPI.
+
 ## The two new units, and where everything they name now lives
 
 `display.service` and `curation.service` are the planes this product is being
@@ -485,8 +527,8 @@ There is no current procedure for installing a new Pi from this repository.
     sudo chown -R tvpi:tvpi /srv/art
 
     # dependencies, as the account that will run them
-    cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --group raster --group epaper
-    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv sync
+    cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi /usr/local/bin/uv sync --frozen --no-dev --group raster --group epaper
+    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv sync --frozen
 
     # the environment file: 0640, owned by tvpi, because it carries API keys
     sudo install -m 0640 -o tvpi -g tvpi <your .env> /opt/samsung-frame-art-loader/.env
@@ -520,7 +562,7 @@ correctly do nothing, which looks like a fault and is not one. Seeding is a
 separate hand-run step and it neither spends nor renders — it carries the mat
 colour from the 2024 index and adopts the renders already in the tree:
 
-    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run python -m arrt.seed <path to all.json>
+    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run --frozen python -m arrt.seed <path to all.json>
 
 Then create a theme and activate it, over the JSON API or the browser interface —
 **activation is what publishes the manifest**, and until one is published the
@@ -532,7 +574,7 @@ carry across what an earlier run could not, and it is the only step that does.
 The catalogue *file* upgrades itself — the store adds nullable columns on open —
 but a column is not the same as a value, and the two arrive by different roads:
 
-    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run python -m arrt.seed <path to all.json>
+    cd /opt/samsung-frame-art-loader/arrt && sudo -u tvpi /usr/local/bin/uv run --frozen python -m arrt.seed <path to all.json>
     # Re-activate the live theme — this, and nothing else, republishes the manifest:
     curl -s localhost:"$CURATION_PORT"/api/walls                       # read WALL_ID and the active theme
     curl -sX POST localhost:"$CURATION_PORT"/api/themes/"$THEME_ID"/activate \
@@ -623,7 +665,7 @@ source file:
 
     sudo systemctl stop display.service
     cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi env HOME=/var/lib/tvpi \
-        /usr/local/bin/uv run --group raster --group epaper \
+        /usr/local/bin/uv run --frozen --no-dev --group raster --group epaper \
         python tools/label_preview.py --panel --record hokusai
     sudo systemctl start display.service
 
@@ -667,7 +709,7 @@ above:
 
     sudo systemctl stop display.service
     cd /opt/samsung-frame-art-loader/arrt-player && sudo -u tvpi env HOME=/var/lib/tvpi \
-        /usr/local/bin/uv run python tools/power_probe.py
+        /usr/local/bin/uv run --frozen --no-dev python tools/power_probe.py
     # then, with somebody watching the set:
     ... python tools/power_probe.py --click --i-am-at-the-set
     ... python tools/power_probe.py --hold 3 --i-am-at-the-set
@@ -772,14 +814,14 @@ only that the file parses:
     sudo journalctl -b -u systemd-journald | grep -i 'Journal.*max'
     # expect: "Runtime Journal (...) is 8M, max 256M, 248M free."
 
-**The display plane's panel needs two optional dependency groups, and a default
-`uv sync` installs neither.** They are separate because they install on different
+**The display plane's panel needs two optional dependency groups, and a sync
+that does not name them installs neither.** They are separate because they install on different
 machines: `raster` is the label's text stack (PyGObject and pycairo, which build
 or wheel on any modern Linux), and `epaper` is the panel driver (`omni_epd`, which
 compiles Cython against the Broadcom SPI and GPIO libraries and installs on a
 Raspberry Pi and nowhere else). On the Pi:
 
-    cd arrt-player && uv sync --group raster --group epaper
+    cd arrt-player && uv sync --frozen --no-dev --group raster --group epaper
 
 **A device with a television and no panel installs neither, and that is a
 supported deployment** — leave `EPD_DEVICE` empty in `.env` and the wall rotates
