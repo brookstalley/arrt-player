@@ -57,18 +57,18 @@ owes, and an unattended daemon meeting its first prompt is a daemon that stops.
 
 Read the state, which is always safe and needs no flag:
 
-    cd arrt-player && uv run python tools/power_probe.py
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py
 
 Measure a gesture, from whatever state the set is in now:
 
-    cd arrt-player && uv run python tools/power_probe.py --click --i-am-at-the-set
-    cd arrt-player && uv run python tools/power_probe.py --hold 3 --i-am-at-the-set
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py --click --i-am-at-the-set
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py --hold 3 --i-am-at-the-set
 
 Skip the art channel when only the REST reading is wanted — which is also how to
 find out whether the art channel opens at all in a given state, since a run
 *with* it reports that as a datum rather than failing:
 
-    cd arrt-player && uv run python tools/power_probe.py --no-art-channel
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py --no-art-channel
 
 The set's address and client name come from this deployment's `.env`, the same
 road `__main__` takes; `--host` overrides it for a set that is not this wall's.

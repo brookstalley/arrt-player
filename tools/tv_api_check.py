@@ -5,7 +5,7 @@ library is a two-year-old fork of an unowned websocket protocol, its failure
 modes differ across TV generations, and reading its source only establishes what
 it intends to do. This establishes what this television does.
 
-    uv run python tools/tv_api_check.py --image <a 4K composite>.jpg
+    uv run --frozen --no-dev python tools/tv_api_check.py --image <a 4K composite>.jpg
 
 It reads the Player's own configuration (`arrt_player.config`), so it runs from
 the Player's checkout with the Player's `.env`. Stop the daemon first, for the

@@ -1,8 +1,21 @@
-"""The one pattern that says a workflow line runs pytest.
+"""What the workflow guards read the CI files for: the patterns, and the readers built on them.
 
-Both `test_assert_tests_ran.py` and `test_ci_scope.py` scan the workflows for it.
+Five things live here, each used by `test_ci_scope.py` and one by
+`test_assert_tests_ran.py` too:
+
+- `PYTEST_INVOCATION`, the one pattern that says a workflow line runs pytest
+  (both tests use it);
+- `unpinned_actions`, every `uses:` that is not a full commit with its tag in a
+  comment (`_USES`, `_COMMIT_PINNED`, `_TAG_COMMENT`);
+- `unpinned_setup_uv`, every `setup-uv` step that leaves the uv or the Python to a
+  default (`_EXACT_VERSION`);
+- `unlocked_uv_calls`, every `uv run` or `uv sync` without `--locked`
+  (`_UV_LOCK_READER`);
+- `dependabot_problems`, what `.github/dependabot.yml` may say.
+
 Two copies of a pattern kept in step by a comment drift the first time one is
-fixed and the other is not, and either drifting skips a CI leg in silence.
+fixed and the other is not, and either drifting skips a CI leg in silence. So each
+is written once, here, and the tests import it.
 """
 
 import re
@@ -107,4 +120,107 @@ def unpinned_setup_uv(text: str) -> list[str]:
             for key in ("version", "python-version")
             if not any(re.fullmatch(rf"\s+{key}:\s*{_EXACT_VERSION}", body_line) for body_line in body)
         )
+    return problems
+
+
+def _yaml_rows(text: str) -> list[tuple[int, str]]:
+    """The lines that say something, as (indent, content): comments and blank lines are gone."""
+    rows = []
+    for raw in text.splitlines():
+        content = "" if raw.lstrip().startswith("#") else raw.split(" #", 1)[0].rstrip()
+        if content.strip():
+            rows.append((len(content) - len(content.lstrip()), content.strip()))
+    return rows
+
+
+def _yaml_scalar(value: str) -> object:
+    value = value.strip()
+    if value[:1] in "[{&*|>!":
+        raise ValueError(f"{value!r} is outside the YAML subset this reader holds")
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return int(value) if value.isdigit() else value
+
+
+def _yaml_block(rows: list[tuple[int, str]], position: int, indent: int) -> tuple[object, int]:
+    """The list or mapping whose lines start at `rows[position]`, at `indent`, and where it ends."""
+    if rows[position][1].startswith("- "):
+        items: list[object] = []
+        while position < len(rows) and rows[position][0] == indent and rows[position][1].startswith("- "):
+            # The dash's own key is the first key of a mapping two columns deeper.
+            rows[position] = (indent + 2, rows[position][1][2:].strip())
+            item, position = _yaml_block(rows, position, indent + 2)
+            items.append(item)
+        return items, position
+    mapping: dict[str, object] = {}
+    while position < len(rows) and rows[position][0] == indent:
+        key, _, value = rows[position][1].partition(":")
+        position += 1
+        if value.strip():
+            mapping[key.strip()] = _yaml_scalar(value)
+        elif position < len(rows) and rows[position][0] > indent:
+            mapping[key.strip()], position = _yaml_block(rows, position, rows[position][0])
+        else:
+            mapping[key.strip()] = None
+    return mapping, position
+
+
+def _read_mapping_tree(text: str) -> object:
+    """A small reader for the YAML subset a Dependabot file uses: mappings, lists of mappings, scalars.
+
+    No YAML library is a dependency of this project, and the file is short. Anything
+    outside the subset (flow collections, anchors, block scalars) is refused rather
+    than read wrongly, so a file this cannot read fails the test that holds it.
+    """
+    rows = _yaml_rows(text)
+    if not rows:
+        return {}
+    tree, end = _yaml_block(rows, 0, rows[0][0])
+    if end != len(rows):
+        raise ValueError(f"line {end + 1} of the file is not where the reader expected the structure to continue")
+    return tree
+
+
+#: The one thing Dependabot watches here, and how often. Everything else is a hand step.
+_DEPENDABOT_ECOSYSTEM = "github-actions"
+_DEPENDABOT_INTERVAL = "monthly"
+
+
+def _dependabot_entry_problems(index: int, entry: object) -> list[str]:
+    if not isinstance(entry, dict):
+        return [f"update {index} is not a mapping"]
+    problems = []
+    ecosystem = entry.get("package-ecosystem")
+    if ecosystem != _DEPENDABOT_ECOSYSTEM:
+        problems.append(
+            f"update {index} watches {ecosystem!r}; only {_DEPENDABOT_ECOSYSTEM!r} is watched, "
+            "and `uv.lock` stays a hand step (a lock update moves the Waveshare pin and the contract's git source)"
+        )
+    if entry.get("directory") != "/":
+        problems.append(
+            f"update {index} has `directory:` {entry.get('directory')!r}, not '/' (where the workflows are read from)"
+        )
+    schedule = entry.get("schedule")
+    interval = schedule.get("interval") if isinstance(schedule, dict) else None
+    if interval != _DEPENDABOT_INTERVAL:
+        problems.append(f"update {index} has `schedule.interval:` {interval!r}, not {_DEPENDABOT_INTERVAL!r}")
+    return problems
+
+
+def dependabot_problems(text: str) -> list[str]:
+    """What is wrong with a `dependabot.yml`: anything but GitHub Actions watched monthly from the root."""
+    try:
+        tree = _read_mapping_tree(text)
+    except ValueError as exc:
+        return [f"the file could not be read: {exc}"]
+    if not isinstance(tree, dict):
+        return ["the file is not a mapping"]
+    problems = [] if tree.get("version") == 2 else [f"`version:` is {tree.get('version')!r}, not 2"]
+    updates = tree.get("updates")
+    if not isinstance(updates, list) or not updates:
+        return [*problems, "`updates:` lists nothing, so no action is watched"]
+    for index, entry in enumerate(updates, start=1):
+        problems.extend(_dependabot_entry_problems(index, entry))
+    if not any(isinstance(entry, dict) and entry.get("package-ecosystem") == _DEPENDABOT_ECOSYSTEM for entry in updates):
+        problems.append(f"no update watches {_DEPENDABOT_ECOSYSTEM!r}, so the pinned actions never learn their tag moved")
     return problems

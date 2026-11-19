@@ -163,7 +163,7 @@ class Feed:
 
     @property
     def theme_id(self) -> str | None:
-        """The playlist, under the name the heartbeat has always given it."""
+        """The theme, under the name the heartbeat has always given it (the contract's `playlist` field is the same thing)."""
         return self.playlist_id
 
     def named(self) -> tuple[str, ...]:
@@ -457,7 +457,7 @@ class Watcher:
 
         self._current = manifest
         log.info(
-            "adopted the feed for playlist %s with %d slots over %d works",
+            "adopted the feed for theme %s with %d slots over %d works",
             manifest.playlist_name or manifest.playlist_id or "(unnamed)",
             len(manifest.slots),
             len(manifest.works),
