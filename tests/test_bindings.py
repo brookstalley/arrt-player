@@ -8,6 +8,7 @@ nobody will ever remove if this process does not.
 
 import logging
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -758,3 +759,479 @@ class TestTheWallOutlivesAStoreFault:
 
         assert display(wall_dir) == ("showing_art", "w1"), "the announced picture was lost to the store fault"
         assert tv.art_mode_reads == reads
+
+
+# -- works nobody hangs any more (issue #18) -----------------------------------
+#
+# A binding is retired when no feed this wall adopted has named its work for 14
+# days of the wall running with a feed: its image is removed from the set through
+# the gated removal, confirmed by the set's own list, and then its row is
+# dropped. The days are counted on the elapsed clock while the Player runs, so a
+# Player switched off, or a wall clock that jumps, retires nothing.
+
+#: One day, in the seconds the test clock moves by.
+DAY = 86400.0
+
+
+def _a_frame(settings, tv: FakeTv, store: DisplayState, clock) -> Wall:
+    """A wall on the Frame over `store`, as `run_frame_wall` builds one."""
+    return frame_wall(settings=settings, tv=tv, state=store, watcher=Watcher(settings.manifest_path), clock=clock.as_clock())
+
+
+async def _a_theme_then_another(daemon: Wall, tv: FakeTv, publish, state: DisplayState) -> dict[str, str]:
+    """Hang w1 and w2, then a theme of w3 alone: w3 is on the wall, w1 and w2 are on the set and named by no feed.
+
+    Returns the content ids of w1 and w2.
+    """
+    publish(["w1", "w2"], interval_seconds=3600)
+    await daemon.tick()  # w1 uploaded and shown, w2 uploaded behind it
+    left = {work_id: state.binding_for(work_id).tv_content_id for work_id in ("w1", "w2")}
+    assert set(left.values()) <= set(tv.holding)
+    publish(["w3"], interval_seconds=3600)
+    await daemon.tick()  # w3 uploaded and shown
+    assert publish.work_of(tv.on_the_wall) == "w3"
+    return left
+
+
+def _a_schema_2_store(path: Path, rows: list[tuple], *, interrupted: bool = False) -> None:
+    """A store as the previous release left it: schema 2, these `tv_binding` rows, one work on the wall.
+
+    `interrupted` leaves it as a migration to 3 cut short after its columns were
+    added: still at schema 2, the new columns present and null.
+    """
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE tv_binding (
+            id TEXT PRIMARY KEY, artwork_id TEXT NOT NULL UNIQUE, tv_content_id TEXT,
+            tv_thumb_md5 TEXT, render_fingerprint TEXT, uploaded_at TEXT NOT NULL,
+            upload_status TEXT NOT NULL CHECK (upload_status IN ('uploaded', 'failed', 'orphaned')),
+            CHECK (upload_status <> 'uploaded' OR tv_content_id IS NOT NULL)
+        );
+        CREATE TABLE daemon_state (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO daemon_state VALUES ('last_selected_work_id', 'w1');
+        PRAGMA user_version = 2;
+        """)
+    connection.executemany(
+        "INSERT INTO tv_binding (id, artwork_id, tv_content_id, tv_thumb_md5, render_fingerprint, uploaded_at, upload_status) "
+        "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+        rows,
+    )
+    if interrupted:
+        connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_feed_seconds REAL")
+        connection.execute("ALTER TABLE tv_binding ADD COLUMN last_named_at TEXT")
+    connection.commit()
+    connection.close()
+
+
+class TestAWorkNobodyHangsLeavesTheSet:
+    async def test_a_work_no_feed_has_named_for_fifteen_days_leaves_the_set_and_the_store(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock, caplog
+    ):
+        """The issue's case: the images of works the household took down stay on the set for good."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        removals = len(tv.removed)
+
+        clock.advance(15 * DAY)
+        with caplog.at_level(logging.INFO):
+            await daemon.tick()
+            await daemon.tick()
+
+        assert not set(left.values()) & set(tv.holding), "a work no feed named for 15 days is still on the set"
+        assert state.binding_for("w1") is None, "a retired work's row is still in the store"
+        assert state.binding_for("w2") is None, "a retired work's row is still in the store"
+        assert tv.removed[removals:] == [tuple(sorted(left.values()))], "the images were not taken off in one removal"
+        kept = state.binding_for("w3").tv_content_id
+        assert kept in tv.holding, "the work on the wall was taken off the set"
+        assert state.accounted_content_ids() == {kept}
+        retired = _store_events(caplog, "binding.retired")
+        assert len(retired) == 1, f"one retirement was said {len(retired)} times"
+        assert sorted(retired[0].retired) == ["w1", "w2"]
+        assert sorted(retired[0].removed) == sorted(left.values())
+
+    async def test_a_theme_switched_away_and_back_within_thirteen_days_uploads_nothing_again(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """Absence from one feed is not retirement: the way back costs no upload of the theme."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        uploads = len(tv.uploaded)
+
+        for _ in range(13):
+            clock.advance(DAY)
+            await daemon.tick()
+        publish(["w1", "w2"], interval_seconds=3600)
+        for _ in range(3):
+            await daemon.tick()
+
+        assert len(tv.uploaded) == uploads, "a work back within 13 days was uploaded again"
+        assert tv.removed == [], "something was taken off the set within 13 days"
+        assert {work_id: state.binding_for(work_id).tv_content_id for work_id in left} == left
+        assert publish.work_of(tv.on_the_wall) == "w1"
+
+    async def test_a_retirement_due_while_the_set_shows_a_programme_is_held_and_done_later(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock, caplog
+    ):
+        """The removal is a write, so the gate holds it while somebody watches, once, without a line a pass."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        clock.advance(15 * DAY)
+        await daemon.tick()  # the retirement falls due
+
+        tv.art_mode = "off"  # somebody's programme; the panel is lit
+        with caplog.at_level(logging.INFO):
+            for _ in range(30):
+                await daemon.tick()
+                clock.advance(1)
+
+        assert set(left.values()) <= set(tv.holding), "a removal reached a set somebody is watching"
+        assert tv.took_the_screen == 0
+        rows = {work_id: binding.tv_content_id for work_id in left if (binding := state.binding_for(work_id)) is not None}
+        assert rows == left, "a held retirement lost its rows"
+        assert set(left.values()) <= state.accounted_content_ids(), "a held retirement's images became orphans"
+        held = _store_events(caplog, "tv.writes_held")
+        assert len(held) == 1, f"a held removal was said {len(held)} times in thirty passes"
+        assert held[0].verb == "remove"
+        assert not _store_events(caplog, "binding.retired")
+        assert not [
+            record for record in caplog.records if record.levelno >= logging.WARNING
+        ], "a held removal was said as a fault"
+
+        tv.art_mode = "on"
+        tv.art_mode_announced = True
+        await daemon.tick()
+
+        assert not set(left.values()) & set(tv.holding), "the held retirement was not made once the set showed art"
+        assert state.binding_for("w1") is None
+        assert state.binding_for("w2") is None
+
+    async def test_a_work_named_again_while_its_retirement_waits_is_kept(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """A retirement held for a programme, and a feed naming w1 again before the set shows art: w1 stays.
+
+        Its last naming is fifteen days old when the feed names it again, so
+        only the feed's naming it now keeps it.
+        """
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        clock.advance(15 * DAY)
+        await daemon.tick()  # the retirement falls due
+        tv.art_mode = "off"
+        await daemon.tick()  # held
+
+        publish(["w1", "w3"], interval_seconds=3600)
+        await daemon.tick()
+        tv.art_mode = "on"
+        tv.art_mode_announced = True
+        await daemon.tick()
+
+        assert left["w1"] in tv.holding, "a work the feed names again was retired"
+        assert left["w2"] not in tv.holding
+
+    async def test_the_work_on_the_wall_is_never_retired(self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock):
+        """A feed that names nothing leaves the wall on what it shows; neither that nor a picture the remote chose goes.
+
+        w1 is the work the Player last put up; w2 is the picture somebody chose
+        with the remote. No feed names either for fifteen days.
+        """
+        publish(["w1", "w2"], interval_seconds=3600)
+        await daemon.tick()
+        chosen = state.binding_for("w2").tv_content_id
+        tv.announce(chosen, is_shown=True)
+        publish([], interval_seconds=3600)
+        await daemon.tick()
+
+        clock.advance(15 * DAY)
+        for _ in range(3):
+            await daemon.tick()
+
+        put_up = state.binding_for("w1")
+        assert put_up is not None, "the work the Player put up lost its row"
+        assert put_up.tv_content_id in tv.holding, "the work the Player put up was retired"
+        assert chosen in tv.holding, "the picture on the wall was retired"
+        assert tv.removed == []
+
+    async def test_an_orphan_and_a_retirement_are_one_removal_and_the_orphan_is_said_as_today(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock, caplog
+    ):
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        clock.advance(15 * DAY)
+        await daemon.tick()  # the retirement falls due
+        tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+        removals = len(tv.removed)
+
+        with caplog.at_level(logging.INFO):
+            await daemon.tick()
+
+        assert tv.removed[removals:] == [("MY-LEGACY-1", *sorted(left.values()))]
+        orphans = _store_events(caplog, "tv.orphans_removed")
+        assert [record.removed for record in orphans] == [["MY-LEGACY-1"]], "the orphan's line names a retired work's image"
+        assert [sorted(record.removed) for record in _store_events(caplog, "binding.retired")] == [sorted(left.values())]
+
+    async def test_an_image_the_set_keeps_is_asked_for_again_only_with_the_next_feed(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """The orphan path's rule: a removal the set answered and refused is a known outcome, re-armed by news."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        tv.unremovable.add(left["w1"])
+        clock.advance(15 * DAY)
+        await daemon.tick()
+        await daemon.tick()
+        assert left["w1"] in tv.holding
+        assert state.binding_for("w1").tv_content_id == left["w1"], "the row of an image the set kept was dropped"
+        assert state.binding_for("w2") is None
+        removals = len(tv.removed)
+
+        for _ in range(5):
+            clock.advance(3600)
+            await daemon.tick()
+        assert len(tv.removed) == removals, "an image the set refused to part with was asked for again every hour"
+
+        tv.unremovable.clear()
+        publish(["w3"], interval_seconds=3600)
+        await daemon.tick()
+        await daemon.tick()
+        assert left["w1"] not in tv.holding, "the next feed did not ask again"
+        assert state.binding_for("w1") is None
+
+
+class TestRetirementIsMeasuredInTimeTheWallWatched:
+    async def test_the_first_start_after_the_upgrade_retires_nothing_for_fourteen_days(
+        self, settings, tv: FakeTv, publish, clock
+    ):
+        """A migration that read every existing binding as never named would empty the set on day one."""
+        rows = [(f"{n}", f"w{n}", f"MY-OLD-{n}", "1:1", "2026-01-01T00:00:00+00:00", "uploaded") for n in range(1, 6)]
+        library = {f"MY-OLD-{n}" for n in range(2, 6)}
+        _a_schema_2_store(settings.state_path, rows)
+        for _, _, content_id, *_ in rows:
+            tv.holding[content_id] = Path(f"/old/{content_id}.jpg")
+        publish(["w1"], interval_seconds=3600)
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            for _ in range(13):
+                await wall.tick()
+                clock.advance(DAY)
+            await wall.tick()
+            assert library <= set(tv.holding), "the upgrade cost the set its library"
+            assert len(store.bindings()) == 5
+
+            for _ in range(2):
+                clock.advance(DAY)
+                await wall.tick()
+            await wall.tick()
+            assert not library & set(tv.holding), "fourteen days after the upgrade the works no feed named are still there"
+            assert [binding.artwork_id for binding in store.bindings()] == ["w1"]
+
+    async def test_a_player_switched_off_for_a_month_counts_none_of_it(self, settings, tv: FakeTv, publish, clock):
+        """Thirty days off is not thirty days of nobody hanging the work, and a restart keeps the days already counted."""
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            left = await _a_theme_then_another(wall, tv, publish, store)
+            for _ in range(10):
+                clock.advance(DAY)
+                await wall.tick()
+
+        clock.advance(30 * DAY)  # switched off: both clocks move, and a new boot's elapsed clock starts again
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            for _ in range(3):
+                await wall.tick()
+                clock.advance(DAY)
+            await wall.tick()
+            assert set(left.values()) <= set(tv.holding), "days the Player was off were counted as days nobody hung the work"
+
+            for _ in range(2):
+                clock.advance(DAY)
+                await wall.tick()
+            await wall.tick()
+            assert not set(left.values()) & set(tv.holding), "the days counted before the restart were lost"
+
+    async def test_a_wall_clock_that_jumps_forward_retires_nothing(self, daemon: Wall, tv: FakeTv, publish, state, clock):
+        """An NTP step on a Pi with no clock of its own moves wall time by years; no work has gone unnamed for them."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+
+        clock.move_to(clock.as_clock().now() + timedelta(days=30))
+        publish(["w3"], interval_seconds=3600)  # a republish, so the reconciliation that would retire them runs
+        for _ in range(3):
+            await daemon.tick()
+
+        assert set(left.values()) <= set(tv.holding), "a jump of the wall clock retired works"
+        assert tv.removed == []
+
+    async def test_a_binding_whose_last_naming_is_unknown_is_never_retired(self, daemon: Wall, tv: FakeTv, publish, state, clock):
+        """A row an older Player wrote carries no time; it is kept rather than read as never named."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        clock.advance(7200)
+        await daemon.tick()  # the time w1 and w2 left the feed is saved
+        state._connection.execute("UPDATE tv_binding SET last_named_feed_seconds = NULL WHERE artwork_id = 'w1'")
+        state._connection.commit()
+
+        clock.advance(15 * DAY)
+        for _ in range(3):
+            await daemon.tick()
+
+        assert left["w1"] in tv.holding, "a binding with no time was read as never named"
+        assert left["w2"] not in tv.holding
+
+
+class TestTheStoreKeepsWhenAWorkWasLastNamed:
+    @pytest.mark.parametrize("interrupted", [False, True], ids=["at-schema-2", "a-migration-cut-short"])
+    def test_a_store_at_the_previous_schema_migrates_forward_and_keeps_every_binding(self, settings, clock, interrupted: bool):
+        from arrt_player.state.store import SCHEMA_VERSION
+
+        rows = [
+            ("1", "w1", "MY-F0001", "10:20", "2026-01-01T00:00:00+00:00", "uploaded"),
+            ("2", "w2", None, None, "2026-01-02T00:00:00+00:00", "failed"),
+            ("3", "w3", None, None, "2026-01-03T00:00:00+00:00", "orphaned"),
+        ]
+        _a_schema_2_store(settings.state_path, rows, interrupted=interrupted)
+
+        for _ in range(2):
+            with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+                kept = {binding.artwork_id: binding for binding in store.bindings()}
+                assert store.last_selected_work_id == "w1"
+                assert store.feed_seconds == 0.0
+
+        assert sorted(kept) == ["w1", "w2", "w3"], "a binding was lost by the migration"
+        for _, work_id, content_id, fingerprint, uploaded_at, status in rows:
+            binding = kept[work_id]
+            assert (
+                binding.tv_content_id,
+                binding.render_fingerprint,
+                binding.uploaded_at.isoformat(),
+                str(binding.upload_status),
+            ) == (
+                content_id,
+                fingerprint,
+                uploaded_at,
+                status,
+            )
+            assert binding.last_named_feed_seconds == 0.0, "an existing binding was not read as named at the upgrade"
+            assert binding.last_named_at == clock.as_clock().now()
+        with sqlite3.connect(settings.state_path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
+        assert SCHEMA_VERSION == 3
+
+    def test_the_wall_time_a_store_counted_survives_reopening_and_a_new_row_is_named_at_it(self, settings, clock):
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            store.count_feed_time(5000.0)
+            store.save_feed_time(named=[], left={})
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            assert store.feed_seconds == 5000.0
+            store.count_feed_time(10.0)
+            binding = store.record_upload("w1", "MY-F0001")
+            assert binding.last_named_feed_seconds == 5010.0
+            assert store.binding_for("w1").last_named_feed_seconds == 5010.0
+
+    def test_saving_names_what_the_feed_names_and_keeps_the_later_of_two_times(self, state: DisplayState):
+        state.record_upload("w1", "MY-F0001")
+        state.record_upload("w2", "MY-F0002")
+        state.record_upload("w3", "MY-F0003")
+        state.count_feed_time(100.0)
+
+        state.save_feed_time(named=["w1"], left={"w2": 40.0, "w3": -1.0})
+
+        assert state.binding_for("w1").last_named_feed_seconds == 100.0
+        assert state.binding_for("w2").last_named_feed_seconds == 40.0
+        assert state.binding_for("w3").last_named_feed_seconds == 0.0, "an earlier time replaced a later one"
+
+    def test_a_count_that_does_not_read_as_a_number_counts_from_nought(self, settings, clock, caplog):
+        """Nought can only make a work look named more recently than it was, so it delays a retirement and never hastens one."""
+        with DisplayState(settings.state_path) as store:
+            store.count_feed_time(9000.0)
+            store.save_feed_time(named=[], left={})
+        with sqlite3.connect(settings.state_path) as connection:
+            connection.execute("UPDATE daemon_state SET value = 'lots' WHERE key = 'feed_seconds'")
+
+        with caplog.at_level(logging.WARNING), DisplayState(settings.state_path) as store:
+            assert store.feed_seconds == 0.0
+        assert len(_store_events(caplog, "store.feed_time_unreadable")) == 1
+
+    def test_a_row_is_retired_only_while_it_still_names_the_image_removed(self, state: DisplayState):
+        """The row goes only if it still names what was taken off the set, so a re-upload in between is never lost."""
+        state.record_upload("w1", "MY-F0002")
+
+        assert state.retire("w1", "MY-F0001") is False
+        assert state.binding_for("w1").tv_content_id == "MY-F0002"
+        assert state.retire("w1", "MY-F0002") is True
+        assert state.binding_for("w1") is None
+        state.record_upload_failure("w2")
+        assert state.retire("w2", None) is True
+
+
+class TestTheCountCostsTheCardOneWriteAnHour:
+    async def test_a_steady_wall_writes_the_count_once_an_hour_and_not_once_a_pass(
+        self, daemon: Wall, publish, state: DisplayState, clock
+    ):
+        """The store is on an SD card: a pass that changes nothing writes nothing, and the count is written hourly."""
+        publish(["w1", "w2"], interval_seconds=7200)
+        await daemon.tick()
+        await daemon.tick()
+        spy = _arm(state, lambda: AssertionError("not raised"), failing=lambda _statement: False)
+        statements: list[str] = []
+        spy.execute = lambda statement, parameters=(): statements.append(statement) or spy._connection.execute(
+            statement, parameters
+        )
+
+        for _ in range(59):
+            clock.advance(60)
+            await daemon.tick()
+        writes = [statement for statement in statements if not statement.lstrip().upper().startswith("SELECT")]
+        assert writes == [], f"a steady wall wrote to the store within the hour: {writes}"
+
+        clock.advance(60)
+        await daemon.tick()
+        writes = [statement for statement in statements if not statement.lstrip().upper().startswith("SELECT")]
+        assert any("feed_seconds" in statement for statement in writes), "the count was not written after an hour"
+        assert len([statement for statement in writes if "daemon_state" in statement]) == 1
+
+
+class TestARetirementOutlivesAStoreFault:
+    async def test_a_removal_whose_row_could_not_be_dropped_is_not_sent_again(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock, caplog
+    ):
+        """The set took the image off and the store could not drop the row: the set's list says it is gone, which is success."""
+        left = await _a_theme_then_another(daemon, tv, publish, state)
+        clock.advance(15 * DAY)
+        await daemon.tick()  # the retirement falls due
+        armed = _arm(
+            state,
+            lambda: _sqlite_error("SQLITE_BUSY", "database is locked"),
+            failing=lambda s: s.startswith("DELETE FROM tv_binding"),
+            times=1,
+        )
+
+        with caplog.at_level(logging.INFO):
+            await daemon.tick()
+            assert not set(left.values()) & set(tv.holding)
+            removals = list(tv.removed)
+            _disarm(state, armed)
+            clock.advance(1)
+            await daemon.tick()
+
+        assert len(_store_events(caplog, "store.busy")) == 1
+        assert tv.removed == removals, "a removal the set had already made was sent again"
+        assert state.binding_for("w1") is None
+        assert state.binding_for("w2") is None
+        assert [record for record in _store_events(caplog, "binding.retired") if record.retired]
+
+    async def test_a_retired_rows_image_another_work_now_holds_is_not_removed(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """A row left behind names an id the set has since given another work's upload: only the row goes.
+
+        w2 is named by the feed and is not on the wall, so nothing but the
+        shared id protects its picture.
+        """
+        publish(["w1", "w2"], interval_seconds=3600)
+        await daemon.tick()  # w1 up; w2 uploaded behind it
+        shared = state.binding_for("w2").tv_content_id
+        state.record_upload("w9", shared)  # a stale row for a work no feed names, under the same id
+
+        clock.advance(15 * DAY)
+        for _ in range(3):
+            await daemon.tick()
+
+        assert shared in tv.holding, "a named work's image was removed for another work's stale row"
+        assert tv.removed == []
+        assert state.binding_for("w9") is None, "the stale row was kept"
+        assert state.binding_for("w2").tv_content_id == shared
