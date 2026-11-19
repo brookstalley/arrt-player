@@ -32,11 +32,18 @@ say, answers 304. So the last document is kept, and the walls are matched to it
 again whenever the outputs differ from the ones it was last matched against.
 
 **A wall that leaves its screen leaves it dark; a client that stops does not.**
-A worker is told why it was stopped (`WallStop`): retired, when the document no
+A worker is told why it was stopped (`WorkerStop`): retired, when the document no
 longer places its wall on that output, so a screen wall draws black there rather
 than going on showing a work the server now says nobody shows; or merely
 stopped, when the client is going down or the output itself is gone, which
-leave the screen as it is.
+leave the screen as it is. A label renderer is told the same way, by the same
+type: retired when its label output is no longer mapped, so the panel is left
+blank.
+
+**A label's cached document goes when nothing maps its label any more.** The
+supervisor hands the ids the current document maps to the entry point's
+`forget_labels` at each match and as each renderer finishes stopping; it is
+never called before a document has been read.
 
 **A worker that fails is restarted here rather than taking the process down.**
 One process drives every wall this client has, so a fault in one wall's worker
@@ -423,15 +430,26 @@ class ClientLink(Protocol):
     async def close(self) -> None: ...
 
 
-class WallStop(asyncio.Event):
-    """The event that stops a wall's worker, and why it was set.
+class WorkerStop(asyncio.Event):
+    """The event that stops a wall's worker or a label's renderer, and why it was set.
 
-    **The reason rides on the event**, so a worker stays a three-argument
-    callable and one that has no use for the reason need not take it. `retired`
-    is true when the document no longer places the wall on the output its worker
-    runs on (taken away, or moved to another), and false when the client is
-    stopping or the document still places the wall there (an output gone from
-    this client, or one the server also gave another wall).
+    **The one way either is told it is retired.** The reason rides on the event,
+    so a worker that has no use for it need not take it, and `retired` is set
+    before the event is, so whatever wakes on the event reads the reason it was
+    set for. It is true when the document no longer places what the worker runs
+    on its output: a wall taken away or moved to another output, or a label
+    output no longer mapped at all. It is false when the client is stopping, or
+    when the document still places it there: an output gone from this client,
+    one the server also gave another wall, or a label output now mapped to
+    another wall or label. Once true it stays true.
+
+    **Called once more, already stopped and retired.** A retirement that lands
+    while the worker waits to be restarted after a failure finds nothing running
+    to see it. So the supervisor calls the worker once more with this event
+    already set and `retired` true, so that what it does on leaving its output
+    (a screen drawn black, a label panel left blank) still happens; it must then
+    do only that, and return, saying nothing of starting. A stop that is not a
+    retirement is never followed by such a call.
     """
 
     def __init__(self) -> None:
@@ -439,42 +457,42 @@ class WallStop(asyncio.Event):
         self.retired = False
 
     def retire(self) -> None:
-        """Stop the worker because its wall has left its output."""
+        """Stop the worker because what it runs has left its output."""
         self.retired = True
         self.set()
 
 
-def wall_retired(stop: asyncio.Event) -> bool:
-    """Whether `stop` stopped a worker because its wall left its output. False for a plain event."""
-    return isinstance(stop, WallStop) and stop.retired
+def is_retired(stop: asyncio.Event) -> bool:
+    """Whether `stop` stopped a worker because what it runs left its output. False for a plain event."""
+    return isinstance(stop, WorkerStop) and stop.retired
 
 
 #: What runs one wall: given its settings, the output it is on, and the event
-#: that stops it (a `WallStop`), run until stopped. It may raise; the supervisor
-#: restarts it. **Called once more with the event already set** when the wall is
-#: retired while the worker waits to be restarted after a failure, so that it can
-#: leave its output as retirement asks; it must then do only that, and return.
-Worker = Callable[[WallSettings, OutputReport, asyncio.Event], Awaitable[None]]
+#: that stops it (a `WorkerStop`), run until stopped. It may raise; the
+#: supervisor restarts it. Called once more as `WorkerStop` says.
+Worker = Callable[[WallSettings, OutputReport, WorkerStop], Awaitable[None]]
 
-#: What runs one label output: given its assignment, the event that stops it and
-#: the event set beside it when the mapping went (rather than the client
-#: stopping), run until stopped. It may raise; the supervisor restarts it. Called
-#: once more, already stopped and retired, as a `Worker` is.
-LabelWorker = Callable[[LabelAssignment, asyncio.Event, asyncio.Event], Awaitable[None]]
+#: What runs one label output: given its assignment and the event that stops it
+#: (a `WorkerStop`), run until stopped. It may raise; the supervisor restarts it.
+#: Called once more as `WorkerStop` says.
+LabelWorker = Callable[[LabelAssignment, WorkerStop], Awaitable[None]]
+
+#: Given every label id the current client document maps, remove what this
+#: client cached for any other. Never raises.
+ForgetLabels = Callable[[frozenset[str]], None]
 
 
 @dataclass
 class _Running:
     assignment: Assignment
-    stop: WallStop
+    stop: WorkerStop
     task: asyncio.Task[None]
 
 
 @dataclass
 class _RunningLabel:
     assignment: LabelAssignment
-    stop: asyncio.Event
-    retired: asyncio.Event
+    stop: WorkerStop
     task: asyncio.Task[None]
 
 
@@ -492,6 +510,7 @@ class Supervisor:
         monotonic: Callable[[], float],
         label_worker: LabelWorker | None = None,
         label_outputs: Callable[[], list[LabelOutputReport]] = list,
+        forget_labels: ForgetLabels | None = None,
         frame_identity: FrameIdentity | None = None,
         restart_min_seconds: float = RESTART_MIN_SECONDS,
         restart_max_seconds: float = RESTART_MAX_SECONDS,
@@ -502,6 +521,7 @@ class Supervisor:
         self._outputs = outputs
         self._label_worker = label_worker
         self._label_outputs = label_outputs
+        self._forget_labels = forget_labels
         self._frame_identity = frame_identity
         self._now = now
         self._monotonic = monotonic
@@ -623,6 +643,7 @@ class Supervisor:
             self._start(wall, assignment, available[assignment.output])
 
         self._reconcile_labels(document, {output.name for output in outputs[1]})
+        self._forget_unmapped_labels()
 
     # -- the labels -----------------------------------------------------------------
 
@@ -655,8 +676,20 @@ class Supervisor:
             if output not in self._labels:
                 self._start_label(label)
 
+    def _forget_unmapped_labels(self, _finished: object = None) -> None:
+        """Remove what is cached for every label the document does not map, once a document has been read.
+
+        **Again as each renderer finishes stopping**, because one stopped while
+        its poll was under way may write its document after the match removed
+        it. A label the document still maps keeps its file, on whichever output
+        it is now, so a label moved between this client's outputs starts from it.
+        """
+        if self._forget_labels is None or self._document is None:
+            return
+        self._forget_labels(frozenset(label.label_id for label in self._document.labels))
+
     def _start_label(self, label: LabelAssignment) -> None:
-        stop, retired = asyncio.Event(), asyncio.Event()
+        stop = WorkerStop()
         worker = self._label_worker
         assert worker is not None  # noqa: S101 -- reconcile returns before here without one
         # After every renderer still stopping, for the reason walls wait: two
@@ -664,17 +697,16 @@ class Supervisor:
         stopping = tuple(self._stopping)
         task = asyncio.create_task(
             self._keep_running(
-                lambda: worker(label, stop, retired),
+                lambda: worker(label, stop),
                 stop,
                 what=f"the renderer for label {label.label_id} on {label.output}",
                 event="client.label",
                 extra={"label_id": label.label_id, "output": label.output, "wall_id": label.wall_id},
                 after=stopping,
-                is_retired=retired.is_set,
             ),
             name=f"label:{label.output}",
         )
-        self._labels[label.output] = _RunningLabel(assignment=label, stop=stop, retired=retired, task=task)
+        self._labels[label.output] = _RunningLabel(assignment=label, stop=stop, task=task)
         self._reported_unplaceable_labels = {key for key in self._reported_unplaceable_labels if key[0] != label.label_id}
         log.info(
             "captioning wall %s with label %s on %s",
@@ -687,10 +719,12 @@ class Supervisor:
     def _stop_label(self, output: str, *, retired: bool) -> None:
         running = self._labels.pop(output)
         if retired:
-            running.retired.set()
-        running.stop.set()
+            running.stop.retire()
+        else:
+            running.stop.set()
         self._stopping.add(running.task)
         running.task.add_done_callback(self._stopping.discard)
+        running.task.add_done_callback(self._forget_unmapped_labels)
         log.info(
             "label %s on %s %s; stopping its renderer",
             running.assignment.label_id,
@@ -701,6 +735,7 @@ class Supervisor:
                 "label_id": running.assignment.label_id,
                 "output": output,
                 "wall_id": running.assignment.wall_id,
+                "retired": running.stop.retired,
             },
         )
 
@@ -721,7 +756,7 @@ class Supervisor:
     # -- starting and stopping --------------------------------------------------------
 
     def _start(self, wall: WallSettings, assignment: Assignment, output: OutputReport) -> None:
-        stop = WallStop()
+        stop = WorkerStop()
         # **After every worker still stopping has finished.** A wall moved to
         # another output would otherwise run two workers on its one directory for
         # a moment, and an output handed from one wall to another two workers on
@@ -736,7 +771,6 @@ class Supervisor:
                 event="client.worker",
                 extra={"wall_id": wall.wall_id, "output": assignment.output},
                 after=stopping,
-                is_retired=lambda: stop.retired,
             ),
             name=f"wall:{wall.wall_id}",
         )
@@ -811,13 +845,12 @@ class Supervisor:
     async def _keep_running(
         self,
         run: Callable[[], Awaitable[None]],
-        stop: asyncio.Event,
+        stop: WorkerStop,
         *,
         what: str,
         event: str,
         extra: dict[str, str],
         after: tuple[asyncio.Task[None], ...] = (),
-        is_retired: Callable[[], bool] = lambda: False,
     ) -> None:
         """Run one worker or renderer until stopped, starting it again whenever it fails.
 
@@ -825,10 +858,8 @@ class Supervisor:
         `_crashed`, `_ended` and `_retire_failed`.
 
         **A stop that lands between runs, while the wait before a restart is
-        under way, finds nothing running to see it.** When that stop is a
-        retirement, the worker is called once more with its stop already set, so
-        that what it does on leaving its output (a screen drawn black, a label
-        left blank) still happens; it returns without running. A stop during a
+        under way, finds nothing running to see it**, so a retirement then is
+        answered with the once-more call `WorkerStop` describes. A stop during a
         run is seen by that run, and a stop before the first run has nothing of
         this worker's on the output to leave.
         """
@@ -836,7 +867,7 @@ class Supervisor:
             await asyncio.gather(*after, return_exceptions=True)
         if stop.is_set():
             return
-        if not await self._restart_until_stopped(run, stop, what=what, event=event, extra=extra) or not is_retired():
+        if not await self._restart_until_stopped(run, stop, what=what, event=event, extra=extra) or not stop.retired:
             return
         try:
             await run()

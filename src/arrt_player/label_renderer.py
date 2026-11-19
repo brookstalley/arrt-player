@@ -33,7 +33,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Final, Protocol
 
-from arrt_player.client import EPAPER_KIND, LabelAssignment, LabelOutputReport
+from arrt_player.client import EPAPER_KIND, LabelAssignment, LabelOutputReport, is_retired
 from arrt_player.episodes import ReportOnce
 from arrt_player.label_rule import Drawing, LabelDocument, Outcome, drawing_for, offline
 from arrt_player.logs import work_context
@@ -356,32 +356,47 @@ class LabelRenderer:
         #: second: it gets its next chance when the drawing next changes.
         self._attempted: Drawing | None = None
 
-    async def run(self, stop: asyncio.Event, retired: asyncio.Event) -> None:
-        """Poll and draw until stopped; a retired renderer leaves its panel blank."""
-        log.info(
-            "label %s on %s captions wall %s",
-            self._assignment.label_id,
-            self._assignment.output,
-            self._assignment.wall_id,
-            extra={
-                "event": "label.renderer_started",
-                "label_id": self._assignment.label_id,
-                "output": self._assignment.output,
-                "wall_id": self._assignment.wall_id,
-            },
-        )
+    async def run(self, stop: asyncio.Event) -> None:
+        """Poll and draw until stopped; retired (`client.WorkerStop`), leave the panel blank.
+
+        **Called already stopped, it starts nothing and says nothing of
+        starting**: that is the supervisor's once-more call for a label unmapped
+        while its renderer waited to be restarted, and all it does is the blank.
+        """
         try:
+            if stop.is_set():
+                return
+            log.info(
+                "label %s on %s captions wall %s",
+                self._assignment.label_id,
+                self._assignment.output,
+                self._assignment.wall_id,
+                extra={"event": "label.renderer_started", **self._fields()},
+            )
             while not stop.is_set():
                 await self.tick()
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=self._poll)
         finally:
-            if retired.is_set():
+            if is_retired(stop):
                 # **The mapping went, so the panel captions no wall.** Left as it
                 # was, it would go on naming a picture on a wall it no longer
                 # belongs to, confidently and for good.
+                log.info(
+                    "label %s on %s captions no wall now; leaving the panel blank",
+                    self._assignment.label_id,
+                    self._assignment.output,
+                    extra={"event": "label.renderer_retired", **self._fields()},
+                )
                 await self._show(Drawing(Outcome.BLANK, state="unmapped"))
             await self._link.close()
+
+    def _fields(self) -> dict[str, str]:
+        return {
+            "label_id": self._assignment.label_id,
+            "output": self._assignment.output,
+            "wall_id": self._assignment.wall_id,
+        }
 
     async def tick(self) -> None:
         """One poll: ask for the document, decide, and draw if the decision changed."""
