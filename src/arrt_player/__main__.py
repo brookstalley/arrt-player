@@ -58,7 +58,6 @@ import sys
 import time
 from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
-from pathlib import Path
 
 from arrt_player import logs
 from arrt_player.client import (
@@ -314,18 +313,6 @@ async def run_label(
     await renderer.run(stop)
 
 
-def label_cache_file(link: LabelPull) -> Path | None:
-    """Where `link` caches its label's document, or None for an id it will not cache.
-
-    **Learned from the pull, never derived beside it**, so the file removed is
-    the file written: one rule for a label id's path, in `pull.LabelPull`.
-    """
-    # `LabelPull` exposes no public path, and `pull.py` is the one module that
-    # names it; this is the only reader, so a public accessor there replaces
-    # exactly this line.
-    return link._cache_path  # noqa: SLF001 -- the pull owns the path; see above
-
-
 class LabelCacheSweep:
     """Removes the cached documents of labels the current client document does not map (`Supervisor`'s `forget_labels`).
 
@@ -346,7 +333,7 @@ class LabelCacheSweep:
         self._unsweepable = ReportOnce()
 
     def __call__(self, mapped: Collection[str]) -> None:
-        kept = {path for label_id in mapped if (path := label_cache_file(LabelPull(self._settings, label_id))) is not None}
+        kept = {path for label_id in mapped if (path := LabelPull(self._settings, label_id).cache_path) is not None}
         try:
             found = [entry for entry in self._directory.iterdir() if entry not in kept and entry.is_file()]
             for entry in found:

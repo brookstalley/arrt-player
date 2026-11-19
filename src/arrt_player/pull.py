@@ -1000,6 +1000,16 @@ class LabelPull:
             return LabelAnswer(reachable=True)
         return await self._ask(self._url)
 
+    @property
+    def cache_path(self) -> Path | None:
+        """Where this pull caches its label's document, or None for an id it will not cache.
+
+        **The one rule for a label id's file**: whatever removes a label's cached
+        document (`__main__.LabelCacheSweep`) learns the path here, never derives
+        it beside this, so the file removed is the file written.
+        """
+        return self._cache_path
+
     def cached(self) -> CachedLabel | None:
         """The last document accepted for this label and when the server last answered, or None if there is none it can read.
 

@@ -359,7 +359,7 @@ async def test_nothing_is_removed_while_the_client_document_is_unreadable_or_abs
 def test_the_sweep_keeps_what_a_mapped_label_reads_and_removes_the_rest(labels_only):
     directory = labels_only.cache_dir / LABEL_CACHE_DIRNAME
     directory.mkdir(parents=True)
-    mapped = entry.label_cache_file(LabelPull(labels_only, "label-1"))
+    mapped = LabelPull(labels_only, "label-1").cache_path
     assert mapped is not None
     mapped.write_text("{}")
     other = directory / "label-2.json"
