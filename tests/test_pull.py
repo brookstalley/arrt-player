@@ -12,11 +12,13 @@ away must change nothing about what is on the wall.
 """
 
 import asyncio
+import errno
 import hashlib
 import json
 import logging
 import os
 from dataclasses import replace
+from datetime import timedelta
 
 import aiohttp
 import pytest
@@ -42,6 +44,7 @@ from arrt_player.pull import (
     LABEL_ROUTE,
     MANIFEST_MAJOR_ROUTE,
     MEDIA_DIRNAME,
+    CachedLabel,
     ClientPull,
     LabelAnswer,
     LabelPull,
@@ -53,6 +56,9 @@ from arrt_player.pull import (
 HOLD_SECONDS = 10 * 60
 #: The most of a client or label document the Player reads: 1 MiB, likewise.
 DOCUMENT_CAP_BYTES = 1024 * 1024
+#: How often a cached label document is stamped as answered while the server
+#: sends nothing new: a minute, likewise.
+LABEL_STAMP_SECONDS = 60
 
 
 @pytest.fixture
@@ -880,6 +886,155 @@ async def test_a_label_id_that_is_not_a_plain_path_component_is_refused_by_name_
     assert first == second == LabelAnswer(reachable=True)
     (refused,) = [record for record in caplog.records if record.__dict__.get("event") == "label.id_unusable"]
     assert repr(label_id) in refused.getMessage()
+
+
+# -- the label's cache ------------------------------------------------------------------------
+
+
+def _showing_art() -> dict:
+    return json.loads((CONTRACT / "fixtures" / "label.v1" / "valid" / "showing-art.json").read_text())
+
+
+def _label_link(stub, client_settings, clock, label_id: str = "l-hall") -> LabelPull:
+    return LabelPull(
+        replace(client_settings, server_url=stub.url),
+        label_id,
+        now=clock.as_clock().now,
+        monotonic=clock.as_clock().monotonic,
+    )
+
+
+def _files_under(root) -> set:
+    return {path for path in root.rglob("*") if path.is_file()}
+
+
+async def _cache_one_label(stub, client_settings, clock):
+    """Fetch one label document through a link, and return what it answered and the one file it wrote."""
+    stub.map_label("l-hall", "epd-0", WALL_ID, _showing_art())
+    before = _files_under(client_settings.cache_dir)
+    link = _label_link(stub, client_settings, clock)
+    try:
+        answer = await link.fetch()
+    finally:
+        await link.close()
+    (written,) = _files_under(client_settings.cache_dir) - before
+    return answer, written
+
+
+async def test_an_accepted_label_document_is_cached_and_a_new_link_starts_from_it(stub, client_settings, clock):
+    answer, _ = await _cache_one_label(stub, client_settings, clock)
+    clock.advance(17.3)
+
+    restarted = _label_link(stub, client_settings, clock)
+
+    assert answer.document is not None
+    answered_at = clock.as_clock().now() - timedelta(seconds=17.3)
+    assert restarted.cached() == CachedLabel(document=answer.document, answered_at=answered_at)
+
+
+async def test_the_cached_document_is_stamped_as_answered_once_a_minute_while_the_server_sends_nothing_new(
+    stub, client_settings, clock
+):
+    stub.map_label("l-hall", "epd-0", WALL_ID, _showing_art())
+    link = _label_link(stub, client_settings, clock)
+    first = clock.as_clock().now()
+    try:
+        await link.fetch()
+        clock.advance(LABEL_STAMP_SECONDS - 22.7)
+        not_modified = await link.fetch()
+        stamped_early = link.cached()
+        clock.advance(23.9)
+        await link.fetch()
+        stamped_later = link.cached()
+    finally:
+        await link.close()
+
+    assert not_modified == LabelAnswer(reachable=True), "the second request was not a 304"
+    assert stamped_early is not None
+    assert stamped_early.answered_at == first, "the stamp was moved more often than once a minute"
+    assert stamped_later is not None
+    assert stamped_later.answered_at == clock.as_clock().now(), "a 304 a minute on did not stamp the cached document"
+
+
+async def test_a_document_this_reader_refuses_leaves_the_cached_one(stub, client_settings, clock):
+    answer, _ = await _cache_one_label(stub, client_settings, clock)
+    stub.label_documents["l-hall"] = {**_showing_art(), "schema": {"major": 2, "minor": 0}}
+    link = _label_link(stub, client_settings, clock)
+    try:
+        refused = await link.fetch()
+    finally:
+        await link.close()
+
+    assert refused == LabelAnswer(reachable=True)
+    kept = _label_link(stub, client_settings, clock).cached()
+    assert kept is not None
+    assert kept.document == answer.document
+
+
+async def test_a_document_that_cannot_be_cached_takes_the_last_one_with_it(stub, client_settings, clock, caplog, monkeypatch):
+    """Left in place, the last one would be held by a restart as the server's latest, which may say the screen is dark."""
+    await _cache_one_label(stub, client_settings, clock)
+
+    def disk_full(path, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(pull_module, "_write_atomically", disk_full)
+    dark = {**_showing_art(), "display_state": {"state": "dark", "work_id": None, "since": None}, "label": None}
+    stub.label_documents["l-hall"] = dark
+    link = _label_link(stub, client_settings, clock)
+    try:
+        with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
+            answer = await link.fetch()
+    finally:
+        await link.close()
+
+    assert answer.document is not None
+    assert answer.document.state == "dark", "a document that could not be cached was not handed to the renderer"
+    assert _label_link(stub, client_settings, clock).cached() is None, "the document the server replaced is still cached"
+    assert [record.__dict__.get("event") for record in caplog.records] == ["label.cache_unwritable"]
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        pytest.param(lambda path: path.write_text("{not json", encoding="utf-8"), id="not JSON"),
+        pytest.param(
+            lambda path: path.write_text(json.dumps({**_showing_art(), "schema": {"major": 2, "minor": 0}}), encoding="utf-8"),
+            id="another major",
+        ),
+        pytest.param(lambda path: path.write_bytes(b"\xff\xfe{"), id="not UTF-8"),
+        pytest.param(lambda path: (path.unlink(), path.mkdir()), id="a directory"),
+    ],
+)
+async def test_an_unreadable_cached_document_is_absent_and_the_next_link_asks_for_the_whole_document(
+    stub, client_settings, clock, caplog, spoil
+):
+    _, written = await _cache_one_label(stub, client_settings, clock)
+    spoil(written)
+
+    link = _label_link(stub, client_settings, clock)
+    try:
+        with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+            cached = link.cached()
+        answer = await link.fetch()
+    finally:
+        await link.close()
+
+    assert cached is None
+    # A directory in the file's place cannot be written over either, which the
+    # fetch says in a line of its own.
+    assert [record.__dict__.get("event") for record in caplog.records].count("label.cache_unreadable") == 1
+    assert answer.document is not None, "the link asked with an ETag for a document it does not hold"
+
+
+async def test_a_label_id_that_is_not_a_plain_component_reads_no_cached_file(stub, client_settings, clock):
+    """Put into a path, "../x" would name a file beside the label cache rather than in it."""
+    _, written = await _cache_one_label(stub, client_settings, clock)
+    planted = written.parent / ".." / "x.json"
+    planted.write_bytes(written.read_bytes())
+
+    assert _label_link(stub, client_settings, clock, label_id="x").cached() is None, "the plant is where a plain id caches"
+    assert _label_link(stub, client_settings, clock, label_id="../x").cached() is None
 
 
 # -- the token -------------------------------------------------------------------------------
