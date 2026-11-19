@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from fakes import FakeTv
+from PIL import Image
 
 from arrt_player.displays.frame import frame_wall
 from arrt_player.manifest import Watcher
@@ -182,13 +183,14 @@ class TestUploading:
         await daemon.tick()
         first = state.binding_for("w1").tv_content_id
 
-        publish.picture("w1").write_bytes(b"a different composition entirely")
+        Image.new("RGB", (8, 8), (255, 0, 0)).save(publish.picture("w1"), format="JPEG")
+        different = publish.picture("w1").read_bytes()
         clock.advance(10)
         await daemon.tick()
 
         rebound = state.binding_for("w1")
         assert rebound.tv_content_id != first, "the television was never told the render changed"
-        assert tv.holding[rebound.tv_content_id].read_bytes() == b"a different composition entirely"
+        assert tv.holding[rebound.tv_content_id].read_bytes() == different
 
     async def test_a_work_whose_render_is_untouched_is_not_sent_again(
         self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
