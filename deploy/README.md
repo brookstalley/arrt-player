@@ -676,7 +676,7 @@ nothing warns that one is owed. Diff before restarting:
 
 **A wall has to exist before `WALL_ID` can name one.** The revision that made
 manifests per-wall also made `WALL_ID` required, and the id is a UUID minted when
-the wall is created — so there is an ordering: set `WALL_NAME` and start the
+the wall is created — so there is an ordering: set `WALL_NAME` and start
 the server, which establishes the wall and carries whatever theme was active
 onto it; read the id back from `curl -s localhost:"$CURATION_PORT"/api/walls`; put
 it in `.env`; then start the Player. Starting the Player first gets
@@ -966,7 +966,7 @@ measured from what was inferred.)*
 Findings in `.prawduct/artifacts/platform-and-dependency-findings.md` § The
 television. Run it yourself after any change to the pins or the set's firmware:
 
-    cd arrt-player && uv run python tools/tv_api_check.py --image "<any 3840x2160 JPEG>"
+    cd arrt-player && uv run --frozen --no-dev python tools/tv_api_check.py --image "<any 3840x2160 JPEG>"
 
 That exercises upload, callback registration, and a confirmed delete against the
 live set, touching only the image it uploads itself, and exits non-zero if any
