@@ -17,6 +17,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import replace
@@ -26,6 +27,7 @@ from typing import Self
 import pytest
 from fakes import FakeMonitor
 from test_mpv import Bench, alive, wait_until
+from test_notify import Listener, notification_socket
 
 from arrt_player import __main__ as entry
 from arrt_player.config import Location, PanelSettings, ScreenBrightnessSettings, SlideshowSettings, UiSettings
@@ -33,6 +35,7 @@ from arrt_player.dwell import DwellLimits
 from arrt_player.label_rule import Drawing
 from arrt_player.label_rule import Outcome as LabelOutcome
 from arrt_player.mpv import Loaded, NotShown
+from arrt_player.notify import Notifier, Watchdog
 from arrt_player.panel import read_label
 from arrt_player.programmes.slideshow import (
     CHECK_EVERY_S,
@@ -668,6 +671,91 @@ async def test_what_would_stop_mpv_is_said_once_at_start_and_the_slideshow_plays
     assert [r.reason for r in said] == ["mpv is not installed"]
     assert statuses[0].renderer_problems == ("mpv is not installed",)
     assert any(getattr(r, "event", None) == "slideshow.shown" for r in caplog.records), "it stopped rather than playing on"
+
+
+# -- systemd's watchdog ------------------------------------------------------------------
+
+
+@pytest.fixture
+def systemd(monkeypatch) -> Iterator[Listener]:
+    """systemd's notification socket, as `test_notify` stands it up."""
+    yield from notification_socket(monkeypatch)
+
+
+class _Fetcher(Reddit):
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+async def _slideshow_watched(tmp_path, monkeypatch, systemd, screen: Screen, stop: asyncio.Event) -> "asyncio.Task[int]":
+    """`run_slideshow` as `_run` starts it, with the process's watchdog on the test's socket and no rate limit."""
+
+    async def no_page(*_args: object, **_kwargs: object) -> bool:
+        await stop.wait()
+        return True
+
+    monkeypatch.setattr(entry, "run_settings_page", no_page)
+    ui = UiSettings(cache_dir=tmp_path, bind="127.0.0.1", port=0, pinned=frozenset())
+    watchdog = Watchdog(Notifier(), pet_min_seconds=0.0)
+    return asyncio.create_task(
+        entry.run_slideshow(
+            slideshow_settings(tmp_path),
+            ui,
+            stop,
+            fetcher=_Fetcher(),
+            screen=lambda _: screen,
+            problems=list,
+            watchdog=watchdog,
+        )
+    )
+
+
+async def test_the_slideshow_says_ready_as_it_starts_to_play_and_pets_as_its_playback_steps(tmp_path, monkeypatch, systemd):
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    class StopsAfterOne(Screen):
+        def load(self, path: Path) -> Loaded | NotShown:
+            # From the renderer's worker thread, so through the loop. The dwell
+            # that follows the load still begins with its wait, which is a step.
+            loop.call_soon_threadsafe(stop.set)
+            return super().load(path)
+
+    screen = StopsAfterOne(Time())
+    running = await _slideshow_watched(tmp_path, monkeypatch, systemd, screen, stop)
+    assert await asyncio.wait_for(running, timeout=20) == 0
+
+    assert screen.shown, "nothing was shown, so the pets prove little"
+    assert systemd.messages[0] == "READY=1"
+    assert systemd.count("READY=1") == 1
+    assert systemd.count("WATCHDOG=1") >= 1, "the slideshow's playback never petted the watchdog"
+
+
+async def test_a_slideshow_whose_screen_stops_answering_stops_petting(tmp_path, monkeypatch, systemd):
+    """**The wedge the watchdog is for**: the loop turns, the listing and the fill go on, and the load never returns."""
+    stop = asyncio.Event()
+    loading = threading.Event()
+    release = threading.Event()
+
+    class Hangs(Screen):
+        def load(self, path: Path) -> Loaded | NotShown:
+            loading.set()
+            release.wait(timeout=30)
+            return super().load(path)
+
+    running = await _slideshow_watched(tmp_path, monkeypatch, systemd, Hangs(Time()), stop)
+    try:
+        assert await asyncio.to_thread(loading.wait, 15), "the screen was never asked to load"
+        before = systemd.count("WATCHDOG=1")
+        await asyncio.sleep(0.5)
+        assert systemd.count("WATCHDOG=1") == before, "a slideshow stuck in a load petted the watchdog"
+    finally:
+        stop.set()
+        release.set()
+        await asyncio.wait_for(running, timeout=20)
 
 
 # -- the screen's brightness -------------------------------------------------------------
