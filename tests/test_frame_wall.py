@@ -17,11 +17,13 @@ current slot names another work (`player-contract.md` § What happens to
 
 import logging
 
+import pytest
 from fakes import FakeTv
 
 from arrt_player.displays.frame import frame_wall
 from arrt_player.manifest import Watcher
 from arrt_player.state import DisplayState
+from arrt_player.tv import WRITES, TvNotOurs
 from arrt_player.wall import Wall
 
 
@@ -595,3 +597,242 @@ async def test_a_change_against_a_dark_wall_is_not_re_attempted_every_poll(daemo
     # what is being fixed is the cadence being the poll's.
     attempts = len(tv.selected) - before
     assert attempts == 2, f"the change was attempted {attempts} times in ten one-second polls"
+
+
+# -- the rule holds up to the moment of the write ---------------------------------
+#
+# Asking the set once and then working for a minute is not asking it: an upload
+# costs the set the better part of ten seconds, and the timeout allows sixty, so
+# somebody can pick up the remote between the question and the selection. The
+# television seam therefore reads the set's state immediately before every verb
+# that changes what it shows or stores (`tv.client.WRITES`), and these drive that
+# through the wall, with the double changing state *during* a verb.
+
+
+async def test_art_mode_going_off_during_the_upload_stops_the_selection(daemon: Wall, tv: FakeTv, publish, state: DisplayState):
+    """The reviewer's probe, made permanent: a fresh wall's first work is uploaded,
+    somebody switches to a programme five seconds into that upload, and the
+    selection that would follow it is never sent."""
+    publish(["w1", "w2"])
+    tv.seconds_for["upload"] = 10
+    tv.at(5, art_mode="off")
+
+    await daemon.tick()
+
+    assert tv.selected == [], "the selection after the upload took the screen off whoever was watching"
+    assert tv.took_the_screen == 0
+    assert tv.art_mode == "off"
+    assert state.last_selected_work_id is None, "a selection that was never made was recorded as made"
+
+
+async def test_art_mode_going_off_during_a_re_upload_stops_the_second_selection(
+    daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+):
+    """The rebind path: the set refuses a selection because it has forgotten the
+    image, the work is uploaded again, and somebody switches to a programme
+    during that upload. The second `select_image` is never sent."""
+    publish(["w1", "w2"], interval_seconds=10)
+    await daemon.tick()  # w1 up, and w2 uploaded behind it
+    forgotten = state.binding_for("w2").tv_content_id
+    del tv.holding[forgotten]
+    selected_before = list(tv.selected)
+
+    tv.seconds_for["upload"] = 10
+    tv.at(tv.elapsed + 5, art_mode="off")
+    clock.advance(10)
+    await daemon.tick()
+
+    assert tv.selected == selected_before, "the selection after the re-upload took the screen off whoever was watching"
+    assert tv.took_the_screen == 0
+    assert tv.art_mode == "off"
+    assert state.last_selected_work_id == "w1"
+
+
+async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, tv: FakeTv, publish, settings):
+    """Upload, removal, brightness and the slideshow switch were never tried with a
+    programme on (`samsung-tv-state-findings.md` § What works in each state), so
+    none is sent while the panel is lit and not showing art. Every one of them is
+    owed here: a fresh wall with three works to upload, a picture on the set
+    nothing accounts for, a brightness never written and a slideshow never
+    switched off."""
+    publish(["w1", "w2", "w3"])
+    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    tv.art_mode = "off"
+    tv.power = "on"
+
+    for _ in range(3):
+        await daemon.tick()
+
+    assert tv.uploaded == []
+    assert tv.removed == []
+    assert tv.brightness == []
+    assert tv.slideshow_disabled == 0
+    assert tv.selected == []
+
+
+async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon: Wall, tv: FakeTv, publish, settings):
+    """The other half of the same rule: switched off at the remote (`PowerState`
+    standby), the set serves uploads, removals, brightness and the slideshow
+    switch, all measured. Holding them there would leave a wall that spends its
+    nights dark with nothing uploaded by morning."""
+    publish(["w1", "w2", "w3"])
+    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    tv.art_mode = "off"
+    tv.power = "standby"
+
+    for _ in range(3):
+        await daemon.tick()
+
+    assert len(tv.uploaded) == 3
+    assert tv.removed == [("MY-LEGACY-1",)]
+    assert len(tv.brightness) == 1
+    assert tv.slideshow_disabled == 1
+    assert tv.selected == [], "a dark set was selected on, which it ignores"
+
+
+async def test_a_set_whose_power_cannot_be_read_is_sent_no_write_either(daemon: Wall, tv: FakeTv, publish, settings):
+    """Unreadable `PowerState` cannot tell a programme from a dark panel, so it is held as the programme is."""
+    publish(["w1", "w2", "w3"])
+    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    tv.art_mode = "off"
+    tv.power_unreadable = True
+
+    for _ in range(3):
+        await daemon.tick()
+
+    assert (tv.uploaded, tv.removed, tv.brightness, tv.slideshow_disabled) == ([], [], [], 0)
+
+
+async def test_held_writes_are_made_once_the_set_is_showing_art_again(
+    daemon: Wall, tv: FakeTv, publish, settings, state: DisplayState, clock
+):
+    """Held, never dropped: an evening of television costs the uploads their
+    evening, and the set returning to art mode gets every one of them, with none
+    of the works recorded as a failed upload in between."""
+    publish(["w1", "w2", "w3"], interval_seconds=3600)
+    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    tv.art_mode = "off"
+    for _ in range(3):
+        await daemon.tick()
+    assert all(state.binding_for(work) is None for work in ("w1", "w2", "w3")), "a held upload was recorded as attempted"
+
+    tv.art_mode = "on"
+    tv.art_mode_announced = True
+    await daemon.tick()
+
+    assert tv.slideshow_disabled == 1
+    assert tv.removed == [("MY-LEGACY-1",)]
+    assert publish.work_of(tv.on_the_wall) == "w1"
+    assert len(tv.uploaded) == 2, "the theme did not resume filling in behind the first picture"
+
+    clock.advance(settings.brightness_interval_seconds)
+    await daemon.tick()
+    assert len(tv.brightness) == 1, "the held brightness change was not retried at the next interval"
+
+
+async def test_held_writes_do_not_ask_the_set_once_a_second(daemon: Wall, tv: FakeTv, publish, clock):
+    """Each attempt at a held write is two reads of the set, and a pending upload
+    is due on every pass. Thirty one-second passes of a programme with three
+    uploads owed must not be sixty requests."""
+    publish(["w1", "w2", "w3"], interval_seconds=3600)
+    tv.art_mode = "off"
+
+    for _ in range(30):
+        await daemon.tick()
+        clock.advance(1)
+
+    assert tv.power_reads < 10, f"held writes read PowerState {tv.power_reads} times in thirty passes"
+    assert tv.art_mode_reads < 10, f"held writes read art mode {tv.art_mode_reads} times in thirty passes"
+
+
+# -- the double, as the set was measured --------------------------------------
+
+
+async def test_the_double_takes_the_screen_when_a_selection_reaches_a_set_showing_a_programme(tv: FakeTv, tmp_path):
+    """Below the gate, where nothing in the product may reach: what the set does
+    with a selection sent in the television state (measured 2026-08-07). Without
+    it, a test asserting "nothing was selected" could not see what selecting
+    would have cost."""
+    await tv.connect()
+    tv.holding["MY-F0001"] = tmp_path / "a.jpg"
+    tv.art_mode = "off"
+    tv.power = "on"
+
+    assert await tv._send_show("MY-F0001") is True
+
+    assert tv.art_mode == "on"
+    assert tv.took_the_screen == 1
+    assert tv.on_the_wall == tmp_path / "a.jpg"
+
+
+async def test_the_double_ignores_a_selection_sent_to_a_dark_set(tv: FakeTv, tmp_path):
+    """Measured too: accepted, no announcement, and the wall does not change."""
+    await tv.connect()
+    tv.holding["MY-F0001"] = tmp_path / "a.jpg"
+    tv.art_mode = "off"
+    tv.power = "standby"
+
+    assert await tv._send_show("MY-F0001") is False
+
+    assert (tv.art_mode, tv.took_the_screen, tv.announced) == ("off", 0, [])
+    assert tv.on_the_wall is None
+
+
+async def test_the_double_changes_state_inside_a_verb_that_takes_time(tv: FakeTv, tmp_path):
+    await tv.connect()
+    tv.seconds_for["upload"] = 10
+    tv.at(5, art_mode="off")
+    tv.at(15, power="standby")
+
+    await tv.upload(tmp_path / "a.jpg")
+
+    assert (tv.elapsed, tv.art_mode, tv.power) == (10, "off", "on"), "a change was applied outside the time it was armed for"
+
+
+def test_the_double_refuses_to_arm_a_change_nobody_could_make(tv: FakeTv):
+    with pytest.raises(TypeError, match="holding"):
+        tv.at(1, holding={})
+
+
+@pytest.mark.parametrize("verb", sorted(WRITES))
+async def test_every_write_is_held_from_a_set_showing_a_programme(tv: FakeTv, tmp_path, verb: str):
+    """Ranged over the seam's own declaration of what writes, so a verb added there is covered here by name."""
+    await tv.connect()
+    tv.holding["MY-F0001"] = tmp_path / "a.jpg"
+    tv.art_mode = "off"
+    tv.power = "on"
+    before = _what_the_set_holds_and_shows(tv)
+
+    with pytest.raises(TvNotOurs) as held:
+        await WRITE_CALLS[verb](tv, tmp_path)
+
+    assert held.value.verb == verb
+    assert _what_the_set_holds_and_shows(tv) == before, f"{verb} changed the set while it was held"
+
+
+def test_every_write_the_seam_declares_has_a_call_here():
+    assert set(WRITE_CALLS) == set(WRITES)
+
+
+#: One call of each write, by the name `tv.client.WRITES` gives it.
+WRITE_CALLS = {
+    "show": lambda tv, tmp: tv.show("MY-F0001"),
+    "upload": lambda tv, tmp: tv.upload(tmp / "b.jpg"),
+    "remove": lambda tv, tmp: tv.remove(["MY-F0001"]),
+    "set_brightness": lambda tv, tmp: tv.set_brightness(3),
+    "disable_native_slideshow": lambda tv, tmp: tv.disable_native_slideshow(),
+}
+
+
+def _what_the_set_holds_and_shows(tv: FakeTv) -> tuple:
+    return (
+        dict(tv.holding),
+        list(tv.selected),
+        list(tv.uploaded),
+        list(tv.removed),
+        list(tv.brightness),
+        tv.slideshow_disabled,
+        tv.displaying,
+        tv.art_mode,
+        tv.took_the_screen,
+    )

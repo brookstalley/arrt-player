@@ -25,6 +25,13 @@ the picture stays up regardless because the television holds it.
 **It draws no label.** It reports what the screen is doing (`display_state`),
 and every label of the wall — on this client or any other — follows that report
 through the server (`labels-and-surfaces.md`; `label_renderer.py`).
+
+**The household's rule is kept below this module, not by it.** Every verb that
+changes what the set shows or stores reads the set's state immediately before it
+is sent (`tv.client.WRITES`), and is refused with `TvNotOurs` when the set is
+somebody else's. What this module decides is only what to do with a refusal, per
+verb, and how soon to ask again; `is_ours` stays as the cheap early exit that
+keeps a held change from reaching the seam at all.
 """
 
 import logging
@@ -45,6 +52,7 @@ from arrt_player.tv import (
     RemovalOutcome,
     SelectionAnnouncement,
     TvClient,
+    TvNotOurs,
     TvRemovalUnconfirmed,
     TvUnavailable,
     TvUploadFailed,
@@ -192,6 +200,22 @@ class FrameDisplay:
         )
         self._unavailable = ReportOnce()
 
+        #: When a write the seam held may next be tried: an upload, a removal, a
+        #: brightness change or the slideshow switch, refused because the set was
+        #: lit and not showing art. **Each try costs two reads of the set**
+        #: (`get_artmode`, then `PowerState`), and a pending upload is retried on
+        #: every pass, so without this an evening of television is two requests a
+        #: second. The same ladder as the wall's, and cleared by the same news: the
+        #: set announcing a change of mode, or being read showing art.
+        self._writes_wait = Backoff(
+            minimum=settings.tv_retry_min_seconds,
+            maximum=settings.tv_retry_max_seconds,
+            monotonic=clock.monotonic,
+        )
+        #: Writes are being held for somebody watching. Said once per episode, at
+        #: INFO, for the same reason a wall not ours is.
+        self._writes_held = ReportOnce()
+
     @property
     def last_error(self) -> str | None:
         return self._last_error
@@ -210,18 +234,29 @@ class FrameDisplay:
         self._reconcile_wait.clear()
 
     async def prepare(self, pictures: Sequence[Picture]) -> None:
-        await self._connected()
+        await self._tv.connect()
+        # The set's news first, because it can end a hold on the writes below:
+        # the slideshow switch, the reconciliation and the brightness all read
+        # the writes' wait, and a set back in art mode should get them this pass.
         await self._take_the_sets_news()
-        if self._reconciliation_owed and self._reconcile_wait.is_due():
+        await self._switch_off_the_slideshow()
+        if self._reconciliation_owed and self._reconcile_wait.is_due() and self._writes_wait.is_due():
             # Cleared only when the work actually settled: a set that goes
             # away halfway through raises, and one that cannot say what it
             # removed reports so — both leave the work owed for a later pass
             # rather than recorded as done.
-            self._reconciliation_owed = not await self._reconcile_with_the_set(pictures)
-            if self._reconciliation_owed:
-                self._reconcile_wait.hold()
+            try:
+                self._reconciliation_owed = not await self._reconcile_with_the_set(pictures)
+            except TvNotOurs as exc:
+                # Still owed, and not a failure of the set's to say what it
+                # removed: the removal was never sent. Its own wait is left
+                # alone, so the set returning to art mode resumes it at once.
+                self._hold_the_writes(exc)
             else:
-                self._reconcile_wait.clear()
+                if self._reconciliation_owed:
+                    self._reconcile_wait.hold()
+                else:
+                    self._reconcile_wait.clear()
         await self._apply_brightness()
 
     async def after(self, pictures: Sequence[Picture]) -> None:
@@ -322,30 +357,35 @@ class FrameDisplay:
                 )
             return True
 
-        if self._not_our_wall.begin():
-            # Said once for the same reason a dark wall is: somebody watches
-            # television for hours, and a line per attempt would bury the ERRORs
-            # that are this plane's only failure channel.
-            log.info(
-                "the television is not in art mode; leaving the wall alone until it is",
-                extra={"event": "rotation.wall_not_ours"},
-            )
+        self._report_not_ours()
         self._hold_off_the_wall()
         return False
 
     async def show(self, picture: Picture) -> Shown:
-        """Select one picture on the set, uploading it first if it has no binding."""
-        content_id = await self._content_id_for(picture)
-        if content_id is None:
-            return Shown.SKIP
+        """Select one picture on the set, uploading it first if it has no binding.
 
+        **`is_ours` said yes before this began, and that is not enough.** An
+        upload here can take a minute, and somebody can switch to a programme
+        inside it; the seam reads the set again immediately before every write,
+        the selection included, and a refusal ends the attempt as a wall that did
+        not change: nothing selected, nothing remembered, and the slot still owed
+        when the set is showing art again.
+        """
         try:
-            shown = await self._tv.show(content_id)
-        except TvUnavailable:
-            content_id = await self._rebind_or_reraise(picture, content_id)
+            content_id = await self._content_id_for(picture)
             if content_id is None:
                 return Shown.SKIP
-            shown = await self._tv.show(content_id)
+
+            try:
+                shown = await self._tv.show(content_id)
+            except TvUnavailable:
+                content_id = await self._rebind_or_reraise(picture, content_id)
+                if content_id is None:
+                    return Shown.SKIP
+                shown = await self._tv.show(content_id)
+        except TvNotOurs as exc:
+            await self._not_ours_after_all(exc)
+            return Shown.WALL_UNCHANGED
 
         if not shown:
             await self._report_wall_unchanged(content_id)
@@ -372,6 +412,51 @@ class FrameDisplay:
         )
         return Shown.YES
 
+    async def _not_ours_after_all(self, exc: TvNotOurs) -> None:
+        """The seam held a write while the wall was being changed: the set is somebody's.
+
+        Answered as `is_ours` answers a no, because it is the same news arriving
+        later: said once, the wall's wait lengthened, and the display state moved
+        to what the set is doing. A held selection reads `PowerState` to tell a
+        programme from a dark panel, as `is_ours` does; a held upload already
+        knows the panel is lit, or could not tell, which the display state
+        reports as in use either way.
+        """
+        self._showing_art = False
+        if exc.verb == "show":
+            await self._screen_is_not_ours()
+        else:
+            self._hold_the_writes(exc)
+            self.record.moved_to(ScreenState.IN_USE)
+        self._report_not_ours()
+        self._hold_off_the_wall()
+
+    def _report_not_ours(self) -> None:
+        if self._not_our_wall.begin():
+            # Said once for the same reason a dark wall is: somebody watches
+            # television for hours, and a line per attempt would bury the ERRORs
+            # that are this plane's only failure channel.
+            log.info(
+                "the television is not in art mode; leaving the wall alone until it is",
+                extra={"event": "rotation.wall_not_ours"},
+            )
+
+    def _hold_the_writes(self, exc: TvNotOurs) -> None:
+        """The seam held a write for somebody watching: wait before trying any write again."""
+        self._writes_wait.hold()
+        if self._writes_held.begin():
+            log.info(
+                "%s; holding the set's uploads, removals and brightness until it is showing art or switched off",
+                exc,
+                extra={"event": "tv.writes_held", "verb": exc.verb},
+            )
+
+    def _write_went_through(self) -> None:
+        """A write reached the set, so the set is taking them: end any hold."""
+        self._writes_wait.clear()
+        if self._writes_held.end():
+            log.info("the television is taking uploads again", extra={"event": "tv.writes_resumed"})
+
     def _hold_off_the_wall(self) -> None:
         """Back off before asking again, and lengthen the wait each time.
 
@@ -384,6 +469,7 @@ class FrameDisplay:
     def _wall_is_answering(self) -> None:
         """Forget the backoff, because the set is acting on what it is told."""
         self._wall_retry.clear()
+        self._writes_wait.clear()
 
     async def _report_wall_unchanged(self, content_id: str) -> None:
         """Say once that the set is taking selections and displaying none of them.
@@ -448,6 +534,8 @@ class FrameDisplay:
                 self._showing_art = True
                 self.record.moved_to(ScreenState.SHOWING_ART, self._work_bound_to(announcement.content_id))
         if self._tv.art_mode_announcement_pending():
+            # Clears the writes' wait too (`_wall_is_answering`): the set saying
+            # its mode changed is news to a held upload as much as to the wall.
             self._wall_is_answering()
             await self._read_art_mode()
 
@@ -468,6 +556,8 @@ class FrameDisplay:
         showing = await self._tv.showing_art()
         self._showing_art = showing
         if showing:
+            # Art on the wall admits every write, so nothing held need wait.
+            self._writes_wait.clear()
             content_id = self._wall_content_id
             self.record.moved_to(ScreenState.SHOWING_ART, self._work_bound_to(content_id) if content_id is not None else None)
         else:
@@ -576,7 +666,9 @@ class FrameDisplay:
         A failure is recorded, not merely logged: the store keeps `failed` apart
         from "no row at all", so a work that fails every pass is visible in the
         device's own state rather than only in a journal that does not survive a
-        reboot.
+        reboot. **A held upload is not a failure** and is not recorded: the set
+        was never sent it, and `TvNotOurs` goes to the caller, whose answer
+        differs (the theme waits; a selection ends).
         """
         fingerprint = _fingerprint(picture.path)
         try:
@@ -592,6 +684,7 @@ class FrameDisplay:
             return None
 
         self._state.record_upload(picture.work_id, content_id, render_fingerprint=fingerprint)
+        self._write_went_through()
         log.info(
             "uploaded %s to the television as %s",
             picture.work_id,
@@ -607,6 +700,8 @@ class FrameDisplay:
         uploaded the whole theme would hold the loop — and every slot change and
         republished schedule — for as long as the theme is long.
         """
+        if not self._writes_wait.is_due():
+            return
         for picture in pictures:
             binding = self._state.binding_for(picture.work_id)
             if _is_current(binding, picture.path):
@@ -620,7 +715,10 @@ class FrameDisplay:
                 # would make the store report an upload problem for a preparation one.
                 continue
             with work_context(picture.work_id):
-                await self._upload(picture)
+                try:
+                    await self._upload(picture)
+                except TvNotOurs as exc:
+                    self._hold_the_writes(exc)
             return
 
     async def _reconcile_with_the_set(self, pictures: Sequence[Picture]) -> bool:
@@ -686,6 +784,7 @@ class FrameDisplay:
             )
             return False
 
+        self._write_went_through()
         log.info(
             "removed %d image(s) the binding table does not account for",
             len(outcome.removed),
@@ -705,18 +804,36 @@ class FrameDisplay:
     # -- the television ----------------------------------------------------
 
     async def _connected(self) -> None:
-        """Ensure there is a live connection, and that the set's own slideshow is off."""
+        """Ensure there is a live connection, and that the set's own slideshow is off.
+
+        A slideshow switch the seam holds stays unmarked and is tried again once
+        the hold is over; it never stops the pass, because nothing else here
+        depends on it having been sent.
+        """
         await self._tv.connect()
-        if not self._state.native_slideshow_disabled:
-            await self._tv.disable_native_slideshow()
+        await self._switch_off_the_slideshow()
+
+    async def _switch_off_the_slideshow(self) -> None:
+        """Turn the set's own slideshow off, once, unless the seam is holding writes."""
+        if not self._state.native_slideshow_disabled and self._writes_wait.is_due():
+            try:
+                await self._tv.disable_native_slideshow()
+            except TvNotOurs as exc:
+                self._hold_the_writes(exc)
+                return
             self._state.mark_native_slideshow_disabled()
+            self._write_went_through()
             log.info(
                 "disabled the television's own slideshow, which would otherwise change the picture underneath us",
                 extra={"event": "tv.native_slideshow_disabled"},
             )
 
     async def _apply_brightness(self) -> None:
-        """Follow the sun, and write to the set only when the value actually changes."""
+        """Follow the sun, and write to the set only when the value actually changes.
+
+        A change the seam holds is not remembered as written, so the next
+        interval tries it again.
+        """
         elapsed = self._clock.monotonic()
         if self._brightness_at is not None and elapsed - self._brightness_at < self._settings.brightness_interval_seconds:
             return
@@ -731,11 +848,16 @@ class FrameDisplay:
             minimum=self._settings.tv_min_brightness,
             maximum=self._settings.tv_max_brightness,
         )
-        if value == self._brightness_value:
+        if value == self._brightness_value or not self._writes_wait.is_due():
             return
 
-        await self._tv.set_brightness(value)
+        try:
+            await self._tv.set_brightness(value)
+        except TvNotOurs as exc:
+            self._hold_the_writes(exc)
+            return
         self._brightness_value = value
+        self._write_went_through()
         log.info(
             "set panel brightness to %d",
             value,

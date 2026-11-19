@@ -12,15 +12,28 @@ this module find the image; given one that raises mid-conversation, does it clos
 the connection it can no longer reason about.
 """
 
+import ast
 import asyncio
 import json
 import logging
 import pathlib
 
 import pytest
-from samsungtvws.exceptions import HttpApiError, ResponseError
+from fake_tv import FakeTv
+from samsungtvws.exceptions import ConnectionFailure, HttpApiError, ResponseError
+from websockets.exceptions import InvalidURI
 
-from arrt_player.tv import IdentityUnreadable, PowerStateUnreadable, TvRemovalUnconfirmed, TvUnavailable, TvUploadFailed
+from arrt_player.tv import (
+    READS,
+    WRITES,
+    IdentityUnreadable,
+    PowerStateUnreadable,
+    TvClient,
+    TvNotOurs,
+    TvRemovalUnconfirmed,
+    TvUnavailable,
+    TvUploadFailed,
+)
 from arrt_player.tv import samsung as samsung_module
 from arrt_player.tv.samsung import SamsungTv
 
@@ -928,3 +941,206 @@ class TestTheTokenFileIsPrivate:
         unprotected = [r for r in caplog.records if getattr(r, "event", None) == "tv.token_file_open"]
         assert len(unprotected) == 1
         assert "a-token" not in unprotected[0].getMessage()
+
+
+class TestTheTokenNeverRidesAFailure:
+    """**A failure's text goes to the server.** `TvUnavailable`'s message is the
+    wall's `last_error`, which the heartbeat carries off this Player, and the
+    library's exceptions can quote the art channel's URL, whose query names the
+    pairing token (`wss://…/api/v2/channels/…?name=…&token=…`), or the set's
+    reply, which carries it as `"token"`. Either way the token lets whoever reads
+    it drive the set as this Player."""
+
+    SECRET = "41712399"
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                lambda secret: InvalidURI(
+                    f"wss://10.0.0.1:8002/api/v2/channels/com.samsung.art-app?name=dHZwaQ==&token={secret}", "bad"
+                ),
+                id="the-url-in-a-websockets-error",
+            ),
+            pytest.param(
+                lambda secret: ConnectionFailure({"event": "ms.channel.unauthorized", "data": {"token": secret}}),
+                id="the-sets-reply-in-a-library-error",
+            ),
+            pytest.param(
+                lambda secret: OSError(f'{{"event": "ms.channel.connect", "data": {{"token": "{secret}"}}}}'),
+                id="a-json-reply-quoted-in-an-os-error",
+            ),
+        ],
+    )
+    async def test_a_failure_quoting_the_token_reaches_the_wall_without_it(self, tv: SamsungTv, art: StubArt, failure):
+        art.listing_raises = failure(self.SECRET)
+
+        with pytest.raises(TvUnavailable) as raised:
+            await tv.listed_content_ids()
+
+        assert self.SECRET not in str(raised.value)
+        assert "token" in str(raised.value), "the scrub took the whole message rather than the secret"
+
+    async def test_a_connection_refused_quoting_the_token_says_so_without_it(self, art: StubArt, tmp_path):
+        client = SamsungTv(
+            host="10.0.0.1",
+            port=8002,
+            token_file=tmp_path / "token_file",
+            client_name="tvpi-test",
+            connect_timeout_seconds=1.0,
+            upload_timeout_seconds=5.0,
+            select_confirm_seconds=0.05,
+        )
+
+        def construct() -> StubArt:
+            raise ConnectionFailure({"event": "ms.channel.connect", "data": {"token": self.SECRET}})
+
+        client._construct = construct  # type: ignore[method-assign]
+
+        with pytest.raises(TvUnavailable) as raised:
+            await client.connect()
+
+        assert self.SECRET not in str(raised.value)
+
+
+# -- the household's rule, at the seam -----------------------------------------
+#
+# Every verb that changes what the set shows or stores reads the set immediately
+# before it is sent (`tv.client.WRITES`). These run the real client against the
+# stubbed library, so what is asserted is what reaches the wire.
+
+#: The library calls that change what the set shows or stores, one per write.
+_LIBRARY_WRITES = ("select_image", "upload", "delete_list", "set_brightness", "set_slideshow_status")
+
+
+def _recording_what_is_sent(art: StubArt) -> list[str]:
+    sent: list[str] = []
+    for name in _LIBRARY_WRITES:
+        original = getattr(art, name)
+
+        async def recorded(*args: object, _name: str = name, _original=original, **kwargs: object) -> object:
+            sent.append(_name)
+            return await _original(*args, **kwargs)
+
+        setattr(art, name, recorded)
+    return sent
+
+
+#: One call of each write, by the name `WRITES` gives it.
+_CALLS = {
+    "show": lambda tv, tmp: tv.show("MY-F0001"),
+    "upload": lambda tv, tmp: tv.upload(tmp / "a.jpg"),
+    "remove": lambda tv, tmp: tv.remove(["MY-F0001"]),
+    "set_brightness": lambda tv, tmp: tv.set_brightness(3),
+    "disable_native_slideshow": lambda tv, tmp: tv.disable_native_slideshow(),
+}
+
+#: The set's states as `samsung-tv-state-findings.md` § The states names them:
+#: what `get_artmode` answers, and what `PowerState` answers (None: unreadable).
+_STATES = {
+    "art-mode": ("on", "on"),
+    "television": ("off", "on"),
+    "dark": ("off", "standby"),
+    "power-unreadable": ("off", None),
+}
+
+#: **The decision, as a table**: which writes are sent in which state. Art mode
+#: admits every write; the dark state every write but a selection, which it
+#: accepts and ignores; the television state and an unreadable `PowerState`
+#: none, because nothing but `available` and the reads was tried there.
+_SENT_IN = {
+    "art-mode": set(WRITES),
+    "dark": set(WRITES) - {"show"},
+    "television": set(),
+    "power-unreadable": set(),
+}
+
+
+class TestEveryWriteReadsTheSetFirst:
+    def test_every_write_and_state_has_a_row_here(self):
+        assert set(_CALLS) == set(WRITES)
+        assert set(_SENT_IN) == set(_STATES)
+
+    @pytest.mark.parametrize("state", sorted(_STATES))
+    @pytest.mark.parametrize("verb", sorted(WRITES))
+    async def test_a_write_is_sent_only_in_the_states_it_was_measured_safe_in(
+        self, tv: SamsungTv, art: StubArt, tmp_path, verb: str, state: str
+    ):
+        art_mode, power = _STATES[state]
+        art.artmode_reply = art_mode
+        if power is None:
+            art.rest.raises = OSError("the device description did not answer")
+        else:
+            art.rest.reply = {"device": {"PowerState": power}}
+        art.entries = [{"content_id": "MY-F0001"}]
+        art.upload_returns = "MY-F0002"
+        sent = _recording_what_is_sent(art)
+
+        if verb in _SENT_IN[state]:
+            await _CALLS[verb](tv, tmp_path)
+            assert sent, f"{verb} was held in the {state} state"
+        else:
+            with pytest.raises(TvNotOurs):
+                await _CALLS[verb](tv, tmp_path)
+            assert sent == [], f"{verb} reached the set in the {state} state"
+
+    async def test_the_read_is_taken_at_the_moment_of_the_write_not_before(self, tv: SamsungTv, art: StubArt, tmp_path):
+        """The C1 shape against the real client: art mode on for the upload, off by the selection."""
+        art.upload_returns = "MY-F0002"
+        await tv.upload(tmp_path / "a.jpg")
+        art.artmode_reply = "off"
+        sent = _recording_what_is_sent(art)
+
+        with pytest.raises(TvNotOurs):
+            await tv.show("MY-F0002")
+
+        assert sent == []
+
+    async def test_a_set_that_cannot_be_asked_is_an_outage_rather_than_a_hold(self, tv: SamsungTv, art: StubArt, tmp_path):
+        art.artmode_raises = OSError("gone")
+
+        with pytest.raises(TvUnavailable):
+            await tv.upload(tmp_path / "a.jpg")
+
+    async def test_removing_nothing_reads_nothing(self, tv: SamsungTv, art: StubArt):
+        art.artmode_raises = OSError("must not be asked")
+
+        assert (await tv.remove([])).complete
+
+
+class TestNothingReachesTheWirePastTheGate:
+    def test_every_verb_a_client_implements_is_a_read_or_a_write(self):
+        """A verb added to the boundary is classified, or this fails naming it."""
+        sends = {f"_send_{verb}" for verb in WRITES}
+
+        unclassified = set(TvClient.__abstractmethods__) - READS - sends
+        stale = (READS | sends) - set(TvClient.__abstractmethods__)
+
+        assert unclassified == set(), f"neither a read nor a write: {sorted(unclassified)}"
+        assert stale == set(), f"classified but not on the boundary: {sorted(stale)}"
+
+    @pytest.mark.parametrize("verb", sorted(WRITES))
+    def test_a_client_that_defines_a_write_itself_is_refused_when_it_is_made(self, verb: str):
+        with pytest.raises(TypeError, match=verb):
+            type("Bypassing", (FakeTv,), {verb: lambda self, *args: None})
+
+    @pytest.mark.parametrize("client", [SamsungTv, FakeTv], ids=["SamsungTv", "FakeTv"])
+    def test_every_client_sends_through_the_seams_own_verbs(self, client: type):
+        for verb in WRITES:
+            assert getattr(client, verb) is getattr(TvClient, verb), f"{client.__name__}.{verb} is not the gated one"
+
+    def test_nothing_outside_the_seam_reaches_a_send(self):
+        """`_send_<verb>` is what goes on the wire with no read before it. Only `tv/client.py`'s gate may call one."""
+        source = pathlib.Path(samsung_module.__file__).parents[1]
+        gate = source / "tv" / "client.py"
+        files = [path for path in sorted(source.rglob("*.py")) if path != gate]
+        assert any(path.name == "frame.py" for path in files), "the walk did not reach the code that calls the seam"
+
+        reaching = [
+            f"{path.relative_to(source)}:{node.lineno} {node.attr}"
+            for path in files
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Attribute) and node.attr.startswith("_send_")
+        ]
+
+        assert reaching == []
