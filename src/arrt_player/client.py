@@ -686,10 +686,20 @@ class WallCaches:
     def _write_stamp(self, entry: Path, stamp: _Stamp) -> None:
         path = entry / LEFT_STAMP_FILENAME
         temporary = entry / f".{LEFT_STAMP_FILENAME}.tmp"
-        temporary.write_text(
-            json.dumps({"left_at": stamp.left_at.isoformat(), "absent_seconds": stamp.absent_seconds}), encoding="utf-8"
-        )
-        temporary.replace(path)
+        data = json.dumps({"left_at": stamp.left_at.isoformat(), "absent_seconds": stamp.absent_seconds}).encode("utf-8")
+        # Forced to the card before the rename, as the pull's files are
+        # (`pull._write_atomically`): the stamp is the only record of when the
+        # wall left, and a power cut must leave the old one or the new, whole.
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+        except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+            raise
         stamp.written_seconds = stamp.absent_seconds
 
     def _say_unknown(self, entry: Path) -> None:

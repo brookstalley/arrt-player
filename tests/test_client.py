@@ -1965,6 +1965,55 @@ async def test_a_wall_that_comes_back_is_unstamped_and_loses_nothing(client_sett
     assert not (cache / "west").exists()
 
 
+async def test_a_stamp_reaches_the_disk_before_it_is_renamed_into_place(client_settings, monkeypatch):
+    """The stamp is the only record of when a wall left, so it is forced to the card as the pull's files are."""
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        synced.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    link = Documents(cached=placing("east", "west"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    link.answer = placing("east")
+    await player.run_for(DAY)
+    await player.stop()
+
+    stamp = cache / "west" / client_module.LEFT_STAMP_FILENAME
+    assert stamp.exists()
+    assert stamp.stat().st_ino in synced, "the stamp was renamed into place without being forced to the disk"
+
+
+async def test_a_stamp_that_cannot_be_renamed_into_place_leaves_no_temporary_file(client_settings, monkeypatch):
+    cache = client_settings.cache_dir
+    for wall in ("east", "west"):
+        a_wall_directory(cache, wall)
+    real_replace = Path.replace
+
+    def refusing_replace(self: Path, target):
+        if Path(target).name == client_module.LEFT_STAMP_FILENAME:
+            raise OSError(28, "No space left on device")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", refusing_replace)
+    link = Documents(cached=placing("east", "west"))
+    player = Player(client_settings, Days(), link)
+    await player.start()
+    link.answer = placing("east")
+    await player.run_for(DAY)
+    await player.stop()
+
+    left_behind = [path.name for path in (cache / "west").iterdir() if path.name.endswith(".tmp")]
+    assert left_behind == [], f"a failed stamp left {left_behind} in the wall's directory"
+    assert not (cache / "west" / client_module.LEFT_STAMP_FILENAME).exists()
+
+
 async def test_nothing_is_removed_or_stamped_while_no_client_document_can_be_read(client_settings):
     """**The server down at boot, and no cached document that can be read.** This
     client does not know which walls it drives, and "none" would be every wall's
