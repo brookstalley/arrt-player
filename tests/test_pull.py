@@ -1800,9 +1800,24 @@ async def held_link(client_settings, stub):
     await link.close()
 
 
-def test_the_statuses_that_hold_a_report_are_the_tables_refusals_of_it():
-    assert {answer["status"] for answer in REPORT_REFUSALS} == pull_module.CLIENT_HEARTBEAT_REFUSALS
+def test_the_hold_lapses_after_the_stated_interval():
     assert pull_module.REFUSED_REPORT_RESEND_SECONDS == REFUSED_RESEND_SECONDS
+
+
+def test_the_tables_token_refusal_is_no_verdict_on_the_report_and_its_refusals_of_the_report_are():
+    """The rows the table names: the token's is never held, and every refusal of the report is a 4xx that can be."""
+    token = row_of("no_valid_token")
+    assert token["body"] == "error"
+    assert token["status"] in pull_module.NOT_A_VERDICT_ON_THE_REPORT
+    assert REPORT_REFUSALS, "the table names no refusal of the report, so the held cases below prove nothing"
+    for answer in REPORT_REFUSALS:
+        assert 400 <= answer["status"] < 500
+        assert answer["status"] not in pull_module.NOT_A_VERDICT_ON_THE_REPORT, answer["case"]
+
+
+def row_of(case: str) -> dict:
+    (answer,) = [answer for answer in transport()["routes"]["client_heartbeat"]["answers"] if answer["case"] == case]
+    return answer
 
 
 @pytest.mark.parametrize("refusal", REPORT_REFUSALS, ids=[answer["case"] for answer in REPORT_REFUSALS])
@@ -1861,25 +1876,57 @@ async def _answering(status: int, body: bytes):
     return server, posts
 
 
+#: The server's error body, as the transport table's `error_body` shapes it.
+ERROR_BODY = json.dumps({"error": "The server cannot take this report."}).encode()
+#: Held: the server's refusal of the report. Sent again: no verdict on it.
+HELD, SENT_AGAIN = 1, 2
+
+
 @pytest.mark.parametrize(
-    ("status", "body"),
+    ("status", "body", "posts_expected"),
     [
-        (429, b""),
-        (408, b""),
-        (404, b"<html><body>404 Not Found</body></html>"),
-        (403, b"Forbidden"),
-        (405, b""),
-        (200, b"<html><body>Sign in to this network</body></html>"),
-        (413, b"<html><head><title>413 Request Entity Too Large</title></head></html>"),
-        (400, b'{"detail": [{"msg": "bad request"}]}'),
-        (422, b'{"error": "A status no row of the table names."}'),
+        # The server's error body under a status no row names: its refusal all the same.
+        (422, ERROR_BODY, HELD),
+        (403, ERROR_BODY, HELD),
+        (409, ERROR_BODY, HELD),
+        # The same statuses, and the table's own, without it: something in the way answered.
+        (422, b"", SENT_AGAIN),
+        (403, b"Forbidden", SENT_AGAIN),
+        (400, b'{"detail": [{"msg": "bad request"}]}', SENT_AGAIN),
+        (413, b"<html><head><title>413 Request Entity Too Large</title></head></html>", SENT_AGAIN),
+        (404, b"<html><body>404 Not Found</body></html>", SENT_AGAIN),
+        (405, b"", SENT_AGAIN),
+        # Try again later, whoever says it.
+        (429, ERROR_BODY, SENT_AGAIN),
+        (429, b"", SENT_AGAIN),
+        (408, ERROR_BODY, SENT_AGAIN),
+        (408, b"", SENT_AGAIN),
+        # Not a 4xx, whatever it carries: a captive portal's page, or its error-shaped JSON.
+        (200, b"<html><body>Sign in to this network</body></html>", SENT_AGAIN),
+        (200, ERROR_BODY, SENT_AGAIN),
     ],
-    ids=["429", "408", "404-proxy", "403-proxy", "405", "200-portal", "413-proxy", "400-framework", "422"],
+    ids=[
+        "422-error-body",
+        "403-error-body",
+        "409-error-body",
+        "422-bare",
+        "403-proxy",
+        "400-framework",
+        "413-proxy",
+        "404-proxy",
+        "405-bare",
+        "429-error-body",
+        "429-bare",
+        "408-error-body",
+        "408-bare",
+        "200-portal",
+        "200-error-body",
+    ],
 )
-async def test_an_answer_that_is_not_the_servers_refusal_of_the_report_leaves_it_sent_on_the_next_cycle(
-    client_settings, status, body
+async def test_a_refusal_is_known_by_the_servers_error_body_whatever_status_it_came_under(
+    client_settings, status, body, posts_expected
 ):
-    """Read as the table's `unanswered` case is: nothing is known recorded, and the report goes on being sent."""
+    """Held, a report is not sent again on the next cycle; read as the table's `unanswered` case, it is."""
     server, posts = await _answering(status, body)
     clock = _Ticking()
     link = ClientPull(replace(client_settings, server_url=str(server.make_url("")).rstrip("/")), monotonic=clock)
@@ -1891,7 +1938,10 @@ async def test_an_answer_that_is_not_the_servers_refusal_of_the_report_leaves_it
         await link.close()
         await server.close()
 
-    assert len(posts) == 2, f"a {status} that is not the server's refusal of the report held it"
+    assert len(posts) == posts_expected, (
+        f"a {status} {'with' if body == ERROR_BODY else 'without'} the server's error body was "
+        f"{'sent again' if len(posts) == SENT_AGAIN else 'held'}"
+    )
 
 
 async def test_a_report_refused_for_its_token_goes_on_being_sent(held_link, stub):
