@@ -219,6 +219,36 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   branch's merged head once it merges, and `player_e2e` runs once on the pool against it
   (the coordinator's, in Arrt).
 
+## Decisions made mid-build
+
+- **2026-11-20 (Chunk 01, as integrated), a hold with nothing to end it:** Chunk 01 held a
+  refused client report until the report changed, as the pinned contract's table says.
+  Integration worked out what that does: nothing in a steady Player's report changes with
+  time (only a plug, a panel's state or a restart changes it), and the hold was engaged by
+  any answer under 500 but 204 and 401, a proxy's or a starting server's included. One such
+  answer could silence a Player's reports for days, and the server would show it as not
+  heard from while its walls kept reporting.
+- **2026-11-20 (Chunk 03), [DECISION] a departure from the pinned contract, bounded:** on
+  `POST /client/heartbeat` only, the Player (a) treats any 4xx other than 400, 401 and 413
+  as unanswered and sends the report again next cycle, where the 1.2.0 table's class
+  sentence reads such a status as the route's 400; (b) holds a 400 or 413 only when it
+  carries the contract's error body, a test the table does not ask for; (c) sends a held
+  report again unchanged after 300 seconds (`REFUSED_REPORT_RESEND_SECONDS`), where the
+  table says only when the report changes. The wall heartbeat and every GET still follow
+  the table. What it costs: a report the server will always refuse is sent once in five
+  minutes and not once; a server that reads the table literally sees one request it was
+  told not to expect. What the old rule was giving: one request per unchanged refused
+  report. The server's unreleased 1.3.0 is being reworded to say (a) to (c) with the 300
+  seconds stated in the package; Chunk 07 quotes it from there and replays the reworded
+  class sentence on both POST routes. The wall heartbeat's own hold is the older shape
+  (any status under 500), bounded by one interval because its report changes each minute:
+  Chunk 07 makes the two agree.
+- **2026-11-20 (Chunk 03), a cost for the operator's checklist:** the Frame's identity is
+  read once a minute where it was read once: one GET to the set's REST port each minute.
+  Measured before (2026-10-08): that GET is answered from standby in 0.015 s with no key.
+  Not measured: whether a GET each minute keeps a sleeping set's network awake or shows
+  anything on screen.
+
 ## Build Chunks
 
 ### Chunk 01: The pin moves to `contract-v1.2.0`, and the double answers from the contract's table
