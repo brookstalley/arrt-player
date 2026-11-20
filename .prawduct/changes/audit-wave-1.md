@@ -13,7 +13,8 @@ change to the contract package, built as the eleven chunks of
 **The television.** Every write to the set (upload, delete, brightness, the
 slideshow switch-off, as well as selection) is sent through one gate in the seam,
 which reads the set immediately before it and holds the write unless the set is in
-art mode, or dark. A verb added later inherits the read. The held writes are
+a state it was measured safe in: selection needs art mode on, and every other write
+needs art mode on or the set dark. A verb added later inherits the read. The held writes are
 retried on one shared wait, and the websocket's token no longer reaches the journal
 or the heartbeat's `last_error`.
 
@@ -51,7 +52,9 @@ television records say what the code now does.
 ## Consumer note
 An operator upgrading: an `.env` that holds a `*_SECONDS` of 0, below 0, `nan` or `inf`
 (or a latitude or longitude out of range) now stops the Player at start with exit
-2; the runbook's step 7b greps for it. A name only the router's DNS gives the
+2; the runbook's step 7b greps for the `*_SECONDS` ones only, and `deploy/README.md`
+§ Two things that can stop an upgrade covers the rest (the `load()` check names
+any other key the new revision refuses). A name only the router's DNS gives the
 Player must be listed in `UI_ALLOWED_HOSTS`, or the settings page refuses it
 (step 7c). The unit changes, so steps 9–11 install it, and step 14a checks that it
 starts, draws and has its memory bound. None of the hardened unit has run under
