@@ -267,7 +267,8 @@ back first.
 
 The Player now serves one page, on port 8771 on every interface by default
 (`UI_PORT`, `UI_BIND` in `.env`), for setting the server, the client token and
-its name. Nothing changes on the server, and the walls run as before.
+its name (and, since 2026-11-19, the Frame's address). Nothing changes on the
+server, and the walls run as before.
 
 **Check `.env` before deploying.** At start, the Player now refuses (exit 2,
 naming the key) a `SERVER_URL` that is not an http(s) address with a host, or
@@ -299,7 +300,9 @@ page. The page keeps what it is told in `$CACHE_DIR/.settings.json`, mode 0600.
 **Saving restarts the Player.** It sends itself SIGTERM, stops as it would for
 systemd, and `Restart=always` brings it back after `RestartSec`: the walls
 are back in a few seconds, and the television's art channel is closed properly
-on the way down (`tests/test_deploy_unit.py`).
+on the way down (`tests/test_deploy_unit.py`). *(Since 2026-11-19 only a save that
+changes what the Player runs on restarts it, and the page says which; see § The
+television's identity, a watchdog and the page's Frame address, below.)*
 
 **A forgotten password** is deleted, not reset: remove `"password"` from the
 `"auth"` object in `$CACHE_DIR/.settings.json`, `sudo systemctl restart
@@ -417,7 +420,9 @@ last answered. A `slideshow.renderer_unavailable` error at start names what
 would stop mpv drawing (mpv missing, or the account not in `render`), and the
 page shows the same.
 
-**The way back** to an older revision: the settings file is now layout version
+**The way back** to an older revision *(for a file that also holds `TV_ADDRESS`
+see § The television's identity, a watchdog and the page's Frame address)*: the
+settings file is now layout version
 2, which an older Player refuses by name (`.settings.json is layout version 2`).
 Before starting the older revision, as root, edit `$CACHE_DIR/.settings.json`:
 delete the keys `PLAYER_MODE`, `SLIDESHOW_URL`, `REDDIT_SESSION`,
@@ -448,7 +453,8 @@ unit differing, and steps 10–11 install it.
   environment and nothing else (`mpv.MPV_ENVIRONMENT`), so the client token and
   the Reddit cookie are not handed to the program that decodes strangers' posts.
   mpv still runs as `tvpi`, and `tvpi` can read `.env` and `.settings.json`;
-  closing that waits on running mpv under an account of its own.
+  closing that waits on running mpv under an account of its own, **which the
+  owner ruled "not now" on 2026-11-19: this is the accepted state**.
 
 **What the Pi needs:** `.env` must name no path under `/home`, `/root` or
 `/run/user`, which the Player can no longer reach (the runbook's step 9a). After
@@ -494,6 +500,90 @@ ceiling of 30 wrong in 10 minutes for all addresses together; the owner's own
 sign-in is not slowed by somebody else's guesses.
 
 **The way back** is the previous revision, which ignores `UI_ALLOWED_HOSTS`.
+
+## The television's identity, a watchdog and the page's Frame address (2026-11-19, audit wave 2)
+
+**Before installing the release, if a Frame's address was ever moved to a
+different television, delete that wall's store first.** Each Frame wall keeps
+`$CACHE_DIR/<wall id>/display-state.sqlite`, and this release records inside it
+which television its rows were made on. A store written before that holds no
+record, and nothing on the Pi says which set the old rows belong to, so the
+release takes the first television it meets as theirs. If that is not the set
+they were made on, their content ids name other pictures there. Find the stores
+and stop the Player first (runbook step 3):
+
+    ls "$CACHE_DIR"/*/display-state.sqlite
+
+Delete the one of any wall whose Frame's address changed to another set; the cost
+is a re-upload of that wall's works. A Frame that has always been the same set
+needs nothing.
+
+**The Player now knows each television by its own id, not its address.** The wall
+reads the set's `device.duid` when it connects (one REST read, sent whatever the
+set is showing, no key and no pairing) and keeps a binding only for the set it was
+made on. *The same television at a new address* keeps its pictures and uploads
+nothing again. *A different television* starts afresh: every work is uploaded to
+it, and **the uploaded-pictures category there is cleared of what the Player did
+not put in it, the household's own pictures included**; the old set keeps the
+Player's pictures until the Player is pointed at it again (its bindings come
+back, and nothing is re-uploaded) or somebody removes them there. The first start
+on a store from before this release says `binding.set_adopted` and removes nothing
+until it has the set's id. If the set will not say who it is, the wall uses no
+stored picture for fifteen minutes (`tv.unidentified`), then shows art from
+memory and removes nothing (`tv.unidentified_going_on`). The store moves to schema
+4, and the settings page says what a new address does before and after a save.
+The reasons are `security-model.md` § What it does to the television and
+`data-model.md` § DisplayState.
+
+**The unit changes** (steps 9–11 install it): it is `Type=notify` and the Player
+tells systemd it is up (`READY=1`) and that it is making progress (`WATCHDOG=1`);
+`WatchdogSec=300` restarts one that stops, with SIGTERM, so the art channel is
+closed. `NotifyAccess=all` because the unit's main process is `uv`, which starts
+the Player as its child. `TimeoutStartSec=600` gives a start that syncs room. It
+also gains `LockPersonality`, `RestrictNamespaces`, `RestrictSUIDSGID`,
+`RestrictRealtime`, `ProtectHostname`, `ProtectKernelLogs`, `ProtectControlGroups`,
+`SystemCallArchitectures=native` and an empty `CapabilityBoundingSet`, each
+chosen to touch no path or device; `ProtectClock` is left out on purpose. **None
+of it has run under systemd yet**: the runbook's steps 13a to 14c check that every
+mode reaches `active`, that a bad `.env` fails and is retried, that a stopped
+Player is restarted, and that the screen, the label, the DDC bus and mpv still
+work. Any directive that stops a device is reverted by name in the unit. Setup
+mode's watchdog proves the loop turns, not that a request was answered.
+
+**The settings page holds the Frame's address.** `TV_ADDRESS` may be set there
+or in `.env`; a value in `.env` wins and an empty one pins nothing. **A new
+address saved on the page deletes the television's pairing token first** (and
+saves nothing if it will not delete), because the token belongs to the set that
+issued it, and the set at the new address is asked to pair: a prompt somebody
+accepts at the set. Changing it in `.env` by hand forgets nothing; delete
+`$TV_TOKEN_FILE` too if it now names another set. A save restarts the Player
+only in setup mode or when what it runs on changes, and the page says which and
+which walls start again. The file is layout 3 only while it holds `TV_ADDRESS`,
+else layout 2, which the release before this one reads.
+
+**Smaller changes.** A wall's directory under `CACHE_DIR` is removed a week
+after the wall left this Player, counted only while the Player reads its client
+document. A work no feed has named for 14 days of the wall running is removed from
+the television. `EPD_DEVICE` naming more than one panel is refused at start
+(one panel is the recorded limit by the owner's ruling of 2026-11-19, not the
+design's). A cache that refuses a write no longer ends the wall's pull. A Frame
+wall's loop lines are `frame.started`, `frame.stopped` and `frame.crashed`,
+where they were `daemon.*`; `daemon.misconfigured`, `daemon.setup_mode` and
+`daemon.state_too_new` are unchanged. `FILE_OUTPUT_DIR`, `FILE_OUTPUT_SCREEN` and
+`FILE_OUTPUT_LABEL` make a Player that draws to files and drives no hardware; they
+are not for a wall, and the Player refuses to start with one beside `TV_ADDRESS`
+or `EPD_DEVICE`.
+
+**Check it worked:** `journalctl -u display.service | grep -E 'frame.started|binding.set_|tv.unidentified'`
+shows `frame.started` for each Frame wall, `binding.set_adopted` once on the
+first start after the upgrade and no `tv.unidentified`; `systemctl is-active
+display.service` prints `active`; and the runbook's steps 13a to 14c.
+
+**The way back** is the previous revision, plus one change on each Frame wall's
+store: it refuses a schema it does not know, and parks that wall. Stop the Player
+and set the store's version to the one the previous revision writes (the runbook's
+§ Going back, step 18a). Moved `TV_ADDRESS` to the page? Move it back into `.env`,
+delete it from `values` in `.settings.json` and set `version` to 2 (step 19a).
 
 ## The two new units, and where everything they name now lives
 
@@ -939,7 +1029,7 @@ pre-move version of all five and remains the rollback.
 > **It cannot tell art mode from somebody watching television** — it reads `on`
 > for both. Only `get_artmode` does that, over the art websocket rather than this
 > REST endpoint, which is why there is no one-liner for it here; the Player
-> asks it before every selection.
+> asks it before every selection, and the seam before every other write too.
 >
 > The bumped set was exercised as far as the wire in the process: a clean 3.12
 > interpreter carrying exactly these pins built the client, reached the set over
