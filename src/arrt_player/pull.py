@@ -32,8 +32,10 @@ rest of the wall goes on. Each is said once in the
 journal when it starts and once when it ends. None names the token.
 
 **Nothing the server sends is read without a bound.** A master is streamed to
-disk under a running hash and stopped at the size its feed declares; the client
-and label documents are read up to `DOCUMENT_MAX_BYTES`.
+disk under a running hash and stopped at the size its feed declares; a feed is
+read up to `MANIFEST_MAX_BYTES`, and the client and label documents up to
+`DOCUMENT_MAX_BYTES`. A document past its bound is refused as unreadable, and
+what the cache holds stays.
 
 **The heartbeat rides along.** Each worker goes on writing its wall's heartbeat
 file into the wall's cache (`WallSettings.heartbeat_root` says why there), and
@@ -64,6 +66,7 @@ import aiohttp
 from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
 from arrt_player.config import CACHED_MANIFEST_FILENAME, PLAIN_COMPONENT, ClientSettings, WallSettings
 from arrt_player.episodes import ReportOnce
+from arrt_player.heartbeat import REPORTED_AT_KEY
 from arrt_player.heartbeat import path_in as heartbeat_path_in
 from arrt_player.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
 from arrt_player.manifest import MEDIA_DIRNAME, REQUESTED_MAJORS, Feed, ManifestUnreadable, Work, media_name, parse
@@ -122,8 +125,15 @@ MEDIA_HOLD_SECONDS: Final[float] = 10 * 60.0
 
 #: The most of a client or label document this Player reads. Each is a few
 #: kilobytes; the bound is what stops a server, or anything answering in its
-#: place, from filling the Pi's memory with one.
+#: place, from filling the Pi's memory with one. The contract's `max_bytes` for
+#: both routes, which the server promises never to exceed.
 DOCUMENT_MAX_BYTES: Final[int] = 1024 * 1024
+
+#: The most of a feed this Player reads: the contract's `max_bytes` for the
+#: manifest route. A home wall's feed is tens of kilobytes; a server would reach
+#: this only by rotating every few seconds for days, so a feed past it is a
+#: fault, and the wall keeps the one it has.
+MANIFEST_MAX_BYTES: Final[int] = 16 * 1024 * 1024
 
 #: How much of a body is read at a time.
 _CHUNK_BYTES: Final[int] = 64 * 1024
@@ -138,7 +148,7 @@ _UNREACHABLE: Final = (aiohttp.ClientError, asyncio.TimeoutError, OSError)
 
 
 class DocumentTooLarge(ValueError):
-    """A document the server sent runs past `DOCUMENT_MAX_BYTES`."""
+    """A document the server sent runs past the bound this Player reads it to."""
 
 
 class _Poll(Enum):
@@ -322,10 +332,10 @@ class Pull:
             return _Poll.ANSWERED
 
         try:
-            text = body.decode("utf-8")
+            text = _text_of(body, "feed", MANIFEST_MAX_BYTES)
             parsed = parse(text)
             document = json.loads(text)
-        except (UnicodeDecodeError, ManifestUnreadable) as exc:
+        except (DocumentTooLarge, UnicodeDecodeError, ManifestUnreadable) as exc:
             # Checked with the same parser the watcher uses, before anything is
             # cached: a refused document must never become the "last good" one a
             # restart would start from.
@@ -341,7 +351,9 @@ class Pull:
 
         return await self._adopt_feed(session, parsed, document, served_etag)
 
-    async def _request_manifest(self, session: aiohttp.ClientSession, headers: dict[str, str]) -> tuple[int, bytes, str | None]:
+    async def _request_manifest(
+        self, session: aiohttp.ClientSession, headers: dict[str, str]
+    ) -> tuple[int, bytes | None, str | None]:
         """Ask for each requested major, highest first, and keep the first answer that is not a 404.
 
         **A 404 means "not this major for this wall"**, and the next one down is
@@ -366,13 +378,18 @@ class Pull:
         self._higher_asked_at = now
         return 0
 
-    async def _walk(self, session: aiohttp.ClientSession, headers: dict[str, str], start: int) -> tuple[int, bytes, str | None]:
-        """Ask each major from `start` down, stopping at the first answer that is not a 404."""
+    async def _walk(
+        self, session: aiohttp.ClientSession, headers: dict[str, str], start: int
+    ) -> tuple[int, bytes | None, str | None]:
+        """Ask each major from `start` down, stopping at the first answer that is not a 404.
+
+        A feed's body is None once it runs past `MANIFEST_MAX_BYTES`.
+        """
         self._answering = None
         for index in range(start, len(self._manifest_urls)):
             async with session.get(self._manifest_urls[index], headers=headers) as response:
                 status = response.status
-                body = await response.read() if status == HTTPStatus.OK else b""
+                body = await _read_capped(response, MANIFEST_MAX_BYTES) if status == HTTPStatus.OK else b""
                 served_etag = response.headers.get("ETag")
             if status != HTTPStatus.NOT_FOUND:
                 self._answering = index
@@ -763,6 +780,9 @@ class ClientPull:
         self._unreadable = ReportOnce()
         self._uncacheable = ReportOnce()
         self._heartbeat_failing = ReportOnce()
+        #: The last client heartbeat the server refused, without its instant,
+        #: which is not sent again; None once one is accepted.
+        self._refused_report: dict[str, Any] | None = None
 
     def cached(self) -> ClientDocument | None:
         """The last document this client accepted, or None if there is none it can read."""
@@ -790,7 +810,7 @@ class ClientPull:
         try:
             async with self._client().get(self._client_url, headers=headers) as response:
                 status = response.status
-                body = await _read_capped(response) if status == HTTPStatus.OK else b""
+                body = await _read_capped(response, DOCUMENT_MAX_BYTES) if status == HTTPStatus.OK else b""
                 served_etag = response.headers.get("ETag")
         except _UNREACHABLE as exc:
             self._report_unreachable(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
@@ -820,7 +840,7 @@ class ClientPull:
         if status == HTTPStatus.NOT_MODIFIED:
             return None
         try:
-            text = _text_of(body, "client document")
+            text = _text_of(body, "client document", DOCUMENT_MAX_BYTES)
             document = parse_client_document(text)
         except (DocumentTooLarge, UnicodeDecodeError, ClientDocumentUnreadable) as exc:
             if self._unreadable.begin():
@@ -857,7 +877,20 @@ class ClientPull:
         return document
 
     async def report(self, heartbeat: dict[str, Any]) -> bool:
-        """POST the client heartbeat. True when the server answered 204."""
+        """POST the client heartbeat. True when the server answered 204.
+
+        **A report the server refused is not sent again until it changes**
+        (`transport.json`, the client heartbeat's `400` and `413`, and any other
+        `4xx` but `401`, which a `POST` reads as its `400`): the same report gets
+        the same answer, so asking again each poll only fills the server's log.
+        Changed means any field but the instant it was made, so a screen
+        plugged in is sent at once. A refused token is the token's fault, not
+        the report's, and the report goes on being sent; so does one the server
+        failed with a `5xx` or did not answer.
+        """
+        report = {key: value for key, value in heartbeat.items() if key != REPORTED_AT_KEY}
+        if report == self._refused_report:
+            return False
         try:
             async with self._client().post(
                 self._heartbeat_url,
@@ -870,13 +903,18 @@ class ClientPull:
             # would be the same outage told twice.
             return False
         if status == HTTPStatus.NO_CONTENT:
+            self._refused_report = None
             if self._heartbeat_failing.end():
                 log.info("the server is accepting this client's heartbeat again", extra={"event": "client.heartbeat_ok"})
             return True
+        refuses_the_report = status < HTTPStatus.INTERNAL_SERVER_ERROR and status != HTTPStatus.UNAUTHORIZED
+        if refuses_the_report:
+            self._refused_report = report
         if self._heartbeat_failing.begin():
             log.warning(
-                "the server refused this client's heartbeat with %d; it will be sent again",
+                "the server refused this client's heartbeat with %d; %s",
                 status,
+                "it will be sent again when it changes" if refuses_the_report else "it will be sent again",
                 extra={"event": "client.heartbeat_refused", "status": status},
             )
         return False
@@ -1042,7 +1080,7 @@ class LabelPull:
         try:
             async with self._client().get(url, headers=headers) as response:
                 status = response.status
-                body = await _read_capped(response) if status == HTTPStatus.OK else b""
+                body = await _read_capped(response, DOCUMENT_MAX_BYTES) if status == HTTPStatus.OK else b""
                 served_etag = response.headers.get("ETag")
         except _UNREACHABLE as exc:
             self._report_unreachable(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
@@ -1087,7 +1125,7 @@ class LabelPull:
         if status == HTTPStatus.NOT_MODIFIED:
             return LabelAnswer(reachable=True)
         try:
-            document = parse_label_document(_text_of(body, "label document"))
+            document = parse_label_document(_text_of(body, "label document", DOCUMENT_MAX_BYTES))
         except (DocumentTooLarge, UnicodeDecodeError, LabelDocumentUnreadable) as exc:
             if self._unreadable.begin():
                 log.error(  # noqa: TRY400 -- the message is the finding
@@ -1273,20 +1311,20 @@ def _discard_quietly(path: Path) -> None:
         _discard(path)
 
 
-async def _read_capped(response: aiohttp.ClientResponse) -> bytes | None:
-    """A document's body, or None once it runs past `DOCUMENT_MAX_BYTES`."""
+async def _read_capped(response: aiohttp.ClientResponse, limit: int) -> bytes | None:
+    """A document's body, or None once it runs past `limit` bytes, read no further than one chunk past it."""
     body = bytearray()
     async for chunk in response.content.iter_chunked(_CHUNK_BYTES):
         body += chunk
-        if len(body) > DOCUMENT_MAX_BYTES:
+        if len(body) > limit:
             return None
     return bytes(body)
 
 
-def _text_of(body: bytes | None, what: str) -> str:
+def _text_of(body: bytes | None, what: str, limit: int) -> str:
     """A capped read as text. Raises `DocumentTooLarge` for one past the cap, `UnicodeDecodeError` for one that is not UTF-8."""
     if body is None:
-        raise DocumentTooLarge(f"the {what} runs past {DOCUMENT_MAX_BYTES} bytes, the most this Player reads")
+        raise DocumentTooLarge(f"the {what} runs past {limit} bytes, the most this Player reads")
     return body.decode("utf-8")
 
 

@@ -746,6 +746,43 @@ async def test_a_screen_plugged_in_is_reported_at_once_and_an_unchanged_one_is_n
     }
 
 
+def _client_heartbeat_posts(server) -> int:
+    return server.requests.count(("POST", "/client/heartbeat"))
+
+
+@pytest.mark.parametrize("status", [400, 413, 422])
+async def test_a_client_heartbeat_the_server_refuses_is_sent_once_and_again_only_when_an_output_changes(
+    client, server, drm, caplog, status
+):
+    """The same report gets the same answer: the server's log takes it once, and a screen plugged in is news."""
+    server.client_heartbeat_status = status
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+        async with Running(supervisor_for(client, drm)):
+            await eventually(lambda: _client_heartbeat_posts(server) == 1, what="the first report")
+            await asyncio.sleep(0.3)
+            assert _client_heartbeat_posts(server) == 1, "a refused, unchanged report was sent again"
+
+            (drm / "card1-HDMI-A-2" / "status").write_text("connected\n")
+            (drm / "card1-HDMI-A-2" / "modes").write_text("3840x2160\n")
+            await eventually(lambda: _client_heartbeat_posts(server) == 2, what="the changed report")
+            await asyncio.sleep(0.3)
+            assert _client_heartbeat_posts(server) == 2, "a refused, changed report was sent again unchanged"
+
+    refused = [record for record in caplog.records if record.__dict__.get("event") == "client.heartbeat_refused"]
+    assert [record.status for record in refused] == [status], "the refusal was not said once"
+
+
+async def test_a_client_heartbeat_whose_token_is_refused_is_sent_again_while_the_token_stays_refused(client, server, drm, caplog):
+    """A 401 is the token, not the report: the client keeps reporting, and says so once."""
+    server.tokens = {}
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+        async with Running(supervisor_for(client, drm)):
+            await eventually(lambda: _client_heartbeat_posts(server) >= 3, what="the report to go on being sent")
+
+    refused = [record for record in caplog.records if record.__dict__.get("event") == "client.heartbeat_refused"]
+    assert [record.status for record in refused] == [401]
+
+
 def test_a_machine_with_no_drm_directory_has_no_hdmi_outputs(tmp_path):
     assert hdmi_outputs(tmp_path / "absent") == []
 
