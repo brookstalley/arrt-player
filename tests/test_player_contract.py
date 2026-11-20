@@ -85,6 +85,7 @@ _REFUSED_BECAUSE = {
     "horizon-of-no-length.json": "not a whole number of days",
     # A major 1 document under a major 2 schema: a major this Player does not read.
     "major-1.json": "schema major 1 is not supported",
+    "media-url-empty.json": "carries no media with a sha256 and a url",
     "scene-ends-before-it-starts.json": "the scene ends before it starts",
     "scene-names-a-work-not-in-works.json": "names a work that is not in its works",
     "slot-ends-before-it-starts.json": "a slot ends before it starts",

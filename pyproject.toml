@@ -195,7 +195,7 @@ packages = ["src/arrt_player"]
 # number anyone can read here. A tag is named and does not move, which is what
 # "published" asks of it without an index account to hold; swapping to PyPI is
 # this one line.
-arrt-contract = { git = "https://github.com/brookstalley/arrt", tag = "contract-v1.0.0", subdirectory = "contract" }
+arrt-contract = { git = "https://github.com/brookstalley/arrt", tag = "contract-v1.2.0", subdirectory = "contract" }
 
 [tool.uv]
 # **The pin that a `[dependency-groups]` entry cannot express, and the decision it

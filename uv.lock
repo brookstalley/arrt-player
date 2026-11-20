@@ -134,8 +134,8 @@ wheels = [
 
 [[package]]
 name = "arrt-contract"
-version = "1.0.0"
-source = { git = "https://github.com/brookstalley/arrt?subdirectory=contract&tag=contract-v1.0.0#c5e2d5e111403a47f77aa6daaf7ecbddcb318f86" }
+version = "1.2.0"
+source = { git = "https://github.com/brookstalley/arrt?subdirectory=contract&tag=contract-v1.2.0#8170d0fe3ecf3849d9c3c6f0a191763a3167c655" }
 dependencies = [
     { name = "jsonschema" },
     { name = "referencing" },
@@ -188,7 +188,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "arrt-contract", git = "https://github.com/brookstalley/arrt?subdirectory=contract&tag=contract-v1.0.0" },
+    { name = "arrt-contract", git = "https://github.com/brookstalley/arrt?subdirectory=contract&tag=contract-v1.2.0" },
     { name = "black", specifier = ">=24" },
     { name = "hypothesis", specifier = ">=6" },
     { name = "jsonschema", specifier = ">=4.23" },
