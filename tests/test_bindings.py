@@ -1880,32 +1880,34 @@ class _ThePhaseIsOneOfFour:
         self._going_on_lines, self._set_changed_lines = going_on, set_changed
 
 
+#: How each sequence begins, and the phase the wall is in once it has: on the set it met, waiting for a set
+#: to say, and going on from the store in memory, with no set recorded and with one.
+_OPENINGS = {
+    "a wall on the set it met": ((THIS_SET,), "Identified"),
+    "a wall waiting for the set to say": ((None,), "Withheld"),
+    "a wall going on from the store in memory": ((None, "the patience runs out"), "GoingOn"),
+    "a wall going on from the store in memory after it met its set": (
+        (THIS_SET, "an outage", "the set will not say", "the patience runs out"),
+        "GoingOn",
+    ),
+}
+
+
 class TestTheWallIsInOnePhaseOfFour:
     @pytest.mark.parametrize("first", sorted(_BETWEEN_PASSES))
+    @pytest.mark.parametrize("opening", sorted(_OPENINGS))
     async def test_every_sequence_of_what_the_set_and_the_store_do_leaves_one_phase(
-        self, settings, clock, publish, caplog, tmp_path, first
+        self, settings, clock, publish, caplog, opening, first
     ):
-        """Every sequence of three, starting with `first`, from a wall that met its set, one that is waiting for it
-        to say, and one going on from the store in memory with a set recorded and with none; then the set says
-        twice, which ends each on its store."""
+        """From `opening`, every sequence of three that starts with `first`; then the set says twice, which ends
+        each on the device's store."""
         import itertools
 
-        openings = {
-            "a wall on the set it met": (THIS_SET,),
-            "a wall waiting for the set to say": (None,),
-            "a wall going on from the store in memory": (None, "the patience runs out"),
-            "a wall going on from the store in memory after it met its set": (
-                THIS_SET,
-                "an outage",
-                "the set will not say",
-                "the patience runs out",
-            ),
-        }
-        runs, phases = 0, set()
-        for opening, rest in itertools.product(sorted(openings), itertools.product(sorted(_BETWEEN_PASSES), repeat=2)):
+        (device_id, *before), opened_in = _OPENINGS[opening]
+        runs, opened, phases = 0, set(), set()
+        for rest in itertools.product(sorted(_BETWEEN_PASSES), repeat=2):
             runs += 1
             caplog.clear()
-            device_id, *before = openings[opening]
             tv = _a_set(device_id)
             with caplog.at_level(logging.INFO), DisplayState(Path(":memory:"), now=clock.as_clock().now) as store:
                 wall = _a_frame(settings, tv, store, clock)
@@ -1914,7 +1916,9 @@ class TestTheWallIsInOnePhaseOfFour:
                 history = [opening]
                 await wall.tick()
                 watching.after_a_pass(history)
-                for name in (*before, first, *rest, "this set says", "this set says"):
+                for step, name in enumerate((*before, first, *rest, "this set says", "this set says")):
+                    if step == len(before):
+                        opened.add(type(wall._display._phase).__name__)
                     history.append(name)
                     undo = _BETWEEN_PASSES[name](tv, store, publish, clock)
                     await wall.tick()
@@ -1923,8 +1927,10 @@ class TestTheWallIsInOnePhaseOfFour:
                         undo()
                 await wall._display.close()
                 phases |= watching.phases
-        assert runs == len(openings) * len(_BETWEEN_PASSES) ** 2
-        assert phases == {"NotYetKnown", "Identified", "Withheld", "GoingOn"}, f"only {sorted(phases)} were reached"
+        assert runs == len(_BETWEEN_PASSES) ** 2
+        assert opened == {opened_in}, f"{opening} opened the sequences in {sorted(opened)}"
+        if first == "an outage":
+            assert "NotYetKnown" in phases, "an outage did not leave the wall not knowing the set"
 
 
 class TestTheWallsRunningTimeIsTheWallsWhicheverStoreItUses:
