@@ -140,12 +140,13 @@ MANIFEST_MAX_BYTES: Final[int] = 16 * 1024 * 1024
 #: How much of a body is read at a time.
 _CHUNK_BYTES: Final[int] = 64 * 1024
 
-#: The statuses with which the server refuses a client heartbeat for what it
-#: says: the transport table's `not_json` and `not_a_client_heartbeat` (400) and
-#: `too_large` (413), each answered with the table's error body. The same report
-#: gets the same answer, so a report refused this way is held (`ClientPull.report`).
-#: `401` is the token's fault, not the report's, and is not among them.
-CLIENT_HEARTBEAT_REFUSALS: Final[frozenset[int]] = frozenset({HTTPStatus.BAD_REQUEST, HTTPStatus.REQUEST_ENTITY_TOO_LARGE})
+#: The `4xx` statuses that are no verdict on a client heartbeat whatever body
+#: comes with them: `401` is the token's fault, not the report's, and `408` and
+#: `429` say to try again. Every other `4xx` with the server's error body is
+#: its refusal of the report (`ClientPull.report`).
+NOT_A_VERDICT_ON_THE_REPORT: Final[frozenset[int]] = frozenset(
+    {HTTPStatus.UNAUTHORIZED, HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS}
+)
 
 #: How long a client heartbeat the server refused is held before it is sent
 #: again unchanged. Long enough that a report the server will always refuse costs
@@ -953,12 +954,15 @@ class ClientPull:
         within one. Changed means any field but the instant it was made, so a
         screen plugged in, or a new settings address, is sent at once.
 
-        **Refused means the server's word on this report**: a status in
-        `CLIENT_HEARTBEAT_REFUSALS` with the table's error body. Anything else
-        under 500 is not a verdict on the report (a `429`, a proxy's `404`, a
-        captive portal's `200`): it is read as the table's `unanswered` case is,
-        like a `5xx` or no answer, and the report goes on being sent. So does one
-        refused for its token (`401`), which is the token's fault.
+        **Refused means the server's word on this report**, which is known by
+        its error body (the transport table's `error_body`), not by the status:
+        any `4xx` carrying it, the table's `400` and `413` and a status no row
+        names alike, but those in `NOT_A_VERDICT_ON_THE_REPORT`. An answer
+        without that body was not the server's (a proxy's `404`, a captive
+        portal's `200`, a framework's own `400`), and neither is a verdict on
+        the report: like a `408`, a `429`, a `5xx` or no answer, it is read as
+        the table's `unanswered` case is, and the report goes on being sent. So
+        does one refused for its token (`401`), which is the token's fault.
         """
         report = {key: value for key, value in heartbeat.items() if key != REPORTED_AT_KEY}
         if self._held is not None:
@@ -972,8 +976,10 @@ class ClientPull:
                 headers={**self._auth(), "Content-Type": "application/json"},
             ) as response:
                 status = response.status
-                refused = status in CLIENT_HEARTBEAT_REFUSALS and _is_error_body(
-                    await _read_capped(response, ERROR_BODY_MAX_BYTES)
+                refused = (
+                    HTTPStatus.BAD_REQUEST <= status < HTTPStatus.INTERNAL_SERVER_ERROR
+                    and status not in NOT_A_VERDICT_ON_THE_REPORT
+                    and _is_error_body(await _read_capped(response, ERROR_BODY_MAX_BYTES))
                 )
         except _UNREACHABLE:
             # Said by `fetch`, which runs on the same poll; a second line here
