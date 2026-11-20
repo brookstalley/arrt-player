@@ -66,6 +66,7 @@ import aiohttp
 from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
 from arrt_player.config import CACHED_MANIFEST_FILENAME, PLAIN_COMPONENT, ClientSettings, WallSettings
 from arrt_player.episodes import ReportOnce
+from arrt_player.heartbeat import REPORTED_AT_KEY
 from arrt_player.heartbeat import path_in as heartbeat_path_in
 from arrt_player.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
 from arrt_player.manifest import MEDIA_DIRNAME, REQUESTED_MAJORS, Feed, ManifestUnreadable, Work, media_name, parse
@@ -779,6 +780,9 @@ class ClientPull:
         self._unreadable = ReportOnce()
         self._uncacheable = ReportOnce()
         self._heartbeat_failing = ReportOnce()
+        #: The last client heartbeat the server refused, without its instant,
+        #: which is not sent again; None once one is accepted.
+        self._refused_report: dict[str, Any] | None = None
 
     def cached(self) -> ClientDocument | None:
         """The last document this client accepted, or None if there is none it can read."""
@@ -873,7 +877,20 @@ class ClientPull:
         return document
 
     async def report(self, heartbeat: dict[str, Any]) -> bool:
-        """POST the client heartbeat. True when the server answered 204."""
+        """POST the client heartbeat. True when the server answered 204.
+
+        **A report the server refused is not sent again until it changes**
+        (`transport.json`, the client heartbeat's `400` and `413`, and any other
+        `4xx` but `401`, which a `POST` reads as its `400`): the same report gets
+        the same answer, so asking again each poll only fills the server's log.
+        Changed means any field but the instant it was made, so a screen
+        plugged in is sent at once. A refused token is the token's fault, not
+        the report's, and the report goes on being sent; so does one the server
+        failed with a `5xx` or did not answer.
+        """
+        report = {key: value for key, value in heartbeat.items() if key != REPORTED_AT_KEY}
+        if report == self._refused_report:
+            return False
         try:
             async with self._client().post(
                 self._heartbeat_url,
@@ -886,13 +903,18 @@ class ClientPull:
             # would be the same outage told twice.
             return False
         if status == HTTPStatus.NO_CONTENT:
+            self._refused_report = None
             if self._heartbeat_failing.end():
                 log.info("the server is accepting this client's heartbeat again", extra={"event": "client.heartbeat_ok"})
             return True
+        refuses_the_report = status < HTTPStatus.INTERNAL_SERVER_ERROR and status != HTTPStatus.UNAUTHORIZED
+        if refuses_the_report:
+            self._refused_report = report
         if self._heartbeat_failing.begin():
             log.warning(
-                "the server refused this client's heartbeat with %d; it will be sent again",
+                "the server refused this client's heartbeat with %d; %s",
                 status,
+                "it will be sent again when it changes" if refuses_the_report else "it will be sent again",
                 extra={"event": "client.heartbeat_refused", "status": status},
             )
         return False

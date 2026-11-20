@@ -1308,7 +1308,9 @@ class Supervisor:
         **Changed is news and is sent at once**: a screen plugged in is what a
         curator is waiting to see on the Clients page before choosing it. An
         unchanged report is sent once a minute, so the server can say how long
-        ago this client was heard from.
+        ago this client was heard from. One the server refused waits for a
+        change (`pull.ClientPull.report` says why), so it is offered on every
+        poll and the link sends nothing until it differs.
         """
         if self._frame_identity is not None:
             await self._frame_identity.refresh()
