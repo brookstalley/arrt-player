@@ -75,6 +75,7 @@ import functools
 import hashlib
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
@@ -136,6 +137,77 @@ class SetUnidentified(Exception):
         self.wait = wait
 
 
+@dataclass(frozen=True)
+class NotYetKnown:
+    """No set has said which it is on this connection: the state of a fresh process, and of every connection after one went."""
+
+
+@dataclass(frozen=True)
+class Identified:
+    """The set on this connection said it is `identity`, and the device's store has made its bindings that set's."""
+
+    identity: str
+
+
+@dataclass(frozen=True)
+class Withheld:
+    """The set on this connection has not said which it is since `since`, on the elapsed clock, and is waited for."""
+
+    since: float
+
+
+@dataclass(frozen=True, eq=False)
+class GoingOn:
+    """The set on this connection did not say within the patience, and the wall shows art on it from `scratch`.
+
+    `scratch` is an empty store held in memory, which removes nothing from the
+    set (`FrameDisplay._may_remove`).
+    """
+
+    scratch: DisplayState
+
+
+#: Where the wall stands with the set it reaches: one of four, and nothing else.
+type SetPhase = NotYetKnown | Identified | Withheld | GoingOn
+
+
+class _IdentityReads:
+    """When the set may next be asked which it is, why it last would not say, and that episode's lines.
+
+    **Outlive a connection**, unlike the phase: a set that keeps dropping its
+    connection is not asked once per flap, and is said not to say once, until a
+    set says (`tv.unidentified`, then `tv.identified`).
+    """
+
+    __slots__ = ("_episode", "_wait", "reason")
+
+    def __init__(self, wait: Backoff) -> None:
+        self._wait = wait
+        self._episode = ReportOnce()
+        self.reason = ""
+
+    def is_due(self) -> bool:
+        return self._wait.is_due()
+
+    def unanswered(self, reason: str) -> float:
+        """A read failed: wait longer before the next, say it once per episode, and return the wait."""
+        wait = self._wait.hold()
+        self.reason = reason
+        if self._episode.begin():
+            log.warning(
+                "the television did not say which set it is (%s); the wall uses none of its pictures on it until it does",
+                reason,
+                extra={"event": "tv.unidentified"},
+            )
+        return wait
+
+    def answered(self) -> None:
+        """A set said which it is: ask on the next connection at once, and end the episode."""
+        self._wait.clear()
+        if self._episode.end():
+            log.info("the television says which set it is again", extra={"event": "tv.identified"})
+
+
 def frame_wall(
     *,
     settings: Settings,
@@ -186,35 +258,25 @@ class FrameDisplay:
     def __init__(self, *, settings: Settings, tv: TvClient, state: DisplayState, clock: Clock) -> None:
         self._settings = settings
         self._tv = tv
-        #: The device's store on disk, and the store whose bindings the wall is
-        #: using: the same one, except while a set that will not say who it is
-        #: is shown art from `_scratch`, an empty store held in memory.
+        #: The device's store on disk. **The wall's running time with a feed is
+        #: counted and saved here whichever store the bindings come from**,
+        #: because it is the wall's time, not a set's (`_count_feed_time`).
         self._store = state
-        self._state = state
-        self._scratch: DisplayState | None = None
         self._clock = clock
 
-        #: The identity of the set this connection reaches, once read and made
-        #: the store's (`_know_the_set`). **None until then, and again whenever
-        #: the connection goes**, because whatever answers at the address next
-        #: may be another set.
-        self._on: str | None = None
-        #: When the set first declined to say who it is since it last did, on
-        #: the elapsed clock; and the wait before it is asked again.
-        self._unidentified_since: float | None = None
-        self._identity_retry = Backoff(
-            minimum=settings.tv_retry_min_seconds,
-            maximum=settings.tv_retry_max_seconds,
-            monotonic=clock.monotonic,
+        #: Which set this connection reaches, and so whose bindings are in use
+        #: (`_state`). **Moved only by `_become`**, so the store in use, the
+        #: patience and the going-on line cannot disagree with it. `NotYetKnown`
+        #: again whenever the connection goes, because whatever answers at the
+        #: address next may be another set.
+        self._phase: SetPhase = NotYetKnown()
+        self._identity_reads = _IdentityReads(
+            Backoff(
+                minimum=settings.tv_retry_min_seconds,
+                maximum=settings.tv_retry_max_seconds,
+                monotonic=clock.monotonic,
+            )
         )
-        self._unidentified_reason = ""
-        #: The set would not say who it is, and then the wall went on without it:
-        #: each said once, both ended by the set saying.
-        self._unidentified = ReportOnce()
-        self._going_on_unidentified = ReportOnce()
-        #: Whether the last pass ended for want of the set's identity, which says
-        #: nothing about whether the set answers (`heartbeat_fields`).
-        self._ended_unidentified = False
 
         #: What the set last announced about its own wall, which is the only
         #: honest account of it this product has. Written from the television's
@@ -357,10 +419,11 @@ class FrameDisplay:
         )
         self._store_busy = ReportOnce()
         self._store_failing = ReportOnce()
-        #: Whether the last pass ended on the store. The wall's loop beats such a
-        #: pass as unreachable, which is a claim about the set this pass did not
-        #: establish, so the heartbeat says it could not tell (`heartbeat_fields`).
-        self._ended_on_the_store = False
+        #: Whether the last pass ended on the store, or for want of the set's
+        #: identity. The wall's loop beats such a pass as unreachable, which is a
+        #: claim about the set this pass did not establish, so the heartbeat says
+        #: it could not tell (`heartbeat_fields`).
+        self._ended_not_knowing_whether_the_set_answers = False
         #: An art-mode announcement whose read has not yet been acted on to the
         #: end. The set's flag is consumed when it is collected, so a pass that a
         #: store fault ends after collecting it would otherwise lose the news,
@@ -387,6 +450,11 @@ class FrameDisplay:
     def last_error(self) -> str | None:
         return self._last_error
 
+    @property
+    def _state(self) -> DisplayState:
+        """The store whose bindings the wall is using: the device's, except while it goes on from the store in memory."""
+        return self._phase.scratch if isinstance(self._phase, GoingOn) else self._store
+
     # -- the programme's memory, which is the bindings' -------------------------
 
     @property
@@ -405,7 +473,7 @@ class FrameDisplay:
     def adopted(self, pictures: Sequence[Picture]) -> None:
         named = frozenset(picture.work_id for picture in pictures)
         for work_id in self._named - named:
-            self._left_at[work_id] = self._state.feed_seconds
+            self._left_at[work_id] = self._store.feed_seconds
         self._named = named
         self._kept_by_the_set.clear()
         self._reconciliation_owed = True
@@ -472,13 +540,11 @@ class FrameDisplay:
         # the latest rather than the first.
         self._last_error = str(exc)
         if isinstance(exc, StoreFault):
-            self._ended_unidentified = False
             return self._the_store_failed(exc)
-        self._ended_on_the_store = False
         if isinstance(exc, SetUnidentified):
-            self._ended_unidentified = True
+            self._ended_not_knowing_whether_the_set_answers = True
             return exc.wait
-        self._ended_unidentified = False
+        self._ended_not_knowing_whether_the_set_answers = False
         # The connection is gone, and with it what is known of the set behind it.
         self._forget_the_set()
         self.record.moved_to(ScreenState.UNREACHABLE)
@@ -487,8 +553,7 @@ class FrameDisplay:
         return self._connection_retry.hold()
 
     def answering(self) -> None:
-        self._ended_on_the_store = False
-        self._ended_unidentified = False
+        self._ended_not_knowing_whether_the_set_answers = False
         if self._unavailable.end():
             log.info("the television is answering again", extra={"event": "tv.recovered"})
         self._connection_retry.clear()
@@ -505,7 +570,7 @@ class FrameDisplay:
         the store failing says nothing about what the wall shows, and the
         heartbeat's `last_error` carries the fault to the server.
         """
-        self._ended_on_the_store = True
+        self._ended_not_knowing_whether_the_set_answers = True
         fields = {"operation": exc.operation, "fault": exc.fault}
         if exc.may_clear:
             if self._store_busy.begin():
@@ -528,7 +593,7 @@ class FrameDisplay:
             # A pass that ended on the store, or for want of the set's identity,
             # did not find out whether the set answers: the loop's
             # "unreachable" is about the pass, not the set.
-            "television_reachable": None if self._ended_on_the_store or self._ended_unidentified else reachable,
+            "television_reachable": None if self._ended_not_knowing_whether_the_set_answers else reachable,
             "television_showing_art": self._showing_art,
             # **The Frame draws no label**, so it reports none, as a screen does.
             # A client's panel is reported as a label output in the client
@@ -547,7 +612,7 @@ class FrameDisplay:
         return Capabilities(screen=self._settings.geometry.screen, backend="frame", label_modes=("none",))
 
     async def close(self) -> None:
-        self._leave_the_scratch_store()
+        self._become(NotYetKnown())
         await self._tv.close()
 
     # -- which set this is -------------------------------------------------
@@ -555,14 +620,15 @@ class FrameDisplay:
     async def _know_the_set(self) -> None:
         """Learn which set this connection reaches, and make the bindings in use that set's, or end the pass.
 
-        Read once per connection (`_on`), so a pass on a connection already
-        identified sends nothing. A set that will not say ends the pass
-        (`SetUnidentified`) and is asked again on its own ladder, until
-        `IDENTITY_PATIENCE_SECONDS` have gone by: then the wall goes on from an
-        empty store in memory, still asking on the ladder, and returns to the
-        device's store once the set says. **`_on` is set only after the store
-        has made the bindings that set's**, so a store fault there ends the pass
-        with nothing used, and the next reads the set again.
+        Read once per connection (`Identified`), so a pass on a connection
+        already identified sends nothing. A set that will not say ends the pass
+        (`SetUnidentified`) and is asked again on its own ladder (`Withheld`),
+        until `IDENTITY_PATIENCE_SECONDS` have gone by on this connection: then
+        the wall goes on from an empty store in memory (`GoingOn`), still asking
+        on the ladder, and returns to the device's store once the set says. **The
+        phase is `Identified` only after the store has made the bindings that
+        set's**, so a store fault there ends the pass with nothing used, and the
+        next reads the set again.
 
         **What the set turned out to be is said, and its cleanup owed, before
         anything after `belongs_to` can fail**: `belongs_to` has committed by
@@ -573,25 +639,27 @@ class FrameDisplay:
         accounted for by nothing on disk. The picture on the wall is among it,
         and stays until another has been selected (`_remove_orphans`).
         """
-        if self._on is not None:
+        phase = self._phase
+        if isinstance(phase, Identified):
             return
-        if not self._identity_retry.is_due():
-            if self._scratch is not None:
+        if not self._identity_reads.is_due():
+            if isinstance(phase, GoingOn):
                 return
-            raise SetUnidentified(self._unidentified_reason, wait=self._settings.tv_retry_min_seconds)
+            raise SetUnidentified(self._identity_reads.reason, wait=self._settings.tv_retry_min_seconds)
         try:
             identity = await self._tv.read_identity()
         except IdentityUnreadable as exc:
-            wait = self._identity_retry.hold()
-            self._set_would_not_say(str(exc))
-            if self._scratch is not None:
+            wait = self._identity_reads.unanswered(str(exc))
+            if isinstance(phase, GoingOn):
                 return
-            if self._clock.monotonic() - (self._unidentified_since or 0.0) < IDENTITY_PATIENCE_SECONDS:
-                raise SetUnidentified(self._unidentified_reason, wait=wait) from exc
-            self._go_on_unidentified()
+            since = phase.since if isinstance(phase, Withheld) else self._clock.monotonic()
+            if self._clock.monotonic() - since < IDENTITY_PATIENCE_SECONDS:
+                self._become(Withheld(since))
+                raise SetUnidentified(self._identity_reads.reason, wait=wait) from exc
+            self._become(GoingOn(DisplayState(Path(":memory:"), now=self._clock.now)))
             return
         met = self._store.belongs_to(identity)
-        from_memory = self._scratch is not None
+        from_memory = isinstance(phase, GoingOn)
         # What this process learned of the wall while the store in memory was
         # in use was learned on this connection, so of this set: it is kept.
         self._met(met, identity, learned_on_this_set=from_memory)
@@ -600,13 +668,32 @@ class FrameDisplay:
             # The picture on the wall is one the store in memory holds: the
             # programme must put this store's up, rather than believe it is.
             self._store.forget_the_wall()
-            self._leave_the_scratch_store()
-        self._on = identity
-        self._identity_retry.clear()
-        self._unidentified_since = None
-        self._going_on_unidentified.end()
-        if self._unidentified.end():
-            log.info("the television says which set it is again", extra={"event": "tv.identified"})
+        self._become(Identified(identity))
+        self._identity_reads.answered()
+
+    def _become(self, phase: SetPhase) -> None:
+        """Move the wall to `phase`: the one place it moves, so what each phase holds goes with it.
+
+        **Leaving `GoingOn` lets go of the store in memory**, however it is left:
+        for the set saying which it is (`_know_the_set` owes the cleanup), for an
+        outage (what that store put up is on a set nobody can name, and nothing
+        removes it), or for the wall closing. **Entering it** forgets what was
+        known of the set's wall and says once that the wall goes on, so the line
+        is said again at the next entry, after any way out.
+        """
+        was = self._phase
+        self._phase = phase
+        if isinstance(was, GoingOn) and phase is not was:
+            was.scratch.close()
+        if isinstance(phase, GoingOn) and not isinstance(was, GoingOn):
+            self._forget_what_the_set_showed()
+            log.warning(
+                "the television has not said which set it is for %d minutes; the wall shows art on it without the "
+                "pictures it put on a set before, uploading the work it shows and then "
+                "every other work of the feed, one a pass, as on a first run, and removes nothing from it until it says",
+                IDENTITY_PATIENCE_SECONDS // 60,
+                extra={"event": "tv.unidentified_going_on"},
+            )
 
     def _met(self, met: SetMet, identity: str, *, learned_on_this_set: bool) -> None:
         """Say what the store found the set to be, and start afresh on a set the bindings were not made on.
@@ -639,40 +726,16 @@ class FrameDisplay:
             # As a first run reconciles: the set's own list against its bindings.
             self._reconciliation_owed = True
 
-    def _set_would_not_say(self, reason: str) -> None:
-        """The identity read failed: note when the episode began, and say it once."""
-        self._unidentified_reason = reason
-        if self._unidentified_since is None:
-            self._unidentified_since = self._clock.monotonic()
-        if self._unidentified.begin():
-            log.warning(
-                "the television did not say which set it is (%s); the wall uses none of its pictures on it until it does",
-                reason,
-                extra={"event": "tv.unidentified"},
-            )
-
-    def _go_on_unidentified(self) -> None:
-        """Show art on a set that will not say who it is, from an empty store in memory, removing nothing."""
-        self._scratch = DisplayState(Path(":memory:"), now=self._clock.now)
-        self._state = self._scratch
-        self._forget_what_the_set_showed()
-        if self._going_on_unidentified.begin():
-            log.warning(
-                "the television has not said which set it is for %d minutes; the wall shows art on it without the "
-                "pictures it put on a set before, uploading the work it shows and then "
-                "every other work of the feed, one a pass, as on a first run, and removes nothing from it until it says",
-                IDENTITY_PATIENCE_SECONDS // 60,
-                extra={"event": "tv.unidentified_going_on"},
-            )
-
     def _the_connection_may_have_gone(self) -> None:
         """A failure the seam reports as something else may have dropped the connection: identify the next one.
 
         **The store in memory is kept**: a refused upload is no outage, and it
         is only on one (`_forget_the_set`) that what was put up while the set
-        would not say is let go.
+        would not say is let go. A set not yet identified is asked at the next
+        pass as it would have been.
         """
-        self._on = None
+        if isinstance(self._phase, Identified):
+            self._become(NotYetKnown())
 
     def _forget_the_set(self) -> None:
         """The connection went: whatever answers next is identified before a binding is used on it.
@@ -684,19 +747,7 @@ class FrameDisplay:
         flap. Those uploads are on a set nobody can name, and nothing removes
         them (`architecture.md`, beside the patience).
         """
-        self._on = None
-        if self._scratch is not None:
-            # What was uploaded while the set would not say is on a set nobody
-            # can name: not carried to whatever answers next.
-            self._leave_the_scratch_store()
-        self._unidentified_since = None
-        self._going_on_unidentified.end()
-
-    def _leave_the_scratch_store(self) -> None:
-        if self._scratch is not None:
-            self._scratch.close()
-            self._scratch = None
-        self._state = self._store
+        self._become(NotYetKnown())
 
     def _forget_what_the_set_showed(self) -> None:
         """Drop what this process learned of the set's wall, its brightness and its keeping, which were another set's."""
@@ -712,8 +763,15 @@ class FrameDisplay:
         return {self._wall_content_id, self._announced_content_id} - {None}
 
     def _may_remove(self) -> bool:
-        """Whether a removal may be sent: only from a store whose recorded identity is the set's on this connection."""
-        return self._on is not None and self._state.tv_identity == self._on
+        """Whether a removal may be sent: only once the set on this connection has said which it is.
+
+        **`Identified` is the device's store with that set recorded as its
+        own**: `_know_the_set` enters it only after `belongs_to` made it so and
+        the store in memory was let go, and nothing records another set until
+        the phase has left it. So a store in memory, or one that knows no set,
+        never sends a removal.
+        """
+        return isinstance(self._phase, Identified)
 
     # -- changing the wall -------------------------------------------------
 
@@ -1055,8 +1113,17 @@ class FrameDisplay:
         and every branch below would be dead code. Reconnecting costs nothing when
         the set is there and raises the real outage when it is not, which is
         exactly the distinction being drawn.
+
+        **A reconnect may reach another set**, or leave the store in memory for
+        the device's, and then the bindings in use were made on another set than
+        the refused id was: whether this set lists it says nothing about the
+        work. The work is looked up again in those bindings, as a selection on
+        that set would have begun: its own binding there, or one upload.
         """
+        made_on = self._state.tv_identity
         await self._connected()
+        if self._state.tv_identity != made_on:
+            return await self._content_id_for(picture)
         listed = await self._tv.listed_content_ids()
         if refused in listed:
             raise TvUnavailable(f"the television refused to select {refused}, which it says it is holding")
@@ -1280,13 +1347,17 @@ class FrameDisplay:
         about to show), the work the Player last put up, the picture the set
         last said is on its wall, a work whose image the set kept when asked
         since the last feed, and a binding whose last naming is unknown.
+
+        **The device's store's bindings, at its count**, which is where the
+        wall's running time is kept; only a pass using that store's bindings
+        asks.
         """
         named = {picture.work_id for picture in pictures}
         on_the_wall = self._on_the_wall()
-        now = self._state.feed_seconds
+        now = self._store.feed_seconds
         retiring: list[Binding] = []
         claimed: set[str] = set()
-        for binding in self._state.bindings():
+        for binding in self._store.bindings():
             if self._is_due_to_retire(binding, named=named, on_the_wall=on_the_wall, now=now):
                 retiring.append(binding)
             elif binding.tv_content_id is not None:
@@ -1294,7 +1365,7 @@ class FrameDisplay:
         return tuple(retiring), frozenset(claimed)
 
     def _is_due_to_retire(self, binding: Binding, *, named: set[str], on_the_wall: set[str | None], now: float) -> bool:
-        if binding.artwork_id in named or binding.artwork_id == self._state.last_selected_work_id:
+        if binding.artwork_id in named or binding.artwork_id == self._store.last_selected_work_id:
             return False
         if binding.tv_content_id in on_the_wall or binding.artwork_id in self._kept_by_the_set:
             return False
@@ -1331,7 +1402,7 @@ class FrameDisplay:
             },
         )
         for binding in going:
-            self._state.retire(binding.artwork_id, binding.tv_content_id)
+            self._store.retire(binding.artwork_id, binding.tv_content_id)
             self._left_at.pop(binding.artwork_id, None)
 
     # -- how long the wall has had a feed ------------------------------------
@@ -1339,13 +1410,16 @@ class FrameDisplay:
     def _count_feed_time(self) -> None:
         """Count the elapsed time since the last pass as the wall running with a feed. Memory only.
 
-        Called only by a pass with a feed adopted, and **on the elapsed clock**,
-        which neither a Player switched off nor an NTP step can move: the first
-        pass of a process counts nothing, however far either clock has moved.
+        **On the device's store whichever store the bindings come from**: the
+        wall ran with a feed while it went on from the store in memory, and that
+        store, with the count, is let go when the set says. Called only by a
+        pass with a feed adopted, and **on the elapsed clock**, which neither a
+        Player switched off nor an NTP step can move: the first pass of a
+        process counts nothing, however far either clock has moved.
         """
         elapsed = self._clock.monotonic()
         if self._feed_time_read_at is not None:
-            self._state.count_feed_time(max(0.0, elapsed - self._feed_time_read_at))
+            self._store.count_feed_time(max(0.0, elapsed - self._feed_time_read_at))
         self._feed_time_read_at = elapsed
 
     def _save_feed_time(self, pictures: Sequence[Picture]) -> None:
@@ -1356,13 +1430,18 @@ class FrameDisplay:
         every pass: the count and the leavings are kept in memory meanwhile,
         and a retirement found due is made at the next reconciliation, through
         the set's gate like any other removal.
+
+        **Written to the device's store**, as the count is kept there. The
+        bindings are looked over only while they are that store's: while the
+        wall goes on from the store in memory, leaving it owes the
+        reconciliation that judges them.
         """
-        if self._state.feed_seconds - self._feed_time_saved_at < FEED_TIME_SAVED_EVERY_SECONDS:
+        if self._store.feed_seconds - self._feed_time_saved_at < FEED_TIME_SAVED_EVERY_SECONDS:
             return
-        self._feed_time_saved_at = self._state.feed_seconds
-        self._state.save_feed_time(named=[picture.work_id for picture in pictures], left=self._left_at)
+        self._feed_time_saved_at = self._store.feed_seconds
+        self._store.save_feed_time(named=[picture.work_id for picture in pictures], left=self._left_at)
         self._left_at.clear()
-        if self._retirements(pictures)[0]:
+        if not isinstance(self._phase, GoingOn) and self._retirements(pictures)[0]:
             self._reconciliation_owed = True
 
     # -- the television ----------------------------------------------------
