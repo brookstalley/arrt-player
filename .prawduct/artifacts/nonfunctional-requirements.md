@@ -51,9 +51,11 @@ code carries them as follows.
 
 Scale is not a goal. One client drives the walls the server assigns it. A client
 has at most one Frame output (`config.FRAME_OUTPUT`, present only when
-`TV_ADDRESS` is set) and at most one label output (`config.PANEL_OUTPUT`,
-`epd-0`, present only when `EPD_DEVICE` is set). HDMI outputs are whatever the
-kernel lists under `/sys/class/drm` (`client.hdmi_outputs`).
+`TV_ADDRESS` is set), and a label is an output a Player has zero or more of, as a
+display is (the owner's ruling of 2026-11-19): the configuration describes at most
+one panel today (`config.PANEL_OUTPUT`, `epd-0`, present only when `EPD_DEVICE` is
+set, and refused when it names more), and nothing past it assumes one. HDMI outputs
+are whatever the kernel lists under `/sys/class/drm` (`client.hdmi_outputs`).
 
 **Cache size is bounded by the feeds, not by a setting.** Per wall, the media
 directory holds the masters named by the feed just adopted and by the one before
@@ -61,13 +63,18 @@ it; everything else is removed at adoption (`pull.Pull._evict`, called from
 `_adopt_feed` with `held | previous`). Tested in
 `tests/test_pull.py::test_a_feeds_media_is_evicted_once_two_documents_in_a_row_have_not_named_it`.
 Composed pictures are removed when no work composes to them
-(`programmes/schedule`, the tidy). What the code does not do, checked by
-searching `src/` for `rmtree`, `rmdir`, `disk_usage` and `statvfs`:
+(`programmes/schedule`, the tidy). A wall taken away from this client loses its
+directory a week later, counted only while the Player reads its client document
+(`client.WallCaches`), and a label's cached document goes when no label maps it
+(`__main__.LabelCacheSweep`), so growth is bounded by the walls and labels the
+document places and by a week's worth of departed ones. A Frame's store grows
+with the bindings of the sets the wall has met and set aside, one row per work
+per set, for as long as the store lasts. What the code does not do, checked by
+searching `src/` for `disk_usage` and `statvfs`:
 
-- **No free-space check and no size cap.** A full disk surfaces as a failed write.
-- **A wall taken away from this client keeps its directory.** Its masters,
-  composed pictures and Frame store stay under `CACHE_DIR/<wall id>/`. Growth is
-  bounded by the number of walls ever assigned.
+- **No free-space check and no size cap.** A full disk surfaces as a failed write,
+  which the pull, the client document, the label cache and the Frame's store each
+  answer without ending the wall (below).
 
 **Memory is bounded by the unit, not by the code.** `deploy/display.service` sets
 `MemoryHigh=60%` and `MemoryMax=75%` of the Pi's RAM, so an exhausted Pi loses
@@ -126,22 +133,28 @@ server is down captions from it for what is left of that hold, never more than
 30 minutes from the restart (`LabelPull.cached`, `LabelRenderer._seed`;
 `tests/test_label_renderer.py`).
 
-**One cache failure is not kept local to the cache.** A write that fails while
-adopting a wall's feed (`pull._write_atomically` inside `Pull._cache_feed`) is not
-caught there. It ends that wall's pull, which ends the wall's worker
-(`__main__._pull_ended`); the supervisor starts it again (below). The previous
-manifest survives, because the write is temp-and-rename. The client document's
-write failure, by contrast, is caught and reported once (`ClientPull.fetch`,
-`client.cache_unwritable`).
+**A cache failure is kept local to the cache.** A write that fails while adopting
+a wall's feed (`pull._write_atomically` inside `Pull._cache_feed`, `ENOSPC` or
+`EROFS`) is caught there: the previous manifest stays where the watcher reads it
+(the write is temp-and-rename), no ETag is stored for the feed that could not be
+written, so the next poll is answered whole and tries again, and the heartbeat
+still goes, because the server answered. It is said once per episode
+(`pull.cache_unwritable`, then `pull.cache_writable`), as the client document's
+(`ClientPull.fetch`, `client.cache_unwritable`) and a label document's
+(`LabelPull`, `label.cache_unwritable`) refused writes are. Held by
+`tests/test_pull.py`. Not checked on the Pi: whether a real read-only remount
+returns `EROFS` for `unlink` and `mkdir` as the tests assume.
 
 ### The process comes back on its own
 
 | Layer | Behaviour | Where | Enforced by |
 |---|---|---|---|
 | systemd | `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0` (no start rate limit) | `deploy/display.service` | `tests/test_deploy_unit.py::test_the_unit_cannot_silently_stop_retrying` |
+| The unit's watchdog | `Type=notify`, `WatchdogSec=300`: a Player that sends no `WATCHDOG=1`, which it sends only for progress, is stopped with SIGTERM and started again; every mode owes `READY=1` or the start fails at `TimeoutStartSec=600` | `deploy/display.service`, `notify.py`, `__main__.PettingSupervisor` | `tests/test_notify.py`, `tests/test_deploy_unit.py::test_the_unit_waits_for_the_players_word_and_ends_one_that_stops_making_progress` |
 | One wall's worker | Restarted after a wait from 5 s doubling to 300 s; the ladder resets after a run longer than 300 s | `client.RESTART_MIN_SECONDS`, `RESTART_MAX_SECONDS`, `Supervisor._keep_running` | `tests/test_client.py::test_a_crashed_worker_is_logged_and_started_again` |
 | A wall's pull | Its death ends its wall's worker at once, so the two restart together | `__main__._beside_its_pull`, `_pull_ended` | `tests/test_main.py::test_a_pull_that_dies_ends_its_walls_worker_at_once_and_says_why` |
 | The supervisor | Not caught. The process ends and systemd restarts it | `client.py` module docstring | — |
+| A fault of the Frame's store (a lock, a full disk, a damaged file) | The pass ends, not the wall; said once per episode and in the heartbeat's `last_error`; tried again on the set's own ladder | `state.store.StoreFault`, `FrameDisplay._the_store_failed` | `tests/test_bindings.py::TestTheWallOutlivesAStoreFault` |
 | A Frame store from a newer Player | That wall is parked and says so once; other walls run | `__main__.run_frame_wall`, `state.StateSchemaTooNew` | `tests/test_main.py::test_a_store_from_a_newer_player_parks_its_wall_and_says_so_once` |
 
 ### Start-up
@@ -159,7 +172,10 @@ characters or holds control characters (the same functions judge the settings
 page's form, so neither accepts what the other refuses); when the settings
 page's file cannot be trusted (`settings_ui.store.SettingsUnreadable`); and when
 a retired setting (`WALL_ID`, `WALL_TOKEN`, `MANIFEST_SOURCE`) is set
-(`config.RETIRED_SETTINGS`). `__main__.main` turns that `ConfigError` into exit
+(`config.RETIRED_SETTINGS`); when `TV_ADDRESS` is not an IPv4 address or a host
+name without a scheme or a port; when `EPD_DEVICE` names more than one panel;
+and when `FILE_OUTPUT_DIR` is set beside `TV_ADDRESS` or `EPD_DEVICE`, in or around
+`CACHE_DIR`, in slideshow mode, or a `FILE_OUTPUT_*` key is set without it. `__main__.main` turns that `ConfigError` into exit
 status 2 and a line on stderr
 (`tests/test_main.py::test_a_missing_deployment_value_refuses_to_start_and_says_so_at_the_terminal`).
 Under `Restart=always` that is a restart every 5 s until `.env` is fixed, which
@@ -186,8 +202,8 @@ output that is not an HDMI connector, or dwell limits outside 5 s to 3600 s or
 with the minimum above the maximum (`config.player_mode_problem`,
 `reddit_settings.listing_url_problem`, `session_problem`,
 `config.slideshow_output_problem`, `dwell_problem`; the page's form is judged by
-the same functions). A settings file of layout version 1 is read; one newer than
-version 2 is refused by name.
+the same functions). A settings file of layout version 1 or 2 is read; one newer than
+version 3 is refused by name.
 Beside running walls, a page that cannot bind costs the page and nothing else
 (`::test_a_page_that_cannot_listen_says_so_and_returns`).
 
@@ -212,7 +228,8 @@ not about art mode).
   after that, once any draw still in the driver has finished or the label budget
   has run out (`__main__._run`, `finally`; `LabelPanel.close`).
 - The bound is systemd's: `TimeoutStopSec=90`, `KillSignal=SIGTERM`
-  (`deploy/display.service`). The unit's comment gives the worst case it must
+  (`deploy/display.service`); the watchdog's stop is the same SIGTERM
+  (`WatchdogSignal=SIGTERM`, `TimeoutAbortSec=90`). The unit's comment gives the worst case it must
   clear as about 45 s; `tests/test_deploy_unit.py::test_the_unit_gives_the_television_time_to_let_go`
   asserts `TimeoutStopSec` ≥ 45 and `KillSignal=SIGTERM`.
 - Tested end to end: `tests/test_client.py` runs `_run`, sends the process
@@ -258,7 +275,13 @@ set that is not in art mode":
   failed upload, and tried again on one shared wait (`FrameDisplay._writes`) that a set
   returning to art mode ends (`tv.writes_resumed`). So uploads wait while somebody
   watches television, and the wall catches up in art mode.
-- **Connecting is not gated.** It includes a REST read on every construction and,
+- **A removal is the one write that needs a store that knows the set.** The gate
+  asks whether the set may be written to; a removal also needs the store's
+  recorded identity to be the connected set's, or it sends nothing
+  (`FrameDisplay._may_remove`; `security-model.md` § What it does to the television).
+  A binding retired after 14 days unnamed is removed through the same gated verb.
+- **Connecting is not gated.** It includes a REST read on every construction, the
+  read of the set's identity on every new connection (one GET, no key), and,
   **only when the token file is empty**, an open of the remote-control channel to
   mint a token, which raises a pairing prompt on the screen
   (`tv/samsung.SamsungTv._construct`; `samsung-tv-state-findings.md` § This
