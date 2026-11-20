@@ -228,26 +228,38 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   any answer under 500 but 204 and 401, a proxy's or a starting server's included. One such
   answer could silence a Player's reports for days, and the server would show it as not
   heard from while its walls kept reporting.
-- **2026-11-20 (Chunk 03), [DECISION] a departure from the pinned contract, bounded:** on
-  `POST /client/heartbeat` only, the Player (a) treats any 4xx other than 400, 401 and 413
-  as unanswered and sends the report again next cycle, where the 1.2.0 table's class
-  sentence reads such a status as the route's 400; (b) holds a 400 or 413 only when it
-  carries the contract's error body, a test the table does not ask for; (c) sends a held
-  report again unchanged after 300 seconds (`REFUSED_REPORT_RESEND_SECONDS`), where the
-  table says only when the report changes. The wall heartbeat and every GET still follow
-  the table. What it costs: a report the server will always refuse is sent once in five
-  minutes and not once; a server that reads the table literally sees one request it was
-  told not to expect. What the old rule was giving: one request per unchanged refused
-  report. The server's unreleased 1.3.0 is being reworded to say (a) to (c) with the 300
-  seconds stated in the package; Chunk 07 quotes it from there and replays the reworded
-  class sentence on both POST routes. The wall heartbeat's own hold is the older shape
-  (any status under 500), bounded by one interval because its report changes each minute:
-  Chunk 07 makes the two agree.
+- **2026-11-20 (Chunk 03), [DECISION] a departure from the pinned contract, bounded:** the
+  1.2.0 table's class sentence reads any 4xx no row names, on a POST, as the route's 400,
+  and its 400 rows say to send the report again when it changes. On
+  `POST /client/heartbeat` only, the Player agrees with that wherever the answer carries
+  the contract's error body: any such 4xx is held, named by a row or not, except 401 (the
+  table's own row: keep sending), 408 and 429 (not a verdict on the report). It departs in
+  two respects. First, a 4xx WITHOUT the error body (a proxy's page, a framework's own
+  body, an empty answer), a 400 or 413 included, is treated as unanswered and the report
+  is sent again next cycle, every 30 seconds for as long as that lasts, where the table
+  would read it as a refusal and expect one request. Second, a held report is sent again
+  unchanged after 300 seconds (`REFUSED_REPORT_RESEND_SECONDS`), where the table says only
+  when the report changes. A 2xx or 3xx other than 204, on which the table is silent, is
+  unanswered. The wall heartbeat and every GET still follow the table. As first built
+  (and first recorded here) the hold applied only to a 400 or 413 with the error body, so
+  a 422 or 403 the server itself sent in its own error form was resent every cycle;
+  integration measured that and the rule was refined before anything shipped. What the
+  departure costs: a report the server will always refuse is sent once in five minutes and
+  not once; something in the way that answers 4xx without the server's form is asked every
+  cycle. What the old rule was giving: one request per unchanged refused report, at the
+  price of a Player that one transient answer could silence for days. The tests that
+  assert the departure are in `tests/test_pull.py` (the cases without the error body, and
+  the lapse). The server's unreleased 1.3.0 is being reworded to say the same, with the
+  300 seconds stated in the package; Chunk 07 quotes it from there and replays the
+  reworded class sentence on both POST routes, and makes the wall heartbeat's older hold
+  (any status under 500, bounded by one interval because its report changes each minute)
+  agree with it.
 - **2026-11-20 (Chunk 03), a cost for the operator's checklist:** the Frame's identity is
   read once a minute where it was read once: one GET to the set's REST port each minute.
   Measured before (2026-10-08): that GET is answered from standby in 0.015 s with no key.
   Not measured: whether a GET each minute keeps a sleeping set's network awake or shows
-  anything on screen.
+  anything on screen. The read costs 60 GETs an hour for each Frame, waits at most 2 seconds
+  for a set that is asleep, and writes one journal line for an episode, not one a minute.
 
 ## Build Chunks
 
