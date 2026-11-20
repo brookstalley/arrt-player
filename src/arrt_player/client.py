@@ -507,9 +507,10 @@ class WallCaches:
     The time since the last sweep, at most `credit_seconds`, is added to each
     stamp at every sweep, and a process's first sweep adds none. So a wall clock
     that jumps forward expires nothing early, nor does a stalled loop or a
-    leaping monotonic clock; a Player switched off for a month starts its week
-    again when it comes back, losing at most `rewrite_seconds` of it; and a
-    client that cannot read a document adds nothing at all. The wall clock is
+    leaping monotonic clock; a Player switched off for a month resumes its week
+    from its stamp when it comes back, the month counting for nothing and at most
+    `rewrite_seconds` of the week lost; and a client that cannot read a document
+    adds nothing at all. The wall clock is
     written into the stamp to say when, never to decide.
 
     **What it may remove:** a real directory directly under `CACHE_DIR`, whose
