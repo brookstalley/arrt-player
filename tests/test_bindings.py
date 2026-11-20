@@ -1725,6 +1725,307 @@ class TestASetThatWillNotSayWhichItIs:
         assert not set(another.holding) - accounted, f"{sorted(set(another.holding) - accounted)} stayed on the set"
 
 
+# -- one phase of the wall with respect to the set -----------------------------------
+#
+# Which set the wall is on is one of four phases (`displays.frame.SetPhase`), and
+# what the wall uses, says and counts follows from it. Each sequence below
+# drives a wall through what the set and the store can do between passes, and
+# after every pass checks that what the wall holds is the phase it is in and
+# nothing between two.
+
+
+def _the_set_says(device_id: str | None):
+    def event(tv: FakeTv, store: DisplayState, publish, clock):
+        tv.device_id = device_id
+        clock.advance(400)  # past the identity read's longest wait
+
+    return event
+
+
+def _the_patience_runs_out(tv: FakeTv, store: DisplayState, publish, clock):
+    from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+    clock.advance(IDENTITY_PATIENCE_SECONDS)
+
+
+def _an_outage(tv: FakeTv, store: DisplayState, publish, clock):
+    tv.unavailable = True
+    clock.advance(30)
+    publish(["w2", "w1"], interval_seconds=3600)  # a republish, so the pass asks the set something
+
+    def after():
+        tv.unavailable = False
+        publish(["w1", "w2"], interval_seconds=3600)
+
+    return after
+
+
+def _an_upload_refused(tv: FakeTv, store: DisplayState, publish, clock):
+    tv.refuse_uploads = True
+    clock.advance(30)
+    publish(["w1", "w2", "w3"], interval_seconds=3600)
+
+    def after():
+        tv.refuse_uploads = False
+
+    return after
+
+
+def _a_store_fault(tv: FakeTv, store: DisplayState, publish, clock):
+    clock.advance(30)
+    armed = _arm(store, lambda: _sqlite_error("SQLITE_BUSY", "database is locked"), times=1)
+    return lambda: _disarm(store, armed)
+
+
+def _says_and_forgetting_the_wall_fails(device_id: str):
+    """The set says which it is, and the store cannot forget the work on the wall once, as when leaving the store in memory."""
+
+    def event(tv: FakeTv, store: DisplayState, publish, clock):
+        armed = _arm(
+            store,
+            lambda: _sqlite_error("SQLITE_BUSY", "database is locked"),
+            failing=lambda statement: statement.startswith("DELETE FROM daemon_state WHERE key = ?"),
+            times=1,
+        )
+        _the_set_says(device_id)(tv, store, publish, clock)
+        return lambda: _disarm(store, armed)
+
+    return event
+
+
+_BETWEEN_PASSES = {
+    "this set says": _the_set_says(THIS_SET),
+    "another set says": _the_set_says(ANOTHER_SET),
+    "the set will not say": _the_set_says(None),
+    "the patience runs out": _the_patience_runs_out,
+    "an outage": _an_outage,
+    "an upload refused": _an_upload_refused,
+    "a store fault": _a_store_fault,
+    "this set says and forgetting the wall fails": _says_and_forgetting_the_wall_fails(THIS_SET),
+    "another set says and forgetting the wall fails": _says_and_forgetting_the_wall_fails(ANOTHER_SET),
+}
+
+
+class _ThePhaseIsOneOfFour:
+    """After each pass: what the wall holds is its phase's, and its lines and its count followed the phase."""
+
+    def __init__(self, wall: Wall, tv: FakeTv, store: DisplayState, clock, caplog) -> None:
+        self._display, self._tv, self._store, self._clock, self._caplog = wall._display, tv, store, clock, caplog
+        self._seen = None
+        self._connects, self._connected_at = 0, None
+        self._going_on_lines = 0
+        self._recorded = store.tv_identity
+        self._set_changed_lines = 0
+        self._first_pass_at = None
+        #: Every phase the wall was found in, so a sequence that never reached one is seen not to test it.
+        self.phases: set[str] = set()
+
+    def after_a_pass(self, history: list[str]) -> None:
+        from arrt_player.displays.frame import GoingOn, Identified, NotYetKnown, Withheld
+
+        now = self._clock.as_clock().monotonic()
+        where = " -> ".join(history)
+        phase = self._display._phase
+        if self._first_pass_at is None:
+            self._first_pass_at = now
+        if self._tv.connects != self._connects:
+            self._connects, self._connected_at = self._tv.connects, now
+
+        assert isinstance(phase, NotYetKnown | Identified | Withheld | GoingOn), where
+        self._what_the_phase_holds(phase, now, where)
+        self._what_the_journal_says(phase, now, where)
+        assert self._store.feed_seconds == pytest.approx(
+            now - self._first_pass_at
+        ), f"{where}: the device's store counted {self._store.feed_seconds} s of a wall that ran {now - self._first_pass_at} s"
+        self.phases.add(type(phase).__name__)
+        self._seen, self._recorded = phase, self._store.tv_identity
+
+    def _what_the_phase_holds(self, phase, now: float, where: str) -> None:
+        """The store in use, the set the store records, and the patience, each the phase's."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, GoingOn, Identified, Withheld
+
+        if isinstance(phase, GoingOn):
+            assert self._display._state is phase.scratch, f"{where}: going on without the store in memory in use"
+            assert phase.scratch is not self._store
+        else:
+            assert self._display._state is self._store, f"{where}: {type(phase).__name__} with the store in memory in use"
+        if isinstance(phase, Identified):
+            assert self._store.tv_identity == phase.identity, f"{where}: identified as a set the store did not record"
+        if isinstance(phase, Withheld):
+            assert self._connected_at <= phase.since <= now, f"{where}: the patience did not start with this connection"
+            assert now - phase.since < IDENTITY_PATIENCE_SECONDS, f"{where}: still waiting past the patience"
+
+    def _what_the_journal_says(self, phase, now: float, where: str) -> None:
+        """The going-on line once per going-on, the episode of a set not saying open while it does not, every change said."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, GoingOn, Identified, Withheld
+
+        going_on = len(_store_events(self._caplog, "tv.unidentified_going_on"))
+        if isinstance(phase, GoingOn) and not isinstance(self._seen, GoingOn):
+            assert going_on > self._going_on_lines, f"{where}: went on from the store in memory without saying so"
+            assert now - self._connected_at >= IDENTITY_PATIENCE_SECONDS, f"{where}: went on inside the patience"
+        elif isinstance(phase, GoingOn):
+            assert going_on == self._going_on_lines, f"{where}: said it went on twice in one going-on"
+
+        unidentified = len(_store_events(self._caplog, "tv.unidentified"))
+        identified = len(_store_events(self._caplog, "tv.identified"))
+        if isinstance(phase, Withheld | GoingOn):
+            assert unidentified == identified + 1, f"{where}: {type(phase).__name__} outside the episode of a set not saying"
+        if isinstance(phase, Identified):
+            assert unidentified == identified, f"{where}: identified with the episode of a set not saying still open"
+
+        set_changed = len(_store_events(self._caplog, "binding.set_changed"))
+        if self._recorded is not None and self._store.tv_identity != self._recorded:
+            assert set_changed == self._set_changed_lines + 1, f"{where}: the store moved to another set unsaid"
+        self._going_on_lines, self._set_changed_lines = going_on, set_changed
+
+
+class TestTheWallIsInOnePhaseOfFour:
+    @pytest.mark.parametrize("first", sorted(_BETWEEN_PASSES))
+    async def test_every_sequence_of_what_the_set_and_the_store_do_leaves_one_phase(
+        self, settings, clock, publish, caplog, tmp_path, first
+    ):
+        """Every sequence of three, starting with `first`, from a wall that met its set, one that is waiting for it
+        to say, and one going on from the store in memory with a set recorded and with none; then the set says
+        twice, which ends each on its store."""
+        import itertools
+
+        openings = {
+            "a wall on the set it met": (THIS_SET,),
+            "a wall waiting for the set to say": (None,),
+            "a wall going on from the store in memory": (None, "the patience runs out"),
+            "a wall going on from the store in memory after it met its set": (
+                THIS_SET,
+                "an outage",
+                "the set will not say",
+                "the patience runs out",
+            ),
+        }
+        runs, phases = 0, set()
+        for opening, rest in itertools.product(sorted(openings), itertools.product(sorted(_BETWEEN_PASSES), repeat=2)):
+            runs += 1
+            caplog.clear()
+            device_id, *before = openings[opening]
+            tv = _a_set(device_id)
+            with caplog.at_level(logging.INFO), DisplayState(Path(":memory:"), now=clock.as_clock().now) as store:
+                wall = _a_frame(settings, tv, store, clock)
+                watching = _ThePhaseIsOneOfFour(wall, tv, store, clock, caplog)
+                publish(["w1", "w2"], interval_seconds=3600)
+                history = [opening]
+                await wall.tick()
+                watching.after_a_pass(history)
+                for name in (*before, first, *rest, "this set says", "this set says"):
+                    history.append(name)
+                    undo = _BETWEEN_PASSES[name](tv, store, publish, clock)
+                    await wall.tick()
+                    watching.after_a_pass(history)
+                    if undo is not None:
+                        undo()
+                await wall._display.close()
+                phases |= watching.phases
+        assert runs == len(openings) * len(_BETWEEN_PASSES) ** 2
+        assert phases == {"NotYetKnown", "Identified", "Withheld", "GoingOn"}, f"only {sorted(phases)} were reached"
+
+
+class TestTheWallsRunningTimeIsTheWallsWhicheverStoreItUses:
+    async def test_a_work_that_left_while_the_store_in_memory_was_in_use_retires_fourteen_days_after_it_left(
+        self, settings, clock, publish
+    ):
+        """Three days from the store in memory, w2 leaving the feed in the first hour of them: once the set says,
+        w2's image stays on it until fourteen days of the wall's running time after it left, and goes then."""
+        from arrt_player.displays.frame import FEED_TIME_SAVED_EVERY_SECONDS, IDENTITY_PATIENCE_SECONDS, RETIRED_AFTER_SECONDS
+
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory
+            publish(["w1"], interval_seconds=3600)  # w2 leaves the feed
+            await wall.tick()
+            it_left_at = store.feed_seconds
+            assert it_left_at == IDENTITY_PATIENCE_SECONDS + 1, "the device's store did not count the wall's running time"
+            since_it_left = 0.0
+            for _ in range(3 * 24):
+                clock.advance(3600)
+                since_it_left += 3600
+                await wall.tick()
+            assert store.binding_for("w2").last_named_feed_seconds == it_left_at, "the device's store lost when w2 left"
+            with sqlite3.connect(settings.state_path) as connection:
+                (saved,) = connection.execute("SELECT value FROM daemon_state WHERE key = 'feed_seconds'").fetchone()
+            assert float(saved) > store.feed_seconds - FEED_TIME_SAVED_EVERY_SECONDS, "the count was not saved on the disk"
+            tv.device_id = THIS_SET
+            clock.advance(400)
+            since_it_left += 400
+            await wall.tick()  # the set says: back on the device's store
+            clock.advance(1)
+            since_it_left += 1
+            await wall.tick()
+            assert store.tv_identity == THIS_SET
+
+            clock.advance(RETIRED_AFTER_SECONDS - since_it_left - 2 * 3600)
+            await wall.tick()
+            await wall.tick()
+            assert on_the_set["w2"] in tv.holding, "w2 was retired before fourteen days of running time since it left"
+            assert store.binding_for("w2") is not None
+            for _ in range(4):
+                clock.advance(3600)
+                await wall.tick()
+            await wall.tick()
+            retired = store.binding_for("w2")
+
+        assert on_the_set["w2"] not in tv.holding, "w2 stayed on the set past fourteen days of running time since it left"
+        assert retired is None
+        assert on_the_set["w1"] in tv.holding
+
+    async def test_a_retirement_due_while_the_store_in_memory_is_in_use_is_judged_once_the_set_says(
+        self, settings, clock, publish
+    ):
+        """w1 and w2 fall due while the wall goes on from the store in memory: the set is asked nothing on their
+        account until it says which it is, and then their images leave it."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _CountingListings()
+        tv.device_id = THIS_SET
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            left = await _a_theme_then_another(wall, tv, publish, store)
+            tv.device_id, tv.unavailable = None, True
+            publish(["w3"], interval_seconds=3600)
+            await wall.tick()  # the outage
+            tv.unavailable = False
+            clock.advance(400)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS)
+            await wall.tick()  # from the store in memory
+            listed = tv.listings
+            clock.advance(15 * DAY)
+            for _ in range(3):
+                await wall.tick()  # the count is written, and w1 and w2 are due on the device's store
+                clock.advance(3600)
+            assert tv.listings == listed, "the set was asked for its list on account of bindings not in use"
+            assert set(left.values()) <= set(tv.holding)
+            tv.device_id = THIS_SET
+            clock.advance(400)
+            await wall.tick()
+            await wall.tick()
+
+        assert not set(left.values()) & set(tv.holding), "the works due to retire stayed on the set once it said"
+
+
+class _CountingListings(FakeTv):
+    """The double, counting the requests for the set's list of its pictures."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listings = 0
+
+    async def listed_content_ids(self) -> frozenset[str]:
+        self.listings += 1
+        return await super().listed_content_ids()
+
+
 class _AModeThatWillNotRead(FakeTv):
     """A set whose own art-mode flag cannot be read for the still wall's line, as when the read drops the connection."""
 

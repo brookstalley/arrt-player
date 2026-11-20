@@ -258,7 +258,9 @@ class FrameDisplay:
     def __init__(self, *, settings: Settings, tv: TvClient, state: DisplayState, clock: Clock) -> None:
         self._settings = settings
         self._tv = tv
-        #: The device's store on disk; the bindings in use are `_state`'s.
+        #: The device's store on disk. **The wall's running time with a feed is
+        #: counted and saved here whichever store the bindings come from**,
+        #: because it is the wall's time, not a set's (`_count_feed_time`).
         self._store = state
         self._clock = clock
 
@@ -471,7 +473,7 @@ class FrameDisplay:
     def adopted(self, pictures: Sequence[Picture]) -> None:
         named = frozenset(picture.work_id for picture in pictures)
         for work_id in self._named - named:
-            self._left_at[work_id] = self._state.feed_seconds
+            self._left_at[work_id] = self._store.feed_seconds
         self._named = named
         self._kept_by_the_set.clear()
         self._reconciliation_owed = True
@@ -1336,13 +1338,17 @@ class FrameDisplay:
         about to show), the work the Player last put up, the picture the set
         last said is on its wall, a work whose image the set kept when asked
         since the last feed, and a binding whose last naming is unknown.
+
+        **The device's store's bindings, at its count**, which is where the
+        wall's running time is kept; only a pass using that store's bindings
+        asks.
         """
         named = {picture.work_id for picture in pictures}
         on_the_wall = self._on_the_wall()
-        now = self._state.feed_seconds
+        now = self._store.feed_seconds
         retiring: list[Binding] = []
         claimed: set[str] = set()
-        for binding in self._state.bindings():
+        for binding in self._store.bindings():
             if self._is_due_to_retire(binding, named=named, on_the_wall=on_the_wall, now=now):
                 retiring.append(binding)
             elif binding.tv_content_id is not None:
@@ -1350,7 +1356,7 @@ class FrameDisplay:
         return tuple(retiring), frozenset(claimed)
 
     def _is_due_to_retire(self, binding: Binding, *, named: set[str], on_the_wall: set[str | None], now: float) -> bool:
-        if binding.artwork_id in named or binding.artwork_id == self._state.last_selected_work_id:
+        if binding.artwork_id in named or binding.artwork_id == self._store.last_selected_work_id:
             return False
         if binding.tv_content_id in on_the_wall or binding.artwork_id in self._kept_by_the_set:
             return False
@@ -1387,7 +1393,7 @@ class FrameDisplay:
             },
         )
         for binding in going:
-            self._state.retire(binding.artwork_id, binding.tv_content_id)
+            self._store.retire(binding.artwork_id, binding.tv_content_id)
             self._left_at.pop(binding.artwork_id, None)
 
     # -- how long the wall has had a feed ------------------------------------
@@ -1395,13 +1401,16 @@ class FrameDisplay:
     def _count_feed_time(self) -> None:
         """Count the elapsed time since the last pass as the wall running with a feed. Memory only.
 
-        Called only by a pass with a feed adopted, and **on the elapsed clock**,
-        which neither a Player switched off nor an NTP step can move: the first
-        pass of a process counts nothing, however far either clock has moved.
+        **On the device's store whichever store the bindings come from**: the
+        wall ran with a feed while it went on from the store in memory, and that
+        store, with the count, is let go when the set says. Called only by a
+        pass with a feed adopted, and **on the elapsed clock**, which neither a
+        Player switched off nor an NTP step can move: the first pass of a
+        process counts nothing, however far either clock has moved.
         """
         elapsed = self._clock.monotonic()
         if self._feed_time_read_at is not None:
-            self._state.count_feed_time(max(0.0, elapsed - self._feed_time_read_at))
+            self._store.count_feed_time(max(0.0, elapsed - self._feed_time_read_at))
         self._feed_time_read_at = elapsed
 
     def _save_feed_time(self, pictures: Sequence[Picture]) -> None:
@@ -1412,13 +1421,18 @@ class FrameDisplay:
         every pass: the count and the leavings are kept in memory meanwhile,
         and a retirement found due is made at the next reconciliation, through
         the set's gate like any other removal.
+
+        **Written to the device's store**, as the count is kept there. The
+        bindings are looked over only while they are that store's: while the
+        wall goes on from the store in memory, leaving it owes the
+        reconciliation that judges them.
         """
-        if self._state.feed_seconds - self._feed_time_saved_at < FEED_TIME_SAVED_EVERY_SECONDS:
+        if self._store.feed_seconds - self._feed_time_saved_at < FEED_TIME_SAVED_EVERY_SECONDS:
             return
-        self._feed_time_saved_at = self._state.feed_seconds
-        self._state.save_feed_time(named=[picture.work_id for picture in pictures], left=self._left_at)
+        self._feed_time_saved_at = self._store.feed_seconds
+        self._store.save_feed_time(named=[picture.work_id for picture in pictures], left=self._left_at)
         self._left_at.clear()
-        if self._retirements(pictures)[0]:
+        if not isinstance(self._phase, GoingOn) and self._retirements(pictures)[0]:
             self._reconciliation_owed = True
 
     # -- the television ----------------------------------------------------
