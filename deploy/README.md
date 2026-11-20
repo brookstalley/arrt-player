@@ -509,10 +509,14 @@ different television, delete that wall's store first.** Each Frame wall keeps
 which television its rows were made on. A store written before that holds no
 record, and nothing on the Pi says which set the old rows belong to, so the
 release takes the first television it meets as theirs. If that is not the set
-they were made on, their content ids name other pictures there. Find the stores
-and stop the Player first (runbook step 3):
+they were made on, their content ids name other pictures there. Stop the Player
+first (runbook step 3), then find the stores. `CACHE_DIR` is a setting in the
+Player's `.env`, not a variable in your shell, and the wall directories are
+readable by the service account alone, so read the one and list as the other
+(runbook step 6a):
 
-    ls "$CACHE_DIR"/*/display-state.sqlite
+    sudo grep '^CACHE_DIR=' /opt/arrt-player/.env
+    sudo -u tvpi find <that directory> -maxdepth 2 -name 'display-state.sqlite*'
 
 Delete the one of any wall whose Frame's address changed to another set; the cost
 is a re-upload of that wall's works. A Frame that has always been the same set

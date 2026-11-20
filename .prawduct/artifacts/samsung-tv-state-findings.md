@@ -538,8 +538,12 @@ What the code does, none of it measured against a set:
    withhold its identity.
 9. **What the wave-2 changes assume of the set and did not measure.** What the
    set does when asked to delete the image it is showing, or an id it no longer
-   has (the Player sends neither: a retirement is never asked for the picture on
-   the wall nor for an image the set does not list); whether an announcement that
+   has. The Player never asks for an image the set does not list, and never for
+   a picture it knows is on the wall (a retirement and an orphan's removal
+   alike, `FrameDisplay._remove_orphans`); but on a first run or a set met
+   afresh it does not know which picture is up until it has selected one or the
+   set has announced one, so an upload of the household's on the wall then is
+   removed with the rest; whether an announcement that
    a picture "is shown" can arrive while the set is not showing art (the Frame
    acts on one it receives, `FrameDisplay._take_the_sets_news`); whether a missing
    token file brings up a pairing prompt on a different set when the settings page

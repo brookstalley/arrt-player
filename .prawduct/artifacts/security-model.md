@@ -358,9 +358,21 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   fifteen minutes goes on without it.** It uses no binding and says so once
   (`tv.unidentified`), asking again on its own ladder. After
   `displays/frame.py:IDENTITY_PATIENCE_SECONDS` (15 minutes) it shows art from an empty store
-  held in memory, uploading what it shows and removing nothing
-  (`tv.unidentified_going_on`), and returns to the device's store, with its own
-  bindings, once the set says. Held by `tests/test_bindings.py::TestABindingIsUsedOnlyOnTheSetItWasMadeOn`
+  held in memory, uploading the work it shows and then the feed's other works
+  one a pass, and removing nothing (`tv.unidentified_going_on`). An outage drops
+  that store and starts the fifteen minutes again, so a connection that flaps
+  uploads nothing more. Once the set says, the wall returns to the device's
+  store, with its own bindings, and the reconciliation that leaving the store in
+  memory owes removes what it uploaded: **never the picture on the wall before
+  another has been selected**, because what a Frame does when the image it shows
+  is deleted has never been measured. The same holds for every removal of an
+  image the Player knows is up.
+  **Known limit, recorded and not fixed:** a set that opens its art channel and
+  never gives its `device.duid` gains one theme of the store in memory's copies
+  per outage and its fifteen minutes, and nothing removes them, because a
+  removal needs a store that records the connected set. What would retire it is
+  the measurement of whether any set does this (`samsung-tv-state-findings.md` § What is still owed, item 8); no
+  cap is built for it. Held by `tests/test_bindings.py::TestABindingIsUsedOnlyOnTheSetItWasMadeOn`
   and `::TestASetThatWillNotSayWhichItIs`.
 - **It stops on SIGTERM and closes the art channel** (`__main__.py:_run`,
   `client.py:Supervisor.stop_all`), because a killed client holds the set's slot

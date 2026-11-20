@@ -3,10 +3,16 @@
 Owner: the operator · Last executed: 2026-10-27, § The first time, F1–F7, from
 the monorepo checkout to f7937da in the standalone one (F8 is the owner's call
 and the way back, F9, was not exercised). § Steps last ran 2026-11-10,
-f7937da → 9ca66b2, in the standalone checkout (no required new setting and no
-unit change, so steps 7, 10–11 and the way back were not exercised). Its
-release's dated section had one Pi step, checking `.env` against the new
-start-up refusals, and it ran between steps 8 and 12.
+f7937da → 9ca66b2, in the standalone checkout: **steps 1–6, 8, 9 and 12–16 are
+the only ones that have run on a Pi.** Every other step in this runbook has no
+recorded run on a Pi, whenever it was written: 7 and 10–11 (that release had no
+required new setting and no unit change), every lettered step (6a, 7a, 7b, 7c,
+9a, 12a, 13a, 13b, 14a, 14b, 14c, 19a, 19b) and all of § Going back. Read their
+*Expected* lines as what the code and systemd's documentation predict, not as
+output anybody has seen; a step that prints something else may be the runbook's
+mistake, not the release's. That release's dated section had one Pi step,
+checking `.env` against the new start-up refusals, and it ran between steps 8
+and 12.
 
 ## When to use this
 You have a newer commit of this repo and the Pi beside the wall runs an older
@@ -325,13 +331,20 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
      Wait six minutes, then:
 
-         journalctl -u display.service --since '8 min ago' --no-pager | grep -iE 'watchdog|Stopping|Started|client.started'
+         journalctl -u display.service --since '8 min ago' --no-pager | grep -iE 'watchdog|Stopping|Started|frame.stopped|client.stopped|client.started'
 
-     **Expected:** `Watchdog timeout (limit 5min)!`, then a stop and a start (a
-     `client.started` line), within `WatchdogSec` plus `RestartSec`, about 305 s;
-     step 13 prints `active`; and **no `tv.unavailable` follows the restart**,
-     which says the television's art channel was closed rather than abandoned.
+     **Expected:** `Watchdog timeout (limit 5min)!`; then, before the next
+     `Started`, a `frame.stopped` line for each Frame wall and one
+     `client.stopped`, which the Player logs only after it has closed each
+     wall's connection to the television (`frame.stopped` follows the close),
+     so they are the orderly stop itself; then a start (a `client.started`
+     line), within `WatchdogSec` plus `RestartSec`, about 305 s; and step 13
+     prints `active`. A `tv.unavailable` after the restart, or its absence,
+     says nothing about how the stop went: a set asleep logs one either way, and
+     over five minutes a set may drop a half-open channel on its own side.
      The wall keeps its picture while this runs.
+     **If `client.stopped` is missing before `Started`:** the watchdog's stop did
+     not take the orderly path → tell the owner, and keep the lines.
      **If nothing happens:** the Player is being petted when it should not be, or
      the unit is not `Type=notify` → step 13a.
      **If `Stopping` is followed by `SIGKILL` after about 90 s:** the Player's
@@ -448,7 +461,13 @@ time, use F9 there.)
 
      **Expected:** `SCHEMA_VERSION: Final[int] = 2` (call the number `<n>`).
      **If it prints `fatal: path …`:** the old revision has no store → step 20.
-     For each store, from step 6a's `find`:
+     Find the stores (step 6a's commands, given here because 6a is skipped
+     when the Frame has always been the same set):
+
+         sudo grep '^CACHE_DIR=' /opt/arrt-player/.env
+         sudo -u tvpi find <that directory> -maxdepth 2 -name 'display-state.sqlite'
+
+     For each store it names:
 
          sudo -u tvpi python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('PRAGMA user_version = <n>'); c.commit()" <that directory>/<wall id>/display-state.sqlite
 
@@ -456,7 +475,7 @@ time, use F9 there.)
 
          sudo -u tvpi python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA user_version').fetchone())" <that directory>/<wall id>/display-state.sqlite
 
-     **Expected:** `(2,)`, or `(<n>,)` as step 19b printed it.
+     **Expected:** `(2,)`, or `(<n>,)` as this step's first command printed it.
      *Why not `3`: a revision that writes schema 2 refuses 3 as it refuses 4, and
      only the number the old revision writes opens the store (measured against
      the end of wave 1's code, 2026-11-19), so the number is the one the old
