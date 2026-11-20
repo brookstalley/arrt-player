@@ -86,6 +86,12 @@ not seen.
   Player that is merely stopping blanks nothing, as it leaves the labels, and a
   screen that is not connected when its wall leaves is not drawn on: it may show
   the old picture when plugged back in, until another wall is drawn there.
+- **With `FILE_OUTPUT_DIR` set it draws none of this.** A Player that draws to files
+  lists no connector (`__main__.player_outputs`) and its one screen,
+  `file-screen-0`, is a directory: the same fitting (`kms.fitted`), written to a
+  PNG, and a wall that leaves it records `outcome: "blank"` instead of drawing
+  black (`displays/file_output.py`). Nothing in this file is measured of it, and
+  nothing here constrains it.
 - A screen that is absent costs one line and nothing else. A device that refuses
   (no `video` group, another program holding the card) raises, and the wall
   logs it, keeps rotating and tries again on every poll.

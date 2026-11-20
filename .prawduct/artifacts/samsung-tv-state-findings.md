@@ -435,6 +435,43 @@ output drives a separate LCD.
   standard's promise, not a measurement of this set. A Display re-keyed by a reset
   would show up as a new display with no walls, which a curator can map again.
 
+### The wall's worker reads it on every connection (2026-11-19)
+
+The Frame's content ids are the set's own, so since schema 4 the wall's worker
+reads this identity itself, not only the client for its heartbeat
+(`displays/frame.py:FrameDisplay._know_the_set`; `data-model.md` § DisplayState).
+What the code does, none of it measured against a set:
+
+- **One REST GET of `/api/v2/`, through its own short-lived client** (bounded at
+  2 s, `tv/samsung.py:IDENTITY_TIMEOUT_SECONDS`), taking `device.duid` and nothing
+  else of the reply (not the `ip`, not the `wifiMac`). No key, no pairing, no art
+  channel.
+- **Sent on each new connection, straight after the art channel opens and before the
+  pass's first `get_artmode` read**: when the wall starts, after every outage, and
+  after a selection or a failure that may have dropped the connection. It is sent
+  **while somebody watches television too**, because it changes nothing and the
+  wall may not use a binding before it has answered.
+- **A set that opens the art channel and will not answer it** leaves the wall
+  using no binding for 15 minutes (`tv.unidentified`), after which it shows art
+  from an empty store in memory and removes nothing
+  (`tv.unidentified_going_on`). The fifteen minutes assumes the REST port answers
+  at once in every state, which has been seen only in standby (above).
+
+**Unmeasured, and each decides something** (also on the operator's checklist):
+
+1. **Whether `device.duid` survives a reboot, and a factory reset.** If it changes
+   on a reboot, every restart of the set reads as another set: the wall sets its
+   bindings aside, uploads the whole library again and clears the uploaded-pictures
+   category, each time. If it survives a reboot and not a reset, a reset set reads
+   as new, which is right (its content ids are gone with it).
+2. **Whether the identity read answers while the set shows television, and in art
+   mode.** Measured only in standby (0.14 s). If it does not, the wall waits 15
+   minutes after a start or an outage that began during a programme and then shows
+   art without removing anything.
+3. **Whether a set can open its art channel and withhold its identity**, so the
+   fifteen minutes is spent and `tv.unidentified_going_on` is the normal state
+   rather than the exception.
+
 ## What is still owed
 
 1. **The concurrent-client limit** described in the section above.
@@ -493,3 +530,19 @@ output drives a separate LCD.
      sooner on an evening of television.
    - **Whether an upload already in flight when the set leaves art mode still
      finishes.** The gate reads the set before a send, not during one.
+8. **The three facts the wall's identity read rests on**, none measured, listed
+   with their consequences in § The wall's worker reads it on every connection:
+   whether `device.duid` survives a reboot and a factory reset; whether the
+   identity read answers while the set shows television and in art mode (it has
+   been measured only in standby); and whether a set can open its art channel and
+   withhold its identity.
+9. **What the wave-2 changes assume of the set and did not measure.** What the
+   set does when asked to delete the image it is showing, or an id it no longer
+   has (the Player sends neither: a retirement is never asked for the picture on
+   the wall nor for an image the set does not list); whether an announcement that
+   a picture "is shown" can arrive while the set is not showing art (the Frame
+   acts on one it receives, `FrameDisplay._take_the_sets_news`); whether a missing
+   token file brings up a pairing prompt on a different set when the settings page
+   has forgotten the pairing for a new address; and whether every connection
+   rewrites the token file, which decides whether the page's removing it can
+   race a reconnecting Frame in the half-second before the restart.
