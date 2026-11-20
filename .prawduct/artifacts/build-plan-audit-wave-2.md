@@ -36,6 +36,9 @@ governed_by:
       - "The only-channel norm's text (audit-1 S6) → [DECISION: Arrt's `architecture.md` § Direction holds the full text of a norm that binds the Player, its Player-side narrowing included; the Player's index row becomes a pointer once Arrt's amendment lands, as a coordinator's edit | the 2026-11-11 ruling made Arrt's Direction sections the home of the index's pointer rows, and CLAUDE.md already says Arrt's hold the norms; this is the conservative reading, not put to the owner separately | user can veto/override]"
       - "Delegation / Delegate verification → unset; the methodology default holds: a delegate runs only the narrowest tests covering its own change."
 partition: "Four phases, then one serial chunk. Phase 1: 01, 02, 03, 04 fanned out to four delegates in isolated worktrees, disjoint files. Phase 2, once phase 1 is merged: 05, 06, 07 in parallel (05 and 07 after 01, 06 after 03). Phase 3, once phase 2 is merged: 08 and 09 in parallel (both after 05, for __main__.py and config.py). Phase 4 waits for the server's wave-2 contract tag and for phase 3: 10, then 11 serial after it. 12 (records, cumulative-final) is last and serial. The coordinator integrates on fix/audit-wave-2 and runs the whole suite after each phase; delegates run only their ceilings"
+dropped:
+  - "10: moved, not dropped (2026-11-19, the coordinator): moved to the next Player plan, after `contract-v1.2.0` exists; the tag cannot be cut until the server's wave-2 branch is reviewed and merged, and holding this branch's review for it buys nothing"
+  - "11: moved, not dropped (2026-11-19, the coordinator): moved to the next Player plan, after `contract-v1.2.0` exists, with Chunk 10, since `settings_url` is a field only that tag names"
 last_validated: 2026-11-19
 ---
 
@@ -670,6 +673,12 @@ takes whatever the tag carries.
 - **Verification ceiling:** `tests/test_notify.py tests/test_deploy_unit.py tests/test_main.py tests/test_slideshow.py`, plus ruff and black.
 - **Model:** Opus-class, high effort. A wrong directive or a missing `READY=1` dims a
   wall only at the next deploy.
+- **Built as `NotifyAccess=all`, not `main` (2026-11-19, Chunk 08's delegate):**
+  `ExecStart` is `uv run`, so the unit's main process is uv and the Player's Python is
+  its child; under `main` systemd would drop the Player's `READY=1` and fail each start
+  at `TimeoutStartSec`. Every process in the cgroup is the Player's own, and mpv's
+  environment carries no `NOTIFY_SOCKET` (`deploy/display.service`'s comment;
+  `tests/test_deploy_unit.py`).
 
 ### Chunk 09: The settings page: the Frame's address, the server's name, a save that says what it saved
 
@@ -719,6 +728,16 @@ takes whatever the tag carries.
 
 ### Chunk 10: The contract pin moves to the server's wave-2 tag
 
+> **Moved, 2026-11-19 (the coordinator): moved to the next Player plan, after
+> `contract-v1.2.0` exists** (frontmatter `dropped:`, as its Depends on allows).
+> The requirement stands and nothing of it is built on this branch: the pin is still
+> the one wave 1 left. The next plan carries it with Chunk 11 and one defect found in
+> integration: the heartbeat's `FrameIdentity` reads the set's identity once and never
+> again, so a different set answering at the same address without a restart is
+> reported under the first set's identity while the wall's store follows the new one
+> (`client.FrameIdentity.refresh`; the wall reads on every connection,
+> `displays/frame.py` `_know_the_set`).
+
 - **Description:** closes audit-3 § Contract skew and § Contract conformance, audit-7
   M6, audit-1 M1 and M8 (ledger rows 36, 37, 38, 80, 87, 88, 90), the Player's half of
   the shared pairing labels (row 64, lesson 4), and the manifest's size bound if the
@@ -763,6 +782,10 @@ takes whatever the tag carries.
 - **Model:** Opus-class, high effort. A row that disagrees with the Pull is a judgment.
 
 ### Chunk 11: The Player tells the server where its settings page is
+
+> **Moved, 2026-11-19 (the coordinator): moved to the next Player plan, after
+> `contract-v1.2.0` exists**, with Chunk 10. Nothing of it is built on this branch:
+> the client heartbeat carries no `settings_url`.
 
 - **Description:** closes audit-5 F6c (ledger row 66), by the decision in Goals, once the
   tag carries R5's `settings_url`.
