@@ -1113,8 +1113,17 @@ class FrameDisplay:
         and every branch below would be dead code. Reconnecting costs nothing when
         the set is there and raises the real outage when it is not, which is
         exactly the distinction being drawn.
+
+        **A reconnect may reach another set**, or leave the store in memory for
+        the device's, and then the bindings in use were made on another set than
+        the refused id was: whether this set lists it says nothing about the
+        work. The work is looked up again in those bindings, as a selection on
+        that set would have begun: its own binding there, or one upload.
         """
+        made_on = self._state.tv_identity
         await self._connected()
+        if self._state.tv_identity != made_on:
+            return await self._content_id_for(picture)
         listed = await self._tv.listed_content_ids()
         if refused in listed:
             raise TvUnavailable(f"the television refused to select {refused}, which it says it is holding")

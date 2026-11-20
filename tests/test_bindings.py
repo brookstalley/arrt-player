@@ -18,6 +18,7 @@ from PIL import Image
 from arrt_player.displays.frame import frame_wall
 from arrt_player.manifest import Watcher
 from arrt_player.state import DisplayState, UploadStatus
+from arrt_player.tv import TvUnavailable
 from arrt_player.wall import Wall
 
 
@@ -2024,6 +2025,74 @@ class _CountingListings(FakeTv):
     async def listed_content_ids(self) -> frozenset[str]:
         self.listings += 1
         return await super().listed_content_ids()
+
+
+class _ReplacedMidSelection(FakeTv):
+    """A set that stops answering at the address while a selection is sent to it, and another that answers next.
+
+    The selection fails as the real client reports a dropped connection, and
+    the reconnect reaches the set armed in `replaced_by`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replaced_by: FakeTv | None = None
+
+    async def _send_show(self, content_id: str) -> bool:
+        other, self.replaced_by = self.replaced_by, None
+        if other is None:
+            return await super()._send_show(content_id)
+        self.device_id, self.holding, self._next_id = other.device_id, dict(other.holding), other._next_id
+        self.displaying, self.selected, self.uploaded = other.displaying, [], []
+        raise self._dropping(TvUnavailable(f"the television went away while {content_id} was being selected"))
+
+
+class TestARefusedSelectionWhoseReconnectReachesAnotherSet:
+    @pytest.mark.parametrize(
+        "the_other_set",
+        [
+            "holds the work under its own id",
+            "holds the work under the id the first set refused",
+            "holds none of the wall's works, and a picture of its own under the refused id",
+        ],
+    )
+    async def test_the_work_is_looked_up_again_in_that_sets_bindings(self, settings, clock, publish, caplog, the_other_set):
+        """The wall moves to w2, the set goes away inside the selection, and another set answers the reconnect:
+        w2 goes up on it in the same pass, from that set's own binding when it has one and uploaded once when it
+        has none, and nothing is said about the id the first set refused."""
+        if the_other_set.startswith("holds none"):
+            other = _a_set(ANOTHER_SET, numbered_from=20, **{"MY-F0012": HOUSEHOLDS})
+        else:
+            other = _a_set(ANOTHER_SET, numbered_from=20 if "its own id" in the_other_set else 10)
+            await _a_life_on(settings, clock, publish, other)
+        tv = _ReplacedMidSelection()
+        tv.device_id, tv._next_id = THIS_SET, 10
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2"], interval_seconds=10)
+            await wall.tick()  # w1 up on this set, w2 uploaded behind it
+            refused = store.binding_for("w2").tv_content_id
+            assert refused == "MY-F0012"
+            its_own = {binding.artwork_id: binding.tv_content_id for binding in store.bindings()}
+            tv.replaced_by = other
+            clock.advance(10)
+            caplog.clear()
+            wait = await wall.tick()  # w2's slot: the selection, the outage, the reconnect to the other set
+            uploaded, bound = list(tv.uploaded), store.binding_for("w2")
+
+        assert publish.work_of(tv.on_the_wall) == "w2", "w2 did not go up on the set that answered"
+        assert wait == settings.poll_interval_seconds, "the wall backed off from a set that showed the work"
+        assert not _store_events(caplog, "tv.unavailable")
+        orphaned = [record.tv_content_id for record in _store_events(caplog, "binding.orphaned")]
+        assert refused not in orphaned, "the journal named an id the set that answered never refused"
+        if the_other_set.startswith("holds none"):
+            sent = [publish.work_of(path) for path in uploaded]
+            assert sent.count("w2") == 1, f"w2 was uploaded {sent.count('w2')} times to a set that held none of the wall's works"
+            assert bound.tv_content_id == tv.displaying
+        else:
+            assert uploaded == [], "w2 was uploaded again to a set that holds it"
+            assert tv.displaying == bound.tv_content_id != its_own["w1"]
 
 
 class _AModeThatWillNotRead(FakeTv):
