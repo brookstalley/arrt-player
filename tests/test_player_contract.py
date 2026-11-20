@@ -37,7 +37,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
-from arrt_contract import root, validator
+from arrt_contract import released, root, validator, vocabulary
 from fakes import RecordingOutput, drm_tree
 
 from arrt_player import manifest
@@ -48,11 +48,13 @@ from arrt_player.client import (
     client_outputs,
     parse_client_document,
 )
+from arrt_player.config import DEFAULT_MAT_BOTTOM_WEIGHT
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import screen_wall
 from arrt_player.heartbeat import DisplayReport, Health, ScreenState, path_in
 from arrt_player.label_rule import STATES, LabelDocumentUnreadable, Outcome, outcome, parse_label_document
 from arrt_player.manifest import Watcher
+from arrt_player.settings_ui.server import PAIRING_LABELS
 
 CONTRACT = root()
 INDEX = json.loads((CONTRACT / "fixtures" / "index.json").read_text(encoding="utf-8"))["fixtures"]
@@ -445,3 +447,62 @@ def test_a_label_document_in_a_state_this_reader_does_not_know_is_read_as_unreac
 
     assert document.state not in STATES
     assert outcome(document, datetime(2100, 1, 1, tzinfo=UTC)) is Outcome.BLANK
+
+
+# -- what an older server sent -----------------------------------------------------------------
+
+#: Each reader of a document this Player reads, by the schema of the document.
+_READERS = {
+    "schemas/manifest.v2.schema.json": manifest.parse,
+    "schemas/client.v1.schema.json": parse_client_document,
+    "schemas/label.v1.schema.json": parse_label_document,
+}
+
+
+def _released_rows() -> list:
+    rows = []
+    for version, directory in released().items():
+        index = json.loads((directory / "fixtures" / "index.json").read_text(encoding="utf-8"))["fixtures"]
+        rows += [
+            pytest.param(directory, row, id=f"{version}:{row['path']}")
+            for row in index
+            if row["valid"] and row["schema"] in _READERS
+        ]
+    return rows
+
+
+RELEASED_DOCUMENTS = _released_rows()
+
+
+def test_every_release_before_this_one_has_valid_documents_of_each_kind_this_player_reads():
+    """The vacuity check for the test below: a release with none of a kind would pass it over nothing."""
+    assert released(), "the contract carries no earlier release"
+    for version, directory in released().items():
+        held = {row.values[1]["schema"] for row in RELEASED_DOCUMENTS if row.values[0] == directory}
+        assert held == set(_READERS), f"release {version} holds valid documents of only {sorted(held)}"
+
+
+@pytest.mark.parametrize(("directory", "row"), RELEASED_DOCUMENTS)
+def test_every_valid_document_an_earlier_release_held_is_still_read(directory, row):
+    """A server on an earlier contract still sends these, and this Player reads each without refusing it."""
+    read = _READERS[row["schema"]]((directory / row["path"]).read_text(encoding="utf-8"))
+
+    assert read is not None
+
+
+# -- the values this Player and the server state alike ---------------------------------------------
+
+MAT_GEOMETRY = json.loads((CONTRACT / "vectors" / "mat-geometry.json").read_text(encoding="utf-8"))
+
+
+def test_the_default_bottom_weight_is_the_contracts():
+    """What the server judges a work's size against, so a Player with its own default would draw a mat it did not judge."""
+    assert MAT_GEOMETRY["defaults"]["bottom_weight"] == DEFAULT_MAT_BOTTOM_WEIGHT
+
+
+def test_the_settings_page_names_its_pairing_fields_in_the_contracts_words():
+    """The server's token dialog tells a person to fill in fields by these names."""
+    words = vocabulary()["pairing"]
+
+    assert sorted(words) == ["server_address", "token"], "the contract names a pairing field this page does not ask for"
+    assert dict(PAIRING_LABELS) == {"SERVER_URL": words["server_address"], "CLIENT_TOKEN": words["token"]}
