@@ -16,6 +16,9 @@ repository of its own, so each still holds here:
   a hit is named by file, line and kind. It reads the working tree, never
   history, and every file in it whatever its suffix (the shapes that leaked were
   in documents and in `.prawduct/`, which a scan of `*.py` never opened).
+  There is one scan: it was two, a working-tree scan and an older one over
+  `src/` and `tools/` that also refused the deployment's published paths in code,
+  and that older shape is a kind of this one now.
 - **Every test module is in `tests/`**, where `testpaths` collects it; one
   anywhere else looks like a test and guards nothing.
 """
@@ -38,12 +41,6 @@ SOURCE_TREES = ("src", "tests", "tools")
 #: The pieces of the private-range shapes, named so each can be reported as its own kind.
 _PRIVATE_IPV4 = r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b"
 _HOME_PATH = r"/(?:Users|home)/[A-Za-z][\w.-]*"
-
-#: Shapes no source line may carry, comments included: a private-range IPv4
-#: address, and a path under a named person's home directory. Documentation
-#: names such a path with a placeholder (`/home/<user>`), which this does not
-#: match.
-_PRIVATE_SHAPES = re.compile(f"{_PRIVATE_IPV4}|{_HOME_PATH}")
 
 #: What a hit is called in a failure, and the shape that finds it. **Kinds, never
 #: values**: this guard runs over a public repository and publishes nothing of its own.
@@ -109,8 +106,12 @@ _ACCEPTED_RESIDUE: dict[tuple[str, str], str] = {}
 
 #: The deployment's published paths. Public (the deploy docs name them), so not a
 #: leak; still forbidden in code, because the same code runs on a dev machine
-#: where they do not exist. Comments may name them.
+#: where they do not exist. Comments may name them, and so may documents, the
+#: deploy files and the tests, which is why this is read only over `.py` files
+#: under `_CODE_TREES`.
 _DEPLOYMENT_PATHS = re.compile(r"/srv/art|/opt/samsung-frame-art-loader")
+_DEPLOYMENT_PATH_KIND = "deployment path in code"
+_CODE_TREES = ("src/", "tools/")
 
 
 def _tracked() -> list[str]:
@@ -166,19 +167,6 @@ def test_no_credential_file_is_tracked():
     assert offenders == [], f"credential files must never be tracked: {offenders}"
 
 
-def test_no_source_file_carries_a_deployment_value():
-    modules = sorted((PROJECT / "src").rglob("*.py")) + sorted((PROJECT / "tools").rglob("*.py"))
-    assert modules, "no source to check; has the layout moved?"
-    offenders = [
-        f"{path.relative_to(PROJECT)}:{number}"
-        for path in modules
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
-        if _PRIVATE_SHAPES.search(line) or (not line.strip().startswith("#") and _DEPLOYMENT_PATHS.search(line))
-    ]
-
-    assert offenders == [], "a deployment value, which belongs in .env:\n" + "\n".join(offenders)
-
-
 def _working_tree() -> list[str]:
     """Every file git would commit from this tree: tracked, and untracked but not ignored.
 
@@ -199,18 +187,27 @@ def _working_tree() -> list[str]:
 
 def _kinds_in(line: str, name: str) -> list[str]:
     """The kinds of deployment value `line` carries, for a file at `name`."""
+    kinds = []
+    if (
+        name.endswith(".py")
+        and name.startswith(_CODE_TREES)
+        and not line.lstrip().startswith("#")
+        and _DEPLOYMENT_PATHS.search(line)
+    ):
+        kinds.append(_DEPLOYMENT_PATH_KIND)
     line = _EXAMPLE_HOST.sub("example-host", line)
     shapes = dict(_HOST_SHAPES)
     if not name.startswith(_FIXTURE_TREES):
         shapes = {**_ADDRESS_SHAPES, **shapes}
-    return [kind for kind, shape in shapes.items() if shape.search(line)]
+    return kinds + [kind for kind, shape in shapes.items() if shape.search(line)]
 
 
 def _leaks(root: pathlib.Path, names: list[str]) -> list[tuple[str, str]]:
     """Every `(file:line, kind)` under `root` that carries a deployment value, residue included.
 
     Text files only (a font or an image is skipped by failing to decode as
-    UTF-8), whatever their suffix. A file's comment lines are read like the rest.
+    UTF-8), whatever their suffix. A file's comment lines are read like the rest,
+    except for the deployment paths, which a comment in code may name.
     """
     found = []
     for name in names:
@@ -255,6 +252,8 @@ def test_the_scan_opens_documents_deploy_and_prawduct_not_only_source():
         "pyproject.toml",
         ".github/workflows/suites.yml",
         "src/arrt_player/__main__.py",
+        "tools/power_probe.py",
+        "tools/label_preview.py",
     ):
         assert known in scanned, f"{known} is not in the scanned set"
 
@@ -381,7 +380,85 @@ def test_a_binary_file_is_skipped_and_a_missing_one_is_too(tmp_path):
     ],
 )
 def test_the_shape_check_knows_a_leak_from_a_lookalike(line, leaks):
-    assert bool(_PRIVATE_SHAPES.search(line)) is leaks
+    """Through the scan's own kinds, for a source file: the two-guard version asked a regex of its own."""
+    assert bool(_kinds_in(line, "src/arrt_player/a.py")) is leaks
+
+
+# The guard this one replaced (`test_no_source_file_carries_a_deployment_value`) read
+# `src/**/*.py` and `tools/**/*.py` and refused, on every line of them, comments
+# included, a private-range IPv4 address (10/8, 192.168/16, 172.16/12) or a path under
+# a named person's home directory; and on every line that did not begin with `#`, the
+# deployment's published paths. Each is planted here in each of those two trees, through
+# the one scan that remains, so a shape lost in the fold fails by name. Assembled from
+# parts: written whole, they would be hits in this file or in the deploy docs it quotes.
+_SRV = "/srv" + "/art"
+_LOADER = "/opt/" + "samsung-frame-art-loader"
+_WAS_REFUSED_IN_CODE_TREES = [
+    ('HOST = "10.1.2.3"', "private IPv4 address"),
+    ('HOST = "10.255.255.255"', "private IPv4 address"),
+    ('HOST = "192.' + '168.0.20"', "private IPv4 address"),
+    ('HOST = "172.' + '16.0.1"', "private IPv4 address"),
+    ('HOST = "172.' + '20.0.1"', "private IPv4 address"),
+    ('HOST = "172.' + '31.255.254"', "private IPv4 address"),
+    ("# copied from 10.1.2.3 by hand", "private IPv4 address"),
+    ("    # indented, and still " + "192.168.0.20", "private IPv4 address"),
+    ("# copied from /" + "Users/someone/thing", "home-directory path"),
+    ('PATH = "/' + 'home/someone/art"', "home-directory path"),
+    ("# see /" + "home/someone/art", "home-directory path"),
+    (f'ROOT = "{_SRV}"', _DEPLOYMENT_PATH_KIND),
+    (f'ROOT = "{_SRV}/media"', _DEPLOYMENT_PATH_KIND),
+    (f'ROOT = "{_LOADER}"', _DEPLOYMENT_PATH_KIND),
+    (f'ROOT = "{_SRV}"  # a trailing comment does not excuse it', _DEPLOYMENT_PATH_KIND),
+    (f"    {_SRV} named inside a docstring, which is not a comment", _DEPLOYMENT_PATH_KIND),
+]
+
+
+@pytest.mark.parametrize(("line", "kind"), _WAS_REFUSED_IN_CODE_TREES)
+@pytest.mark.parametrize("where", ["src/arrt_player/a.py", "src/arrt_player/panel/deep/a.py", "tools/a.py", "tools/sub/a.py"])
+def test_everything_the_retired_source_scan_refused_is_still_refused_in_src_and_tools(tmp_path, where, line, kind):
+    target = tmp_path / where
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# prose\n" + line + "\n", encoding="utf-8")
+
+    found = _leaks(tmp_path, [where])
+
+    assert (f"{where}:2", kind) in found, f"{kind} planted in {where} was not found; found {found}"
+    assert all(location.rsplit(":", 1)[1] != "1" for location, _ in found), "the prose line above the seed is not a hit"
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        "tests/test_a.py",
+        "docs/a-runbook.md",
+        "deploy/README.md",
+        ".prawduct/artifacts/a-record.md",
+        "src/arrt_player/a.md",
+        "pyproject.toml",
+    ],
+)
+def test_the_deployment_paths_are_forbidden_in_code_only(tmp_path, where):
+    """The deploy docs, the records and the tests name them; so does a comment in a module. Only code may not."""
+    target = tmp_path / where
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f'ROOT = "{_SRV}"\nPATH = "{_LOADER}"\n', encoding="utf-8")
+
+    assert _leaks(tmp_path, [where]) == []
+
+
+@pytest.mark.parametrize("comment", [f"# the unit runs in {_SRV}", f"    # and {_LOADER} before the move"])
+def test_a_comment_in_a_module_may_name_a_deployment_path(tmp_path, comment):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text(comment + "\n", encoding="utf-8")
+
+    assert _leaks(tmp_path, ["src/a.py"]) == []
+
+
+def test_a_deployment_path_in_code_is_named_by_file_line_and_kind_never_by_value(tmp_path):
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "a.py").write_text(f'ok = 1\nROOT = "{_SRV}"\n', encoding="utf-8")
+
+    assert _leaks(tmp_path, ["tools/a.py"]) == [("tools/a.py:2", _DEPLOYMENT_PATH_KIND)]
 
 
 def _this_machines_values() -> dict[str, str]:

@@ -7,7 +7,15 @@ it holds: a unit that has lost one still starts, and goes wrong only on the day
 the fault it guarded against comes back.
 """
 
+import inspect
 import pathlib
+
+from arrt_player.client import IDENTITY_READ_BUDGET_SECONDS
+from arrt_player.config import DEFAULT_CLIENT_POLL_SECONDS, ClientSettings
+from arrt_player.mpv import LOAD_TIMEOUT_SECONDS, START_TIMEOUT_SECONDS, stop_group
+from arrt_player.notify import PET_MIN_SECONDS, SETUP_PET_SECONDS
+from arrt_player.programmes.slideshow import NOT_SHOWN_PAUSE_S
+from arrt_player.pull import ClientPull
 
 UNIT = pathlib.Path(__file__).resolve().parents[1] / "deploy" / "display.service"
 
@@ -223,12 +231,128 @@ def test_the_unit_is_sandboxed_as_far_as_tvpi_owning_the_checkout_allows():
 def test_the_sandbox_leaves_the_devices_the_walls_draw_through():
     """The display card, the render node, SPI, GPIO and the DDC bus are reached
     through `SupplementaryGroups=`. Each of these would hide or forbid one of them,
-    and the wall would go dark at the next restart with the unit `active`."""
+    and the wall would go dark at the next restart with the unit `active`.
+
+    `ProtectClock=` is one of them though it names no device: systemd.exec(5)
+    says it implies `DeviceAllow=char-rtc r`, and under the default
+    `DevicePolicy=auto` one `DeviceAllow=` makes the policy an allowlist, which
+    refuses every device the walls draw through. `MemoryDenyWriteExecute=` and
+    `ProcSubset=` are here for the code mpv's drivers map and the board facts
+    the GPIO library reads, which the unit's comment names."""
     directives = _directives()
     present = sorted(
-        {"PrivateDevices", "DevicePolicy", "DeviceAllow", "ProtectKernelModules", "ProtectKernelTunables"} & directives.keys()
+        {
+            "PrivateDevices",
+            "DevicePolicy",
+            "DeviceAllow",
+            "ProtectKernelModules",
+            "ProtectKernelTunables",
+            "ProtectClock",
+            "MemoryDenyWriteExecute",
+            "ProcSubset",
+        }
+        & directives.keys()
     )
     assert not present, f"display.service must not restrict the devices: {present}"
+
+
+def test_the_unit_is_restricted_as_far_as_needs_no_path_device_or_update_step():
+    """The owner's 2026-11-19 ruling keeps the checkout tvpi's and `ProtectSystem`
+    at `full`. These are the restrictions that change none of that; each is
+    checked in the unit's comment against what the Player and mpv do."""
+    directives = _directives()
+    restricted = {
+        name: directives.get(name)
+        for name in (
+            "LockPersonality",
+            "RestrictNamespaces",
+            "RestrictSUIDSGID",
+            "RestrictRealtime",
+            "ProtectHostname",
+            "ProtectKernelLogs",
+            "ProtectControlGroups",
+            "SystemCallArchitectures",
+            "CapabilityBoundingSet",
+        )
+    }
+    assert restricted == {
+        "LockPersonality": ["yes"],
+        "RestrictNamespaces": ["yes"],
+        "RestrictSUIDSGID": ["yes"],
+        "RestrictRealtime": ["yes"],
+        "ProtectHostname": ["yes"],
+        "ProtectKernelLogs": ["yes"],
+        "ProtectControlGroups": ["yes"],
+        "SystemCallArchitectures": ["native"],
+        # Empty: no capability in the bounding set at all.
+        "CapabilityBoundingSet": [""],
+    }
+
+
+def test_the_unit_waits_for_the_players_word_and_ends_one_that_stops_making_progress():
+    """`Type=notify` with a watchdog, which the Player answers (`notify.py`).
+
+    **`NotifyAccess=all` because `ExecStart` is `uv run`**: uv is the unit's
+    main process and the Player its child, and `main` would drop every message
+    the Player sends, so no start would ever complete. **SIGTERM**, so a Player
+    the watchdog ends takes the orderly stop that closes the art channel, and
+    **the abort window is the stop window**, stated, so a watchdog's SIGTERM
+    inside a television connection gets the time `systemctl stop`'s does.
+    `Restart=always` restarts after a watchdog (systemd.service(5), Table 1)."""
+    directives = _directives()
+    assert directives.get("Type") == ["notify"]
+    assert _uv_run_options() is not None, "ExecStart= is `uv run`, which is why NotifyAccess= is all"
+    assert directives.get("NotifyAccess") == ["all"], "uv is the main process; `main` drops the Player's READY=1"
+    assert directives.get("WatchdogSignal") == ["SIGTERM"], "the watchdog must take the stop path that closes the art channel"
+    assert directives.get("TimeoutAbortSec") == directives.get("TimeoutStopSec")
+    assert directives.get("Restart") == ["always"]
+
+
+#: What no constant bounds, given its own share of `WatchdogSec`: the first
+#: pass's integrity read of every composed picture on the loop (the operator's
+#: check 12 measures it), a retired wall's directory removed inside a cycle, a
+#: Pi reclaiming memory at `MemoryHigh`. Until check 12 is measured, more than
+#: the longest bounded gap itself.
+UNBOUNDED_STALLS_SECONDS = 120.0
+
+
+async def test_the_watchdog_outlasts_the_longest_honest_gap_in_each_mode(client_settings: ClientSettings):
+    """A watchdog shorter than an honest gap between two pets restarts a healthy Player, and a restart reconnects to the Frame.
+
+    Each gap is summed from the constants that bound it, read from the code:
+    in Arrt mode a supervisor cycle (the client poll, the Frame's identity read,
+    the heartbeat and the document, each at the client session's total) and the
+    pet rate limit; in slideshow mode the longest wait and the longest load
+    (mpv stopped and started, the file put up) and the rate limit; in setup mode
+    its period. A constant raised past the unit's number fails here by name.
+    """
+    link = ClientPull(client_settings)
+    try:
+        request = link._client().timeout.total  # the bound the cycle actually runs under
+    finally:
+        await link.close()
+    assert request is not None, "the client session has no total timeout, so no cycle is bounded"
+    mpv_grace = inspect.signature(stop_group).parameters["grace"].default
+    # `MpvOutput._stop`: `quit` with a 1 s timeout, then the group's grace, then SIGKILL and the grace again.
+    mpv_stop = 1.0 + 2 * mpv_grace
+    gaps = {
+        "arrt": DEFAULT_CLIENT_POLL_SECONDS + IDENTITY_READ_BUDGET_SECONDS + 2 * request + PET_MIN_SECONDS,
+        "slideshow": NOT_SHOWN_PAUSE_S + mpv_stop + 2 * START_TIMEOUT_SECONDS + 4 * LOAD_TIMEOUT_SECONDS + PET_MIN_SECONDS,
+        "setup": SETUP_PET_SECONDS + PET_MIN_SECONDS,
+    }
+    (watchdog,) = _directives().get("WatchdogSec", [None])
+    assert watchdog is not None, "display.service has no WatchdogSec="
+    short = {mode: gap for mode, gap in gaps.items() if float(watchdog) < gap + UNBOUNDED_STALLS_SECONDS}
+    assert not short, f"WatchdogSec={watchdog} leaves less than {UNBOUNDED_STALLS_SECONDS:g} s of stalls above {short}"
+
+
+def test_a_start_that_syncs_is_not_killed_before_it_finishes():
+    """Type=simple had no start deadline. Under `Type=notify` a start without
+    `READY=1` is failed at `TimeoutStartSec`, and `uv run` installs what the
+    venv lacks before the Player runs; systemd's default 90 s would kill that
+    install on every start, and the wall would never come back."""
+    (timeout,) = _directives().get("TimeoutStartSec", ["90"])
+    assert float(timeout) > 90, f"TimeoutStartSec={timeout} is no more than the default that would kill a syncing start"
 
 
 def test_the_directives_the_sandbox_must_not_move_are_as_they_were():

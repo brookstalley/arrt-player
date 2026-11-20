@@ -20,10 +20,11 @@ import pathlib
 import re
 
 import pytest
-from workflow_scan import PYTEST_INVOCATION, unlocked_uv_calls, unpinned_actions, unpinned_setup_uv
+from workflow_scan import PYTEST_INVOCATION, dependabot_problems, unlocked_uv_calls, unpinned_actions, unpinned_setup_uv
 
 PROJECT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = PROJECT / ".github" / "workflows" / "suites.yml"
+DEPENDABOT = PROJECT / ".github" / "dependabot.yml"
 TESTS = PROJECT / "tests"
 
 #: The job that runs the default suite.
@@ -274,3 +275,59 @@ def test_a_uv_run_or_sync_without_locked_is_rejected(line):
 )
 def test_a_locked_uv_call_and_a_comment_that_only_mentions_one_are_accepted(line):
     assert unlocked_uv_calls(line) == []
+
+
+# Dependabot is how a pin by commit learns that its tag moved. It watches the
+# actions and nothing else: `uv.lock` stays a hand step (Goals, the Dependabot
+# decision), so a second ecosystem added here would be a bot opening lock updates
+# nobody exercised.
+
+_ACTIONS_ONLY = (
+    "version: 2\n"
+    "updates:\n"
+    '  - package-ecosystem: "github-actions"\n'
+    '    directory: "/"\n'
+    "    schedule:\n"
+    '      interval: "monthly"\n'
+)
+
+
+def test_dependabot_watches_the_pinned_actions_monthly_and_nothing_else():
+    assert DEPENDABOT.is_file(), ".github/dependabot.yml is missing, so a pinned action never learns its tag moved"
+    problems = dependabot_problems(DEPENDABOT.read_text(encoding="utf-8"))
+    assert problems == [], "\n".join(problems)
+
+
+def test_there_are_actions_for_dependabot_to_watch():
+    """The file is held to `github-actions` because the workflow has pinned actions; none would make it vacuous."""
+    assert re.search(r"^\s*-?\s*uses:\s*[\w-]+/", _WORKFLOW_TEXT, re.MULTILINE), "no `uses:` in the workflow to watch"
+
+
+def test_an_actions_only_monthly_file_is_accepted():
+    assert dependabot_problems(_ACTIONS_ONLY) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "complaint"),
+    [
+        (_ACTIONS_ONLY.replace("github-actions", "uv"), "'uv'"),
+        (_ACTIONS_ONLY.replace("github-actions", "pip"), "'pip'"),
+        (_ACTIONS_ONLY + '  - package-ecosystem: "uv"\n    directory: "/"\n    schedule:\n      interval: "monthly"\n', "'uv'"),
+        (_ACTIONS_ONLY.replace("monthly", "weekly"), "'weekly', not 'monthly'"),
+        (_ACTIONS_ONLY.replace("monthly", "daily"), "'daily', not 'monthly'"),
+        (_ACTIONS_ONLY.replace('"/"', '"/src"'), "not '/'"),
+        (_ACTIONS_ONLY.replace("version: 2", "version: 1"), "not 2"),
+        ("version: 2\nupdates:\n", "lists nothing"),
+        ("", "not 2"),
+        (_ACTIONS_ONLY.replace('"monthly"', "{ interval: monthly }"), "could not be read"),
+    ],
+)
+def test_a_dependabot_file_that_watches_more_or_less_often_or_less_is_rejected(text, complaint):
+    problems = dependabot_problems(text)
+    assert problems, f"accepted: {text!r}"
+    assert any(complaint in problem for problem in problems), problems
+
+
+def test_a_comment_in_the_dependabot_file_is_not_a_setting():
+    text = "# interval: weekly\n" + _ACTIONS_ONLY.replace('"monthly"', '"monthly"  # not "weekly"')
+    assert dependabot_problems(text) == []

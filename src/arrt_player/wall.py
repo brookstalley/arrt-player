@@ -152,8 +152,7 @@ class Display(Protocol):
     #: The exceptions that mean the display cannot be reached this pass.
     unavailable: tuple[type[Exception], ...]
     #: The word this display's start, stop and crash lines are filed under in
-    #: the journal (`<journal_name>.started`), kept from when each kind had its
-    #: own loop so a journal search an operator already uses still finds them.
+    #: the journal (`<journal_name>.started`): `frame` or `screen`, one per kind.
     journal_name: str
     #: What the journal calls this display when it starts and stops.
     description: str

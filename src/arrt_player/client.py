@@ -32,11 +32,38 @@ say, answers 304. So the last document is kept, and the walls are matched to it
 again whenever the outputs differ from the ones it was last matched against.
 
 **A wall that leaves its screen leaves it dark; a client that stops does not.**
-A worker is told why it was stopped (`WallStop`): retired, when the document no
+A worker is told why it was stopped (`WorkerStop`): retired, when the document no
 longer places its wall on that output, so a screen wall draws black there rather
 than going on showing a work the server now says nobody shows; or merely
 stopped, when the client is going down or the output itself is gone, which
-leave the screen as it is.
+leave the screen as it is. A label renderer is told the same way, by the same
+type: retired when its label output is no longer mapped, so the panel is left
+blank.
+
+**A label's cached document goes when nothing maps its label any more.** The
+supervisor hands the ids the current document maps to the entry point's
+`forget_labels` at each match and as each renderer finishes stopping; it is
+never called before a document has been read.
+
+**A wall's directory goes a week after the wall left this client.** A wall
+moved to another Player, or deleted, would otherwise leave its feed, masters,
+compositions and heartbeat under `CACHE_DIR` for ever. Its directory is stamped
+when a client document is read that does not place it here, and removed once
+this client has gone on reading documents that do not, for a week by the
+monotonic clock (`WallCaches`); a wall that comes back first is un-stamped and
+loses nothing.
+
+**Both caches are swept only on a document that was read.** The label cache
+and the walls' directories are swept against the current document, never
+before one has been read and parsed: a client that cannot read its document
+does not know which walls and labels it has, and reading that as "none" would
+delete every one (`Supervisor._read_document`).
+
+**Every line a worker logs names its wall.** The supervisor binds the wall's
+id around everything a wall's worker runs, and a label's id and its wall's
+around everything its renderer runs (`logs.wall_context`, `logs.label_context`),
+so a line logged three calls deep in a pull or a drawing thread says which wall
+it is about. The supervisor's own lines about the client say none.
 
 **A worker that fails is restarted here rather than taking the process down.**
 One process drives every wall this client has, so a fault in one wall's worker
@@ -51,16 +78,34 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
-from collections.abc import Awaitable, Callable
+import shutil
+import uuid
+from collections.abc import Awaitable, Callable, Collection
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 from arrt_player import heartbeat as heartbeat_module
-from arrt_player.config import CLIENT_DOCUMENT_FILENAME, FRAME_OUTPUT, ClientSettings, WallIdUnusable, WallSettings
+from arrt_player.config import (
+    CACHE_DIR_NAMES,
+    CACHED_MANIFEST_FILENAME,
+    CLIENT_DOCUMENT_FILENAME,
+    COMPOSED_DIRNAME,
+    FRAME_OUTPUT,
+    PLAIN_COMPONENT,
+    STATE_FILENAME,
+    ClientSettings,
+    WallIdUnusable,
+    WallSettings,
+)
 from arrt_player.episodes import Backoff, ReportOnce
+from arrt_player.logs import label_context, wall_context
+from arrt_player.manifest import MEDIA_DIRNAME
 
 log = logging.getLogger(__name__)
 
@@ -387,6 +432,296 @@ def client_heartbeat(
     return heartbeat
 
 
+# -- the walls' directories ------------------------------------------------------------
+
+#: How long a wall's directory outlives the wall's leaving this client: a week
+#: of this client reading documents that do not place it here. A wall moved
+#: away and back within it keeps its masters, pictures and Frame bindings.
+WALL_CACHE_KEPT_SECONDS: Final[float] = 7 * 24 * 60 * 60
+
+#: The stamp in a wall's directory that says the wall has left, when, and for
+#: how long this client has seen it gone. **A leading dot**, so no master,
+#: composition or heartbeat can be named it.
+LEFT_STAMP_FILENAME: Final[str] = ".left.json"
+
+#: How much more absence a stamp sees before it is written again. Each write is
+#: a write to the Pi's card, so the count is kept in memory and written this
+#: often; a restart loses at most this much of it, which only delays a removal.
+LEFT_STAMP_REWRITE_SECONDS: Final[float] = 15 * 60
+
+#: The most absence one sweep may add to a stamp. A sweep follows each poll, so
+#: a longer gap is a loop that stalled or a monotonic clock that leapt, and
+#: neither is a week of documents read; the week is made of sweeps.
+LEFT_CREDIT_PER_SWEEP_SECONDS: Final[float] = 10 * 60
+
+#: What a wall's directory is renamed to, directly under `CACHE_DIR`, before it
+#: is deleted. **The rename is the removal**: it happens in one step on the event
+#: loop, so a worker started for the wall a moment later makes a new directory
+#: rather than writing into one a thread is deleting. A leading dot, so no wall
+#: can be named it; one a failed deletion left is deleted again at the next sweep.
+REMOVING_PREFIX: Final[str] = ".removing-"
+
+
+def _wall_markers(name: str) -> tuple[str, ...]:
+    """The names only a wall's directory holds, for a directory named `name`.
+
+    Derived from the constants that name them, so a directory is recognised
+    as a wall's by what the Player wrote there and never by its name alone: a
+    plain-named directory somebody else put under `CACHE_DIR` is left alone.
+    """
+    return (
+        CACHED_MANIFEST_FILENAME,
+        MEDIA_DIRNAME,
+        COMPOSED_DIRNAME,
+        STATE_FILENAME,
+        heartbeat_module.path_in(Path(), name).name,
+        LEFT_STAMP_FILENAME,
+    )
+
+
+#: `config.CACHE_DIR_NAMES` as a wall id is compared with them: without case.
+_RESERVED: Final[frozenset[str]] = frozenset(name.casefold() for name in CACHE_DIR_NAMES)
+
+
+@dataclass
+class _Stamp:
+    #: When the wall was first seen gone, by the wall clock: for the journal.
+    left_at: datetime
+    #: How long this client has seen it gone, by the monotonic clock: the rule.
+    absent_seconds: float
+    #: `absent_seconds` as last written to disk.
+    written_seconds: float
+
+
+class WallCaches:
+    """Removes the directory of a wall that left this client, a week after it left.
+
+    **Swept against a document that was read, and only then** (the supervisor
+    calls `sweep` only while it holds one). Given every wall that document
+    places here, each directory under `CACHE_DIR` that is a wall's and is not
+    one of them is stamped at first sight; a stamped one is removed once this
+    client has seen it gone for `kept_seconds`; one whose wall is placed here
+    again has its stamp removed.
+
+    **Measured by the monotonic clock, and only while documents are being read.**
+    The time since the last sweep, at most `credit_seconds`, is added to each
+    stamp at every sweep, and a process's first sweep adds none. So a wall clock
+    that jumps forward expires nothing early, nor does a stalled loop or a
+    leaping monotonic clock; a Player switched off for a month resumes its week
+    from its stamp when it comes back, the month counting for nothing and at most
+    `rewrite_seconds` of the week lost; and a client that cannot read a document
+    adds nothing at all. The wall clock is
+    written into the stamp to say when, never to decide.
+
+    **What it may remove:** a real directory directly under `CACHE_DIR`, whose
+    name a wall id may take (`config.PLAIN_COMPONENT`, and none of
+    `config.CACHE_DIR_NAMES`, without case), that holds one of the names only a
+    wall's directory holds (`_wall_markers`). A symlink is never followed and
+    never removed; a dotted name (the client document, its ETag, the label
+    cache, the settings, the slideshow's files, a write in progress) is outside
+    what a wall id can be called and is passed over in silence; anything else a
+    wall id could be called that is not a wall's directory is left and said
+    once. A wall's masters live in its own directory, so removing one wall's
+    never touches a master another wall holds.
+
+    **Never raises** for the disk: a directory that cannot be read, stamped or
+    removed costs disk, and is said once per episode.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Path,
+        *,
+        now: Callable[[], datetime],
+        monotonic: Callable[[], float],
+        kept_seconds: float = WALL_CACHE_KEPT_SECONDS,
+        rewrite_seconds: float = LEFT_STAMP_REWRITE_SECONDS,
+        credit_seconds: float = LEFT_CREDIT_PER_SWEEP_SECONDS,
+    ) -> None:
+        self._root = cache_dir
+        self._credit = credit_seconds
+        self._now = now
+        self._monotonic = monotonic
+        self._kept = kept_seconds
+        self._rewrite = rewrite_seconds
+        self._stamps: dict[str, _Stamp] = {}
+        self._swept_at: float | None = None
+        self._said_unknown: set[str] = set()
+        self._unsweepable = ReportOnce()
+
+    async def sweep(self, placed: Collection[str]) -> None:
+        """One pass, given every wall the current document places here (and any still running or closing).
+
+        Everything but the deletion is done here on the loop, in one step: a
+        directory to go is renamed out of its wall's path before this awaits, so
+        nothing a worker starts afterwards can land in what is being deleted.
+        """
+        failed, doomed = self._pass(placed)
+        for path in doomed:
+            try:
+                await asyncio.to_thread(shutil.rmtree, path)
+            except OSError as exc:
+                failed = True
+                self._say_unsweepable(path, exc)
+        if not failed and self._unsweepable.end():
+            log.info("the walls' directories can be swept again", extra={"event": "client.wall_cache_sweepable"})
+
+    def _pass(self, placed: Collection[str]) -> tuple[bool, list[Path]]:
+        """Stamp, un-stamp and rename what this pass finds. Whether any of it failed, and what to delete."""
+        swept_at = self._monotonic()
+        elapsed = 0.0 if self._swept_at is None else min(max(0.0, swept_at - self._swept_at), self._credit)
+        self._swept_at = swept_at
+        kept = {wall_id.casefold() for wall_id in placed}
+        try:
+            entries = sorted(self._root.iterdir())
+        except FileNotFoundError:
+            return False, []
+        except OSError as exc:
+            self._say_unsweepable(self._root, exc)
+            return True, []
+        failed, doomed = False, []
+        for entry in entries:
+            try:
+                gone = self._consider(entry, kept, elapsed)
+            except OSError as exc:
+                failed = True
+                self._say_unsweepable(entry, exc)
+                continue
+            if gone is not None:
+                doomed.append(gone)
+        return failed, doomed
+
+    def _consider(self, entry: Path, kept: set[str], elapsed: float) -> Path | None:
+        """What this pass does with one entry directly under `CACHE_DIR`: the path to delete, if any."""
+        name = entry.name
+        if name.startswith(REMOVING_PREFIX):
+            # A deletion a failure or a stop left unfinished.
+            return entry if entry.is_dir() and not entry.is_symlink() else None
+        if not PLAIN_COMPONENT.fullmatch(name) or name.casefold() in _RESERVED:
+            return None
+        if name.casefold() in kept:
+            self._returned(entry)
+            return None
+        if entry.is_symlink() or not entry.is_dir() or not any(os.path.lexists(entry / marker) for marker in _wall_markers(name)):
+            self._say_unknown(entry)
+            return None
+        return self._age(entry, elapsed)
+
+    def _age(self, entry: Path, elapsed: float) -> Path | None:
+        """A wall's directory no document places here: stamped, aged by `elapsed`, or taken away once it is old enough."""
+        name = entry.name
+        stamp = self._stamps.get(name)
+        if stamp is None:
+            stamp = self._read_stamp(entry)
+            if stamp is None:
+                self._stamp(entry)
+                return None
+            self._stamps[name] = stamp
+        else:
+            stamp.absent_seconds += elapsed
+        if stamp.absent_seconds >= self._kept:
+            return self._remove(entry, stamp)
+        if stamp.absent_seconds - stamp.written_seconds >= self._rewrite:
+            self._write_stamp(entry, stamp)
+        return None
+
+    def _stamp(self, entry: Path) -> None:
+        stamp = _Stamp(left_at=self._now(), absent_seconds=0.0, written_seconds=0.0)
+        self._write_stamp(entry, stamp)
+        self._stamps[entry.name] = stamp
+        log.info(
+            "wall %s is not this client's now; its directory is removed after %s unless it comes back",
+            entry.name,
+            timedelta(seconds=self._kept),
+            extra={"event": "client.wall_cache_stamped", "wall_id": entry.name, "path": str(entry)},
+        )
+
+    def _returned(self, entry: Path) -> None:
+        had = self._stamps.pop(entry.name, None) is not None
+        stamp_path = entry / LEFT_STAMP_FILENAME
+        if not entry.is_symlink() and os.path.lexists(stamp_path):
+            stamp_path.unlink()
+            had = True
+        if had:
+            log.info(
+                "wall %s is this client's again; its directory is kept",
+                entry.name,
+                extra={"event": "client.wall_cache_returned", "wall_id": entry.name, "path": str(entry)},
+            )
+
+    def _remove(self, entry: Path, stamp: _Stamp) -> Path:
+        """Take a wall's directory out of its path, and say so. Returns where it went, to be deleted."""
+        doomed = self._root / f"{REMOVING_PREFIX}{entry.name}.{uuid.uuid4().hex}"
+        entry.rename(doomed)
+        self._stamps.pop(entry.name, None)
+        log.info(
+            "removed the directory of wall %s, which left this client at %s",
+            entry.name,
+            stamp.left_at.isoformat(),
+            extra={
+                "event": "client.wall_cache_removed",
+                "wall_id": entry.name,
+                "path": str(entry),
+                "left_at": stamp.left_at.isoformat(),
+            },
+        )
+        return doomed
+
+    def _read_stamp(self, entry: Path) -> _Stamp | None:
+        """The stamp in `entry`, or None when there is none this reader can use: it is then stamped afresh."""
+        try:
+            document = json.loads((entry / LEFT_STAMP_FILENAME).read_text(encoding="utf-8"))
+            left_at = datetime.fromisoformat(document["left_at"])
+            absent = float(document["absent_seconds"])
+        except FileNotFoundError:
+            return None
+        except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+            # A stamp cut short or from another shape. Stamping afresh only
+            # delays the removal, which is the side to be wrong on.
+            return None
+        if left_at.tzinfo is None or not absent >= 0:
+            return None
+        return _Stamp(left_at=left_at, absent_seconds=absent, written_seconds=absent)
+
+    def _write_stamp(self, entry: Path, stamp: _Stamp) -> None:
+        path = entry / LEFT_STAMP_FILENAME
+        temporary = entry / f".{LEFT_STAMP_FILENAME}.tmp"
+        data = json.dumps({"left_at": stamp.left_at.isoformat(), "absent_seconds": stamp.absent_seconds}).encode("utf-8")
+        # Forced to the card before the rename, as the pull's files are
+        # (`pull._write_atomically`): the stamp is the only record of when the
+        # wall left, and a power cut must leave the old one or the new, whole.
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+        except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
+            raise
+        stamp.written_seconds = stamp.absent_seconds
+
+    def _say_unknown(self, entry: Path) -> None:
+        if entry.name in self._said_unknown:
+            return
+        self._said_unknown.add(entry.name)
+        log.info(
+            "%s is under CACHE_DIR and is not a wall's directory this client recognises; it is left as it is",
+            entry,
+            extra={"event": "client.cache_entry_unknown", "path": str(entry)},
+        )
+
+    def _say_unsweepable(self, path: Path, exc: OSError) -> None:
+        if self._unsweepable.begin():
+            log.warning(
+                "the directories of walls that left this client cannot be swept (%s: %s); they stay until they can",
+                path,
+                exc,
+                extra={"event": "client.wall_cache_unsweepable", "path": str(path)},
+            )
+
+
 # -- the supervisor --------------------------------------------------------------------
 
 
@@ -423,15 +758,26 @@ class ClientLink(Protocol):
     async def close(self) -> None: ...
 
 
-class WallStop(asyncio.Event):
-    """The event that stops a wall's worker, and why it was set.
+class WorkerStop(asyncio.Event):
+    """The event that stops a wall's worker or a label's renderer, and why it was set.
 
-    **The reason rides on the event**, so a worker stays a three-argument
-    callable and one that has no use for the reason need not take it. `retired`
-    is true when the document no longer places the wall on the output its worker
-    runs on (taken away, or moved to another), and false when the client is
-    stopping or the document still places the wall there (an output gone from
-    this client, or one the server also gave another wall).
+    **The one way either is told it is retired.** The reason rides on the event,
+    so a worker that has no use for it need not take it, and `retired` is set
+    before the event is, so whatever wakes on the event reads the reason it was
+    set for. It is true when the document no longer places what the worker runs
+    on its output: a wall taken away or moved to another output, or a label
+    output no longer mapped at all. It is false when the client is stopping, or
+    when the document still places it there: an output gone from this client,
+    one the server also gave another wall, or a label output now mapped to
+    another wall or label. Once true it stays true.
+
+    **Called once more, already stopped and retired.** A retirement that lands
+    while the worker waits to be restarted after a failure finds nothing running
+    to see it. So the supervisor calls the worker once more with this event
+    already set and `retired` true, so that what it does on leaving its output
+    (a screen drawn black, a label panel left blank) still happens; it must then
+    do only that, and return, saying nothing of starting. A stop that is not a
+    retirement is never followed by such a call.
     """
 
     def __init__(self) -> None:
@@ -439,42 +785,42 @@ class WallStop(asyncio.Event):
         self.retired = False
 
     def retire(self) -> None:
-        """Stop the worker because its wall has left its output."""
+        """Stop the worker because what it runs has left its output."""
         self.retired = True
         self.set()
 
 
-def wall_retired(stop: asyncio.Event) -> bool:
-    """Whether `stop` stopped a worker because its wall left its output. False for a plain event."""
-    return isinstance(stop, WallStop) and stop.retired
+def is_retired(stop: asyncio.Event) -> bool:
+    """Whether `stop` stopped a worker because what it runs left its output. False for a plain event."""
+    return isinstance(stop, WorkerStop) and stop.retired
 
 
 #: What runs one wall: given its settings, the output it is on, and the event
-#: that stops it (a `WallStop`), run until stopped. It may raise; the supervisor
-#: restarts it. **Called once more with the event already set** when the wall is
-#: retired while the worker waits to be restarted after a failure, so that it can
-#: leave its output as retirement asks; it must then do only that, and return.
-Worker = Callable[[WallSettings, OutputReport, asyncio.Event], Awaitable[None]]
+#: that stops it (a `WorkerStop`), run until stopped. It may raise; the
+#: supervisor restarts it. Called once more as `WorkerStop` says.
+Worker = Callable[[WallSettings, OutputReport, WorkerStop], Awaitable[None]]
 
-#: What runs one label output: given its assignment, the event that stops it and
-#: the event set beside it when the mapping went (rather than the client
-#: stopping), run until stopped. It may raise; the supervisor restarts it. Called
-#: once more, already stopped and retired, as a `Worker` is.
-LabelWorker = Callable[[LabelAssignment, asyncio.Event, asyncio.Event], Awaitable[None]]
+#: What runs one label output: given its assignment and the event that stops it
+#: (a `WorkerStop`), run until stopped. It may raise; the supervisor restarts it.
+#: Called once more as `WorkerStop` says.
+LabelWorker = Callable[[LabelAssignment, WorkerStop], Awaitable[None]]
+
+#: Given every label id the current client document maps, remove what this
+#: client cached for any other. Never raises.
+ForgetLabels = Callable[[frozenset[str]], None]
 
 
 @dataclass
 class _Running:
     assignment: Assignment
-    stop: WallStop
+    stop: WorkerStop
     task: asyncio.Task[None]
 
 
 @dataclass
 class _RunningLabel:
     assignment: LabelAssignment
-    stop: asyncio.Event
-    retired: asyncio.Event
+    stop: WorkerStop
     task: asyncio.Task[None]
 
 
@@ -492,16 +838,23 @@ class Supervisor:
         monotonic: Callable[[], float],
         label_worker: LabelWorker | None = None,
         label_outputs: Callable[[], list[LabelOutputReport]] = list,
+        forget_labels: ForgetLabels | None = None,
+        wall_caches: WallCaches | None = None,
         frame_identity: FrameIdentity | None = None,
         restart_min_seconds: float = RESTART_MIN_SECONDS,
         restart_max_seconds: float = RESTART_MAX_SECONDS,
     ) -> None:
+        """`wall_caches` sweeps the directories of walls that left: by default under the cache, on `now` and `monotonic`."""
         self._settings = settings
+        self._wall_caches = (
+            wall_caches if wall_caches is not None else WallCaches(settings.cache_dir, now=now, monotonic=monotonic)
+        )
         self._link = link
         self._worker = worker
         self._outputs = outputs
         self._label_worker = label_worker
         self._label_outputs = label_outputs
+        self._forget_labels = forget_labels
         self._frame_identity = frame_identity
         self._now = now
         self._monotonic = monotonic
@@ -514,6 +867,9 @@ class Supervisor:
         #: Workers asked to stop and not yet finished, so shutdown can wait for
         #: each to close what it holds — on the Frame, the art channel.
         self._stopping: set[asyncio.Task[None]] = set()
+        #: The wall each worker in `_stopping` ran, so its directory is never
+        #: swept while it may still be writing there.
+        self._stopping_for: dict[asyncio.Task[None], str] = {}
         #: Assignments already reported as impossible, so each is said once. Keyed
         #: on the wall *and* the output: a wall moved to another output it also
         #: lacks is news.
@@ -577,9 +933,44 @@ class Supervisor:
             self.reconcile(document)
         elif self._document is not None and self._current_outputs() != self._reconciled_outputs:
             self.reconcile(self._document)
+        await self._sweep_walls()
+
+    @property
+    def _stopping_walls(self) -> set[str]:
+        return {wall_id for task, wall_id in self._stopping_for.items() if not task.done()}
 
     def _current_outputs(self) -> tuple[list[OutputReport], list[LabelOutputReport]]:
         return (self._outputs(), self._label_outputs())
+
+    @property
+    def _read_document(self) -> ClientDocument | None:
+        """The document the workers follow, or None while none has been read and parsed.
+
+        **The one guard both caches' sweeps stand on.** None means this client
+        does not know which walls and labels it has, never that it has none: a
+        server down at boot with no cached document, or a cached one that cannot
+        be read. Each sweep returns at once on None, so neither removes anything
+        until a document says what to keep.
+        """
+        return self._document
+
+    async def _sweep_walls(self) -> None:
+        """Sweep the walls' directories against the current document. Never raises."""
+        document = self._read_document
+        if document is None:
+            return
+        # Every wall the document places here, on any output and placeable or
+        # not, and every wall a worker still runs or is still closing for: none
+        # of their directories is a wall that left.
+        placed = {assignment.wall_id for assignment in document.walls} | set(self._running) | self._stopping_walls
+        try:
+            await self._wall_caches.sweep(placed)
+        # A sweep's fault costs disk, never the walls: it is said, and the next poll sweeps again.
+        except Exception:  # prawduct:allow prawduct/broad-except -- see above
+            log.exception(
+                "sweeping the directories of walls that left this client failed",
+                extra={"event": "client.wall_cache_unsweepable", "path": str(self._settings.cache_dir)},
+            )
 
     # -- the walls ------------------------------------------------------------------
 
@@ -623,6 +1014,7 @@ class Supervisor:
             self._start(wall, assignment, available[assignment.output])
 
         self._reconcile_labels(document, {output.name for output in outputs[1]})
+        self._forget_unmapped_labels()
 
     # -- the labels -----------------------------------------------------------------
 
@@ -655,8 +1047,21 @@ class Supervisor:
             if output not in self._labels:
                 self._start_label(label)
 
+    def _forget_unmapped_labels(self, _finished: object = None) -> None:
+        """Remove what is cached for every label the document does not map, once a document has been read.
+
+        **Again as each renderer finishes stopping**, because one stopped while
+        its poll was under way may write its document after the match removed
+        it. A label the document still maps keeps its file, on whichever output
+        it is now, so a label moved between this client's outputs starts from it.
+        """
+        document = self._read_document
+        if self._forget_labels is None or document is None:
+            return
+        self._forget_labels(frozenset(label.label_id for label in document.labels))
+
     def _start_label(self, label: LabelAssignment) -> None:
-        stop, retired = asyncio.Event(), asyncio.Event()
+        stop = WorkerStop()
         worker = self._label_worker
         assert worker is not None  # noqa: S101 -- reconcile returns before here without one
         # After every renderer still stopping, for the reason walls wait: two
@@ -664,17 +1069,17 @@ class Supervisor:
         stopping = tuple(self._stopping)
         task = asyncio.create_task(
             self._keep_running(
-                lambda: worker(label, stop, retired),
+                lambda: worker(label, stop),
                 stop,
                 what=f"the renderer for label {label.label_id} on {label.output}",
                 event="client.label",
                 extra={"label_id": label.label_id, "output": label.output, "wall_id": label.wall_id},
+                bound=partial(label_context, label.label_id, label.wall_id),
                 after=stopping,
-                is_retired=retired.is_set,
             ),
             name=f"label:{label.output}",
         )
-        self._labels[label.output] = _RunningLabel(assignment=label, stop=stop, retired=retired, task=task)
+        self._labels[label.output] = _RunningLabel(assignment=label, stop=stop, task=task)
         self._reported_unplaceable_labels = {key for key in self._reported_unplaceable_labels if key[0] != label.label_id}
         log.info(
             "captioning wall %s with label %s on %s",
@@ -687,10 +1092,12 @@ class Supervisor:
     def _stop_label(self, output: str, *, retired: bool) -> None:
         running = self._labels.pop(output)
         if retired:
-            running.retired.set()
-        running.stop.set()
+            running.stop.retire()
+        else:
+            running.stop.set()
         self._stopping.add(running.task)
         running.task.add_done_callback(self._stopping.discard)
+        running.task.add_done_callback(self._forget_unmapped_labels)
         log.info(
             "label %s on %s %s; stopping its renderer",
             running.assignment.label_id,
@@ -701,6 +1108,7 @@ class Supervisor:
                 "label_id": running.assignment.label_id,
                 "output": output,
                 "wall_id": running.assignment.wall_id,
+                "retired": running.stop.retired,
             },
         )
 
@@ -715,13 +1123,18 @@ class Supervisor:
             label.wall_id,
             label.output,
             why,
-            extra={"event": "client.label_unplaceable", "label_id": label.label_id, "output": label.output},
+            extra={
+                "event": "client.label_unplaceable",
+                "label_id": label.label_id,
+                "output": label.output,
+                "wall_id": label.wall_id,
+            },
         )
 
     # -- starting and stopping --------------------------------------------------------
 
     def _start(self, wall: WallSettings, assignment: Assignment, output: OutputReport) -> None:
-        stop = WallStop()
+        stop = WorkerStop()
         # **After every worker still stopping has finished.** A wall moved to
         # another output would otherwise run two workers on its one directory for
         # a moment, and an output handed from one wall to another two workers on
@@ -735,8 +1148,8 @@ class Supervisor:
                 what=f"the worker for wall {wall.wall_id} on {assignment.output}",
                 event="client.worker",
                 extra={"wall_id": wall.wall_id, "output": assignment.output},
+                bound=partial(wall_context, wall.wall_id),
                 after=stopping,
-                is_retired=lambda: stop.retired,
             ),
             name=f"wall:{wall.wall_id}",
         )
@@ -762,7 +1175,9 @@ class Supervisor:
         else:
             running.stop.set()
         self._stopping.add(running.task)
+        self._stopping_for[running.task] = wall_id
         running.task.add_done_callback(self._stopping.discard)
+        running.task.add_done_callback(lambda task: self._stopping_for.pop(task, None))
         log.info(
             "wall %s is %s; stopping its worker on %s",
             wall_id,
@@ -811,41 +1226,46 @@ class Supervisor:
     async def _keep_running(
         self,
         run: Callable[[], Awaitable[None]],
-        stop: asyncio.Event,
+        stop: WorkerStop,
         *,
         what: str,
         event: str,
         extra: dict[str, str],
+        bound: Callable[[], AbstractContextManager[None]],
         after: tuple[asyncio.Task[None], ...] = (),
-        is_retired: Callable[[], bool] = lambda: False,
     ) -> None:
         """Run one worker or renderer until stopped, starting it again whenever it fails.
 
         `what` names it in the journal and `event` is the prefix of its events,
         `_crashed`, `_ended` and `_retire_failed`.
 
+        **Everything it runs is logged inside `bound`**: the wall's id, or the
+        label's and its wall's, bound for this task (`logs.wall_context`,
+        `logs.label_context`). Bound here, inside the task, rather than around
+        `create_task`, so the supervisor's own context never holds it: its lines
+        about the client say no wall.
+
         **A stop that lands between runs, while the wait before a restart is
-        under way, finds nothing running to see it.** When that stop is a
-        retirement, the worker is called once more with its stop already set, so
-        that what it does on leaving its output (a screen drawn black, a label
-        left blank) still happens; it returns without running. A stop during a
+        under way, finds nothing running to see it**, so a retirement then is
+        answered with the once-more call `WorkerStop` describes. A stop during a
         run is seen by that run, and a stop before the first run has nothing of
         this worker's on the output to leave.
         """
-        if after:
-            await asyncio.gather(*after, return_exceptions=True)
-        if stop.is_set():
-            return
-        if not await self._restart_until_stopped(run, stop, what=what, event=event, extra=extra) or not is_retired():
-            return
-        try:
-            await run()
-        except Exception:  # prawduct:allow prawduct/broad-except -- the wall is gone; its leaving costs only a line
-            log.exception(
-                "%s could not leave its output after it was taken away",
-                what,
-                extra={"event": f"{event}_retire_failed", **extra},
-            )
+        with bound():
+            if after:
+                await asyncio.gather(*after, return_exceptions=True)
+            if stop.is_set():
+                return
+            if not await self._restart_until_stopped(run, stop, what=what, event=event, extra=extra) or not stop.retired:
+                return
+            try:
+                await run()
+            except Exception:  # prawduct:allow prawduct/broad-except -- the wall is gone; its leaving costs only a line
+                log.exception(
+                    "%s could not leave its output after it was taken away",
+                    what,
+                    extra={"event": f"{event}_retire_failed", **extra},
+                )
 
     async def _restart_until_stopped(
         self, run: Callable[[], Awaitable[None]], stop: asyncio.Event, *, what: str, event: str, extra: dict[str, str]

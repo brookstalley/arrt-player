@@ -32,12 +32,51 @@ is sent (`tv.client.WRITES`), and is refused with `TvNotOurs` when the set is
 somebody else's. What this module decides is only what to do with a refusal, per
 verb, and how soon to ask again; `is_ours` stays as the cheap early exit that
 keeps a held change from reaching the seam at all.
+
+**A fault of the device's own store ends the pass, not the wall.** The store
+raises `StoreFault` for a fault of the disk or the file (`state.store._FAULTS`),
+and the wall's loop treats it as it treats the set going away: the pass ends,
+the next comes after a wait on the same ladder, and the journal says it once per
+episode, at WARNING for a lock that may clear and at ERROR for a fault the wall
+cannot outlive. The heartbeat's `last_error` names it. Anything else the store
+raises is this code's mistake and still reaches the supervisor's restart.
+
+**The set lets go of a work nobody hangs any more, and only of that.** The
+set's one upload category is all the storage it has, so a picture left there
+after its work leaves every theme stays for good. A binding is retired once no
+feed this wall adopted has named its work for `RETIRED_AFTER_SECONDS` of the
+wall running with a feed (`state.store`, `feed_seconds`): its image is removed
+through the gated removal, the set's own list confirms it, and the row goes.
+Absence from one feed is not retirement, because a theme hung for an evening or
+a scene would otherwise cost the whole theme's uploads on the way back. The
+work on the wall, and every work the adopted feed names (its schedule's whole
+horizon, its scene and its staging), is never retired, and a removal is never
+asked for an image the set does not list. The orphan path is the other half: it
+removes what no binding accounts for, and a retirement removes what a binding
+accounts for and no feed wants, in the same removal.
+
+**A binding is used only on the set it was made on.** A set's content ids are
+its own, so the wall reads which set it reaches (`TvClient.read_identity`, one
+REST GET of the set's description, sent straight after the art channel opens
+and before the first `get_artmode` of the pass, whatever the set is showing)
+before any binding is used on a connection: when the wall starts, after every
+time the set went away, and after a selection that dropped the connection.
+The store compares it with the set its bindings were made on
+(`DisplayState.belongs_to`): another set has them set aside, and the wall
+starts on it as on a first run. **While the set will not say who it is, the
+wall uses no binding**, said once and asked again on its own ladder. A set that
+opens its art channel and has not said for `IDENTITY_PATIENCE_SECONDS` gets the
+wall's art anyway, from a store held in memory that starts empty, as a first
+run would; **nothing is removed from the set** until it says, because removal is
+sent only from a store whose recorded identity is the set's (`_may_remove`).
 """
 
+import functools
+import hashlib
 import logging
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from arrt_player import brightness as brightness_module
 from arrt_player.config import Settings
@@ -47,7 +86,9 @@ from arrt_player.logs import work_context
 from arrt_player.manifest import Watcher
 from arrt_player.programmes.schedule import Schedule
 from arrt_player.state import Binding, DisplayState, UploadStatus
+from arrt_player.state.store import SetChange, SetMet, StoreFault
 from arrt_player.tv import (
+    IdentityUnreadable,
     PowerStateUnreadable,
     RemovalOutcome,
     SelectionAnnouncement,
@@ -61,6 +102,39 @@ from arrt_player.wall import Capabilities, Clock, DisplayRecord, Picture, Shown,
 
 log = logging.getLogger(__name__)
 
+#: How long no feed this wall adopted may name a work before its image leaves
+#: the set: fourteen days of the wall running with a feed. Long enough to outlast
+#: a holiday theme and a round trip between themes; a work that returns after it
+#: costs one upload.
+RETIRED_AFTER_SECONDS: Final[float] = 14 * 24 * 3600.0
+
+#: How often the wall's running time with a feed is written, with when each
+#: work was last named, and the bindings looked over for one due to retire. In
+#: that running time, so the card takes one small write an hour at most; a
+#: Player that stops loses at most this much of the count, which can only make
+#: a retirement later.
+FEED_TIME_SAVED_EVERY_SECONDS: Final[float] = 3600.0
+
+#: How long a set that opens its art channel may decline to say which set it is
+#: before the wall shows art on it anyway, from an empty store held in memory and
+#: with nothing removed. The set has answered its description at once in every
+#: state measured (`samsung-tv-state-findings.md` § What works in each state), so
+#: this is long against a passing stall of its REST port, and short against an
+#: evening of a wall showing nothing new.
+IDENTITY_PATIENCE_SECONDS: Final[float] = 15 * 60.0
+
+
+class SetUnidentified(Exception):
+    """The set reached on this connection would not say which set it is, so no binding may be used on it yet.
+
+    One of the Frame's `unavailable`: the pass ends, and the wall asks again
+    when its wait is over (`wait`).
+    """
+
+    def __init__(self, reason: str, *, wait: float) -> None:
+        super().__init__(f"the television did not say which set it is ({reason}); the wall uses none of its pictures on it")
+        self.wait = wait
+
 
 def frame_wall(
     *,
@@ -70,17 +144,23 @@ def frame_wall(
     watcher: Watcher,
     clock: Clock,
 ) -> Wall:
-    """A wall on the Frame: the shared loop, this driver, and a programme per major, remembering in the store."""
+    """A wall on the Frame: the shared loop, this driver, and a programme per major, remembering in the store.
+
+    **The programme remembers through the display**, not the store, so the work
+    it believes is up is the one on the bindings the display is using: none on
+    a set met for the first time (`FrameDisplay.last_selected_work_id`).
+    """
+    display = FrameDisplay(settings=settings, tv=tv, state=state, clock=clock)
     return Wall(
         wall=settings,
-        display=FrameDisplay(settings=settings, tv=tv, state=state, clock=clock),
+        display=display,
         programmes={
             2: Schedule(
                 wall_id=settings.wall_id,
                 render_root=settings.render_root,
                 composed_root=settings.composed_root,
                 geometry=lambda: settings.geometry,
-                memory=state,
+                memory=display,
                 clock=clock,
             ),
         },
@@ -92,15 +172,49 @@ def frame_wall(
 class FrameDisplay:
     """One television, as a wall's display."""
 
-    unavailable: tuple[type[Exception], ...] = (TvUnavailable,)
-    journal_name = "daemon"
+    #: **The store's faults as well as the set's absence**, because the wall's
+    #: loop answers both the same way: end the pass, beat, wait, try again.
+    #: `went_away` tells them apart.
+    #: **And a set that will not say which it is** (`SetUnidentified`), which
+    #: the loop answers the same way again.
+    unavailable: tuple[type[Exception], ...] = (TvUnavailable, StoreFault, SetUnidentified)
+    #: The Frame wall's start, stop and crash lines read `frame.started`,
+    #: `frame.stopped`, `frame.crashed`.
+    journal_name = "frame"
     description = "the Frame"
 
     def __init__(self, *, settings: Settings, tv: TvClient, state: DisplayState, clock: Clock) -> None:
         self._settings = settings
         self._tv = tv
+        #: The device's store on disk, and the store whose bindings the wall is
+        #: using: the same one, except while a set that will not say who it is
+        #: is shown art from `_scratch`, an empty store held in memory.
+        self._store = state
         self._state = state
+        self._scratch: DisplayState | None = None
         self._clock = clock
+
+        #: The identity of the set this connection reaches, once read and made
+        #: the store's (`_know_the_set`). **None until then, and again whenever
+        #: the connection goes**, because whatever answers at the address next
+        #: may be another set.
+        self._on: str | None = None
+        #: When the set first declined to say who it is since it last did, on
+        #: the elapsed clock; and the wait before it is asked again.
+        self._unidentified_since: float | None = None
+        self._identity_retry = Backoff(
+            minimum=settings.tv_retry_min_seconds,
+            maximum=settings.tv_retry_max_seconds,
+            monotonic=clock.monotonic,
+        )
+        self._unidentified_reason = ""
+        #: The set would not say who it is, and then the wall went on without it:
+        #: each said once, both ended by the set saying.
+        self._unidentified = ReportOnce()
+        self._going_on_unidentified = ReportOnce()
+        #: Whether the last pass ended for want of the set's identity, which says
+        #: nothing about whether the set answers (`heartbeat_fields`).
+        self._ended_unidentified = False
 
         #: What the set last announced about its own wall, which is the only
         #: honest account of it this product has. Written from the television's
@@ -196,6 +310,29 @@ class FrameDisplay:
         self._brightness_at: float | None = None
         self._brightness_value: int | None = None
 
+        #: The elapsed clock at the last pass that counted the wall's running
+        #: time with a feed. **None in a fresh process**, so the time a Player
+        #: was off or restarting is never counted: whatever the clocks read
+        #: after a month off, the first pass counts nothing.
+        self._feed_time_read_at: float | None = None
+        #: The count when it was last written, or tried.
+        self._feed_time_saved_at = state.feed_seconds
+        #: The works the adopted feed names, and the works that stopped being
+        #: named in this process with the count when they did. Kept here as
+        #: well as in the store, so a work's leaving is exact while the Player
+        #: runs whether or not the hourly write has happened or succeeded.
+        self._named: frozenset[str] = frozenset()
+        self._left_at: dict[str, float] = {}
+        #: Works whose image the set was asked to remove, answered, and kept. Not
+        #: asked for again until the next feed, as the orphan path does not ask
+        #: again: asking at once learns nothing.
+        self._kept_by_the_set: set[str] = set()
+        #: Images the set lists that nothing accounts for, left on it by the
+        #: last reconciliation because the set was showing one of them
+        #: (`_remove_orphans`). Their removal is owed again once the wall shows
+        #: another picture (`prepare`).
+        self._left_on_the_wall: frozenset[str] = frozenset()
+
         #: The set could not be reached at all. Its own ladder, separate from the
         #: wall's: a television that is asleep and one that is awake and ignoring
         #: selections are different conditions, and recovering from one says
@@ -206,6 +343,29 @@ class FrameDisplay:
             monotonic=clock.monotonic,
         )
         self._unavailable = ReportOnce()
+
+        #: The device's own store would not do what a pass asked of it. Its own
+        #: ladder, on the same bounds as the set's, and its own episodes: one for
+        #: a fault that may clear, said at WARNING, and one for a fault the wall
+        #: cannot outlive, said at ERROR, so a lock that turns into a full disk
+        #: is still said at the level that reaches somebody. Both end at the
+        #: first pass that completes (`answering`).
+        self._store_retry = Backoff(
+            minimum=settings.tv_retry_min_seconds,
+            maximum=settings.tv_retry_max_seconds,
+            monotonic=clock.monotonic,
+        )
+        self._store_busy = ReportOnce()
+        self._store_failing = ReportOnce()
+        #: Whether the last pass ended on the store. The wall's loop beats such a
+        #: pass as unreachable, which is a claim about the set this pass did not
+        #: establish, so the heartbeat says it could not tell (`heartbeat_fields`).
+        self._ended_on_the_store = False
+        #: An art-mode announcement whose read has not yet been acted on to the
+        #: end. The set's flag is consumed when it is collected, so a pass that a
+        #: store fault ends after collecting it would otherwise lose the news,
+        #: and the display state would wait for the next selection to be right.
+        self._art_mode_news_owed = False
 
         #: When a write the seam held may next be tried: an upload, a removal, a
         #: brightness change or the slideshow switch, refused (`TvNotOurs`) while
@@ -227,12 +387,27 @@ class FrameDisplay:
     def last_error(self) -> str | None:
         return self._last_error
 
+    # -- the programme's memory, which is the bindings' -------------------------
+
+    @property
+    def last_selected_work_id(self) -> str | None:
+        """The work last put on the wall, from the store whose bindings the wall is using."""
+        return self._state.last_selected_work_id
+
+    def set_last_selected_work_id(self, work_id: str) -> None:
+        self._state.set_last_selected_work_id(work_id)
+
     def start_lines(self) -> dict[str, object]:
         return self._settings.startup_lines()
 
     # -- the pass ----------------------------------------------------------
 
-    def adopted(self, pictures: Sequence[Picture]) -> None:  # noqa: ARG002 -- the wall.Display protocol's signature
+    def adopted(self, pictures: Sequence[Picture]) -> None:
+        named = frozenset(picture.work_id for picture in pictures)
+        for work_id in self._named - named:
+            self._left_at[work_id] = self._state.feed_seconds
+        self._named = named
+        self._kept_by_the_set.clear()
         self._reconciliation_owed = True
         # A new manifest clears any wait: it is new information, and it is
         # usually what arrives after somebody has fixed whatever the set was
@@ -241,12 +416,23 @@ class FrameDisplay:
         self._reconcile_wait.clear()
 
     async def prepare(self, pictures: Sequence[Picture]) -> None:
+        self._count_feed_time()
         await self._tv.connect()
+        # **Before anything that reads a binding**: the news resolves an
+        # announced id to a work, and everything after it selects, uploads or
+        # removes by one.
+        await self._know_the_set()
         # The set's news first, because it can end a hold on the writes below:
         # the slideshow switch, the reconciliation and the brightness all read
         # the writes' wait, and a set back in art mode should get them this pass.
         await self._take_the_sets_news()
         await self._switch_off_the_slideshow()
+        if self._left_on_the_wall and self._wall_content_id not in self._left_on_the_wall:
+            # The picture left on the wall unaccounted for is no longer up:
+            # its removal is owed now, as news rather than as a retry.
+            self._left_on_the_wall = frozenset()
+            self._reconciliation_owed = True
+            self._reconcile_wait.clear()
         if self._reconciliation_owed and self._reconcile_wait.is_due() and self._writes.is_due():
             # Cleared only when the work actually settled: a set that goes
             # away halfway through raises, and one that cannot say what it
@@ -268,6 +454,7 @@ class FrameDisplay:
 
     async def after(self, pictures: Sequence[Picture]) -> None:
         await self._upload_one_pending(pictures)
+        self._save_feed_time(pictures)
 
     async def idle(self) -> None:
         return
@@ -284,20 +471,64 @@ class FrameDisplay:
         # other minute. It is overwritten by the next failure, so it is always
         # the latest rather than the first.
         self._last_error = str(exc)
+        if isinstance(exc, StoreFault):
+            self._ended_unidentified = False
+            return self._the_store_failed(exc)
+        self._ended_on_the_store = False
+        if isinstance(exc, SetUnidentified):
+            self._ended_unidentified = True
+            return exc.wait
+        self._ended_unidentified = False
+        # The connection is gone, and with it what is known of the set behind it.
+        self._forget_the_set()
         self.record.moved_to(ScreenState.UNREACHABLE)
         if self._unavailable.begin():
             log.warning("%s; holding the wall where it is and retrying", exc, extra={"event": "tv.unavailable"})
         return self._connection_retry.hold()
 
     def answering(self) -> None:
+        self._ended_on_the_store = False
+        self._ended_unidentified = False
         if self._unavailable.end():
             log.info("the television is answering again", extra={"event": "tv.recovered"})
         self._connection_retry.clear()
+        # Both, not either-or: a pass that completes ends whichever was said.
+        busy_ended, failing_ended = self._store_busy.end(), self._store_failing.end()
+        if busy_ended or failing_ended:
+            log.info("the display store is answering again", extra={"event": "store.recovered"})
+        self._store_retry.clear()
+
+    def _the_store_failed(self, exc: StoreFault) -> float:
+        """A pass ended on the store: say it once per episode, at the level its class earns, and wait.
+
+        **The screen's state is left where it was**, unlike an unreachable set's:
+        the store failing says nothing about what the wall shows, and the
+        heartbeat's `last_error` carries the fault to the server.
+        """
+        self._ended_on_the_store = True
+        fields = {"operation": exc.operation, "fault": exc.fault}
+        if exc.may_clear:
+            if self._store_busy.begin():
+                log.warning(
+                    "%s; the wall goes on at its next pass",
+                    exc,
+                    extra={"event": "store.busy", **fields},
+                )
+        elif self._store_failing.begin():
+            log.error(
+                "%s; the wall cannot record what it does until the disk or the file is fixed, and tries again",
+                exc,
+                extra={"event": "store.failed", **fields},
+            )
+        return self._store_retry.hold()
 
     def heartbeat_fields(self, *, reachable: bool | None) -> dict[str, Any]:
         return {
             "announced_content_id": self._announced_content_id,
-            "television_reachable": reachable,
+            # A pass that ended on the store, or for want of the set's identity,
+            # did not find out whether the set answers: the loop's
+            # "unreachable" is about the pass, not the set.
+            "television_reachable": None if self._ended_on_the_store or self._ended_unidentified else reachable,
             "television_showing_art": self._showing_art,
             # **The Frame draws no label**, so it reports none, as a screen does.
             # A client's panel is reported as a label output in the client
@@ -316,7 +547,173 @@ class FrameDisplay:
         return Capabilities(screen=self._settings.geometry.screen, backend="frame", label_modes=("none",))
 
     async def close(self) -> None:
+        self._leave_the_scratch_store()
         await self._tv.close()
+
+    # -- which set this is -------------------------------------------------
+
+    async def _know_the_set(self) -> None:
+        """Learn which set this connection reaches, and make the bindings in use that set's, or end the pass.
+
+        Read once per connection (`_on`), so a pass on a connection already
+        identified sends nothing. A set that will not say ends the pass
+        (`SetUnidentified`) and is asked again on its own ladder, until
+        `IDENTITY_PATIENCE_SECONDS` have gone by: then the wall goes on from an
+        empty store in memory, still asking on the ladder, and returns to the
+        device's store once the set says. **`_on` is set only after the store
+        has made the bindings that set's**, so a store fault there ends the pass
+        with nothing used, and the next reads the set again.
+
+        **What the set turned out to be is said, and its cleanup owed, before
+        anything after `belongs_to` can fail**: `belongs_to` has committed by
+        then, so a later pass would hear "the same set" and neither the line
+        nor the reconciliation a change of set owes would come again.
+        **Leaving the store in memory owes a reconciliation too**, whatever the
+        set turned out to be: what that store uploaded is on this set and
+        accounted for by nothing on disk. The picture on the wall is among it,
+        and stays until another has been selected (`_remove_orphans`).
+        """
+        if self._on is not None:
+            return
+        if not self._identity_retry.is_due():
+            if self._scratch is not None:
+                return
+            raise SetUnidentified(self._unidentified_reason, wait=self._settings.tv_retry_min_seconds)
+        try:
+            identity = await self._tv.read_identity()
+        except IdentityUnreadable as exc:
+            wait = self._identity_retry.hold()
+            self._set_would_not_say(str(exc))
+            if self._scratch is not None:
+                return
+            if self._clock.monotonic() - (self._unidentified_since or 0.0) < IDENTITY_PATIENCE_SECONDS:
+                raise SetUnidentified(self._unidentified_reason, wait=wait) from exc
+            self._go_on_unidentified()
+            return
+        met = self._store.belongs_to(identity)
+        from_memory = self._scratch is not None
+        # What this process learned of the wall while the store in memory was
+        # in use was learned on this connection, so of this set: it is kept.
+        self._met(met, identity, learned_on_this_set=from_memory)
+        if from_memory:
+            self._reconciliation_owed = True
+            # The picture on the wall is one the store in memory holds: the
+            # programme must put this store's up, rather than believe it is.
+            self._store.forget_the_wall()
+            self._leave_the_scratch_store()
+        self._on = identity
+        self._identity_retry.clear()
+        self._unidentified_since = None
+        self._going_on_unidentified.end()
+        if self._unidentified.end():
+            log.info("the television says which set it is again", extra={"event": "tv.identified"})
+
+    def _met(self, met: SetMet, identity: str, *, learned_on_this_set: bool) -> None:
+        """Say what the store found the set to be, and start afresh on a set the bindings were not made on.
+
+        What the process knows of the set's wall is forgotten on a change of
+        set, as another set's, unless it was `learned_on_this_set`.
+        """
+        if met.change is SetChange.ADOPTED:
+            log.info(
+                "the display store did not record which television its pictures were put on; they are taken as this one's",
+                extra={"event": "binding.set_adopted", "set_now": _known_as(identity)},
+            )
+        elif met.change is SetChange.CHANGED:
+            log.warning(
+                "the television at this address is not the one this wall's pictures were put on; its %d binding(s) are "
+                "kept for that set, %d of this set's are back, and the wall starts on this set as on a first run. "
+                "The other set keeps this Player's pictures until it is met again or they are removed by hand",
+                met.set_aside,
+                met.restored,
+                extra={
+                    "event": "binding.set_changed",
+                    "set_was": _known_as(met.previous),
+                    "set_now": _known_as(identity),
+                    "set_aside": met.set_aside,
+                    "restored": met.restored,
+                },
+            )
+            if not learned_on_this_set:
+                self._forget_what_the_set_showed()
+            # As a first run reconciles: the set's own list against its bindings.
+            self._reconciliation_owed = True
+
+    def _set_would_not_say(self, reason: str) -> None:
+        """The identity read failed: note when the episode began, and say it once."""
+        self._unidentified_reason = reason
+        if self._unidentified_since is None:
+            self._unidentified_since = self._clock.monotonic()
+        if self._unidentified.begin():
+            log.warning(
+                "the television did not say which set it is (%s); the wall uses none of its pictures on it until it does",
+                reason,
+                extra={"event": "tv.unidentified"},
+            )
+
+    def _go_on_unidentified(self) -> None:
+        """Show art on a set that will not say who it is, from an empty store in memory, removing nothing."""
+        self._scratch = DisplayState(Path(":memory:"), now=self._clock.now)
+        self._state = self._scratch
+        self._forget_what_the_set_showed()
+        if self._going_on_unidentified.begin():
+            log.warning(
+                "the television has not said which set it is for %d minutes; the wall shows art on it without the "
+                "pictures it put on a set before, uploading the work it shows and then "
+                "every other work of the feed, one a pass, as on a first run, and removes nothing from it until it says",
+                IDENTITY_PATIENCE_SECONDS // 60,
+                extra={"event": "tv.unidentified_going_on"},
+            )
+
+    def _the_connection_may_have_gone(self) -> None:
+        """A failure the seam reports as something else may have dropped the connection: identify the next one.
+
+        **The store in memory is kept**: a refused upload is no outage, and it
+        is only on one (`_forget_the_set`) that what was put up while the set
+        would not say is let go.
+        """
+        self._on = None
+
+    def _forget_the_set(self) -> None:
+        """The connection went: whatever answers next is identified before a binding is used on it.
+
+        **The patience starts again** with the next connection's first
+        unanswered read, so a set that will not say and keeps dropping its
+        connection is given a store in memory, and a theme's uploads, at most
+        once per outage and its `IDENTITY_PATIENCE_SECONDS`, never once per
+        flap. Those uploads are on a set nobody can name, and nothing removes
+        them (`architecture.md`, beside the patience).
+        """
+        self._on = None
+        if self._scratch is not None:
+            # What was uploaded while the set would not say is on a set nobody
+            # can name: not carried to whatever answers next.
+            self._leave_the_scratch_store()
+        self._unidentified_since = None
+        self._going_on_unidentified.end()
+
+    def _leave_the_scratch_store(self) -> None:
+        if self._scratch is not None:
+            self._scratch.close()
+            self._scratch = None
+        self._state = self._store
+
+    def _forget_what_the_set_showed(self) -> None:
+        """Drop what this process learned of the set's wall, its brightness and its keeping, which were another set's."""
+        self._wall_content_id = None
+        self._announced_content_id = None
+        self._announcement_taken = self._announcement
+        self._kept_by_the_set.clear()
+        self._brightness_at = None
+        self._brightness_value = None
+
+    def _on_the_wall(self) -> set[str | None]:
+        """The ids this process knows to be on the set's wall: its own last selection, and the set's last word."""
+        return {self._wall_content_id, self._announced_content_id} - {None}
+
+    def _may_remove(self) -> bool:
+        """Whether a removal may be sent: only from a store whose recorded identity is the set's on this connection."""
+        return self._on is not None and self._state.tv_identity == self._on
 
     # -- changing the wall -------------------------------------------------
 
@@ -486,6 +883,9 @@ class FrameDisplay:
         if not self._wall.begins():
             return
         mode = await self._tv.reported_art_mode()
+        if mode is None:
+            # The read may have failed and taken the connection with it.
+            self._the_connection_may_have_gone()
         log.warning(
             "the television accepted %s and is not displaying it; "
             "it reports art mode %s. The next picture waits until the wall changes",
@@ -530,16 +930,24 @@ class FrameDisplay:
         """
         announcement = self._announcement
         if announcement is not None and announcement is not self._announcement_taken:
+            # The work is resolved before the news is marked taken: the store
+            # can fail that read, and news marked taken first would be lost.
+            work_id = self._work_bound_to(announcement.content_id) if announcement.is_shown else None
             self._announcement_taken = announcement
             if announcement.is_shown:
                 self._wall_content_id = announcement.content_id
                 self._learned_showing_art(showing=True)
-                self.record.moved_to(ScreenState.SHOWING_ART, self._work_bound_to(announcement.content_id))
-        if self._tv.art_mode_announcement_pending():
+                self.record.moved_to(ScreenState.SHOWING_ART, work_id)
+        # Collected every pass, whether or not news is already owed, so the set's
+        # flag never waits to cost a second read for the same news.
+        announced = self._tv.art_mode_announcement_pending()
+        if announced or self._art_mode_news_owed:
+            self._art_mode_news_owed = True
             # Clears the writes' wait too (`_wall_is_answering`): the set saying
             # its mode changed is news to a held upload as much as to the wall.
             self._wall_is_answering()
             await self._read_art_mode()
+            self._art_mode_news_owed = False
 
     def _work_bound_to(self, content_id: str) -> str | None:
         """The work this device put on the set under `content_id`, or None for a picture it did not put there."""
@@ -676,6 +1084,9 @@ class FrameDisplay:
         try:
             content_id = await self._tv.upload(picture.path)
         except TvUploadFailed as exc:
+            # A set that went away while the upload was read back is reported
+            # this way, and its connection with it.
+            self._the_connection_may_have_gone()
             self._state.record_upload_failure(picture.work_id)
             log.warning(
                 "could not put %s on the television (%s)",
@@ -726,10 +1137,11 @@ class FrameDisplay:
     async def _reconcile_with_the_set(self, pictures: Sequence[Picture]) -> bool:
         """Compare what this device believes against what the television lists.
 
-        Runs when a manifest is adopted, not every pass. The comparison costs a
-        real request to the set, and at a one-second poll that would be a call per
-        second forever — traffic that buys nothing, since nothing changes what the
-        television holds except this process.
+        Runs when a manifest is adopted, and when the hourly look over the
+        bindings finds one due to retire (`_save_feed_time`), never every pass.
+        The comparison costs a real request to the set, and at a one-second poll
+        that would be a call per second forever — traffic that buys nothing,
+        since nothing changes what the television holds except this process.
         """
         listed = await self._tv.listed_content_ids()
 
@@ -751,10 +1163,10 @@ class FrameDisplay:
                 extra={"event": "binding.orphaned", "tv_content_id": binding.tv_content_id, "work_id": picture.work_id},
             )
 
-        return await self._remove_orphans(listed)
+        return await self._remove_orphans(listed, pictures)
 
-    async def _remove_orphans(self, listed: frozenset[str]) -> bool:
-        """Take off the television everything this device cannot account for.
+    async def _remove_orphans(self, listed: frozenset[str], pictures: Sequence[Picture]) -> bool:
+        """Take off the television everything this device cannot account for, and every work due to retire.
 
         **The binding table is the whole authority**, which is why a fresh install
         clears the set: images uploaded by a previous generation of this product
@@ -766,35 +1178,91 @@ class FrameDisplay:
 
         The television has exactly one user-upload category, so the alternative to
         removing them is two generations of the same corpus accumulating in it.
+
+        **One removal for both**, so the gate reads the set once. A retiring
+        work's image is asked for only while the set lists it and no other
+        binding names the same id; otherwise only its row goes. So a removal
+        whose row could not be dropped is never sent twice (the set's list says
+        it is gone, which is the success it looks like), and a row left behind
+        under an id the set has since given another work never takes that work's
+        picture with it. The rows go after the set's answer, never before, so a
+        removal held or unconfirmed leaves every one in place, still accounted
+        for and still owed.
+
+        **The picture on the wall is never asked for**, accounted for or not,
+        until another has been selected: what a Frame does when the image it
+        shows is deleted has never been measured. An unaccounted one is left
+        (`_left_on_the_wall`) and its removal owed again once the wall has
+        moved on. Only a picture this process knows is up is spared (its own
+        last selection, or the set's last announcement): on a first run, or on
+        a set met afresh, it knows nothing of the wall until then, and an
+        upload of the household's that is up is removed like any other the set
+        lists.
         """
+        if not self._may_remove():
+            # A store that does not know it is this set's accounts for nothing
+            # here: its ids may name another set's pictures, and an id it does
+            # not hold may be one of this set's the Player put there. Met only
+            # while the store in memory is in use, since `prepare` identifies
+            # the set first; settled for now, because leaving that store owes
+            # the work again (`_know_the_set`).
+            return True
         accounted = self._state.accounted_content_ids()
-        orphans = sorted(listed - accounted)
-        if not orphans:
+        unaccounted = listed - accounted
+        on_the_wall = self._on_the_wall()
+        self._left_on_the_wall = frozenset(unaccounted & on_the_wall)
+        orphans = sorted(unaccounted - on_the_wall)
+        retiring, claimed = self._retirements(pictures)
+        on_the_set = {
+            binding.tv_content_id: binding
+            for binding in retiring
+            if binding.tv_content_id is not None and binding.tv_content_id in listed and binding.tv_content_id not in claimed
+        }
+        retiring_ids = sorted(on_the_set)
+        if not orphans and not retiring_ids:
+            self._retire(retiring, removed=(), kept=())
             return True
 
         try:
-            outcome: RemovalOutcome = await self._tv.remove(orphans)
+            outcome: RemovalOutcome = await self._tv.remove([*orphans, *retiring_ids])
         except TvRemovalUnconfirmed as exc:
+            # A list that could not be read back may have cost the connection.
+            self._the_connection_may_have_gone()
             # Unknown is reported as unknown. The images stay listed and the next
             # pass tries again; claiming either outcome here would be a guess, and
             # this is the verb whose reply the library discards.
-            log.warning(
-                "could not establish whether %d unaccounted-for images were removed (%s)",
-                len(orphans),
-                exc,
-                extra={"event": "tv.orphan_removal_unconfirmed", "requested": orphans},
-            )
+            if orphans:
+                log.warning(
+                    "could not establish whether %d unaccounted-for images were removed (%s)",
+                    len(orphans),
+                    exc,
+                    extra={"event": "tv.orphan_removal_unconfirmed", "requested": orphans},
+                )
+            if retiring_ids:
+                log.warning(
+                    "could not establish whether the images of %d work(s) no feed names any more were removed (%s)",
+                    len(retiring_ids),
+                    exc,
+                    extra={"event": "binding.retirement_unconfirmed", "requested": retiring_ids},
+                )
             return False
 
         self._write_went_through()
-        log.info(
-            "removed %d image(s) the binding table does not account for",
-            len(outcome.removed),
-            extra={
-                "event": "tv.orphans_removed",
-                "removed": list(outcome.removed),
-                "surviving": list(outcome.surviving),
-            },
+        surviving = set(outcome.surviving)
+        if orphans:
+            log.info(
+                "removed %d image(s) the binding table does not account for",
+                len([content_id for content_id in orphans if content_id not in surviving]),
+                extra={
+                    "event": "tv.orphans_removed",
+                    "removed": [content_id for content_id in orphans if content_id not in surviving],
+                    "surviving": [content_id for content_id in orphans if content_id in surviving],
+                },
+            )
+        self._retire(
+            retiring,
+            removed=tuple(content_id for content_id in retiring_ids if content_id not in surviving),
+            kept=tuple(on_the_set[content_id] for content_id in retiring_ids if content_id in surviving),
         )
         # **Settled even when some survived.** An incomplete removal is a *known*
         # outcome — the set was asked, answered, and is keeping them — and it is
@@ -802,6 +1270,100 @@ class FrameDisplay:
         # learns nothing; the next manifest re-arms the work. Only an outcome
         # nobody could establish stays owed.
         return True
+
+    def _retirements(self, pictures: Sequence[Picture]) -> tuple[tuple[Binding, ...], frozenset[str]]:
+        """The bindings due to retire now, and the content ids every other binding names.
+
+        Due: no adopted feed has named the work for `RETIRED_AFTER_SECONDS` of the
+        wall running with a feed. **Never due**: a work the feed names now (the
+        schedule's whole horizon, its scene, its staging: everything the wall is
+        about to show), the work the Player last put up, the picture the set
+        last said is on its wall, a work whose image the set kept when asked
+        since the last feed, and a binding whose last naming is unknown.
+        """
+        named = {picture.work_id for picture in pictures}
+        on_the_wall = self._on_the_wall()
+        now = self._state.feed_seconds
+        retiring: list[Binding] = []
+        claimed: set[str] = set()
+        for binding in self._state.bindings():
+            if self._is_due_to_retire(binding, named=named, on_the_wall=on_the_wall, now=now):
+                retiring.append(binding)
+            elif binding.tv_content_id is not None:
+                claimed.add(binding.tv_content_id)
+        return tuple(retiring), frozenset(claimed)
+
+    def _is_due_to_retire(self, binding: Binding, *, named: set[str], on_the_wall: set[str | None], now: float) -> bool:
+        if binding.artwork_id in named or binding.artwork_id == self._state.last_selected_work_id:
+            return False
+        if binding.tv_content_id in on_the_wall or binding.artwork_id in self._kept_by_the_set:
+            return False
+        last = binding.last_named_feed_seconds
+        if last is None:
+            return False
+        left = self._left_at.get(binding.artwork_id)
+        if left is not None:
+            last = max(last, left)
+        return now - last >= RETIRED_AFTER_SECONDS
+
+    def _retire(self, retiring: Sequence[Binding], *, removed: Sequence[str], kept: Sequence[Binding]) -> None:
+        """Say what left the set, then drop the rows of every retiring work whose image is off it or never was.
+
+        Said before the rows go, so the journal records what was taken off the
+        set even when the store then fails to drop a row; that row goes at the
+        next reconciliation, said then as already off the set.
+        """
+        if not retiring:
+            return
+        keeping = {binding.artwork_id for binding in kept}
+        going = [binding for binding in retiring if binding.artwork_id not in keeping]
+        self._kept_by_the_set.update(keeping)
+        log.info(
+            "retired %d work(s) no feed has named for %d days; took %d image(s) off the television",
+            len(going),
+            RETIRED_AFTER_SECONDS // 86400,
+            len(removed),
+            extra={
+                "event": "binding.retired",
+                "retired": [binding.artwork_id for binding in going],
+                "removed": list(removed),
+                "kept_by_the_set": sorted(keeping),
+            },
+        )
+        for binding in going:
+            self._state.retire(binding.artwork_id, binding.tv_content_id)
+            self._left_at.pop(binding.artwork_id, None)
+
+    # -- how long the wall has had a feed ------------------------------------
+
+    def _count_feed_time(self) -> None:
+        """Count the elapsed time since the last pass as the wall running with a feed. Memory only.
+
+        Called only by a pass with a feed adopted, and **on the elapsed clock**,
+        which neither a Player switched off nor an NTP step can move: the first
+        pass of a process counts nothing, however far either clock has moved.
+        """
+        elapsed = self._clock.monotonic()
+        if self._feed_time_read_at is not None:
+            self._state.count_feed_time(max(0.0, elapsed - self._feed_time_read_at))
+        self._feed_time_read_at = elapsed
+
+    def _save_feed_time(self, pictures: Sequence[Picture]) -> None:
+        """Once an hour of the count, write it, and look the bindings over for one due to retire.
+
+        **Tried once per interval, whether or not the write succeeds**, so a
+        store that refuses writes costs one failed pass an hour rather than
+        every pass: the count and the leavings are kept in memory meanwhile,
+        and a retirement found due is made at the next reconciliation, through
+        the set's gate like any other removal.
+        """
+        if self._state.feed_seconds - self._feed_time_saved_at < FEED_TIME_SAVED_EVERY_SECONDS:
+            return
+        self._feed_time_saved_at = self._state.feed_seconds
+        self._state.save_feed_time(named=[picture.work_id for picture in pictures], left=self._left_at)
+        self._left_at.clear()
+        if self._retirements(pictures)[0]:
+            self._reconciliation_owed = True
 
     # -- the television ----------------------------------------------------
 
@@ -813,6 +1375,10 @@ class FrameDisplay:
         depends on it having been sent.
         """
         await self._tv.connect()
+        # A dropped connection may come back to another set, which is known
+        # before the slideshow switch, or any binding, is sent to it.
+        self._forget_the_set()
+        await self._know_the_set()
         await self._switch_off_the_slideshow()
 
     async def _switch_off_the_slideshow(self) -> None:
@@ -872,18 +1438,38 @@ class FrameDisplay:
 
 
 def _fingerprint(render: Path) -> str | None:
-    """What this render file looks like right now, cheaply.
+    """What this picture's bytes are: their SHA-256, read once per change of the file.
 
-    **Modification time and size rather than a hash.** The wall reads this on
-    every pass over every picture; hashing forty 2 MB composites a second would be
-    real I/O on an SD card, to answer a question a `stat` answers. The pipeline
-    that writes these files always rewrites them wholesale, so a change that keeps
-    both the size and the nanosecond timestamp is not a case this deployment can
-    produce.
+    **The bytes, not the file's modification time.** A picture whose work left
+    the feed is removed from the composed directory, and composed again under
+    the same name when the work returns: the same pixels in a new file. Keyed on
+    the file's stamp, that read as a new picture and re-uploaded every work of a
+    theme hung again after an evening away. A file rewritten in place with
+    different pixels still reads as changed.
+
+    **Hashed only when the file's stamp moves** (`_digest` is cached on it), so a
+    pass over every picture costs a `stat` each, as it did; a hash is paid once
+    per file written, and the upload reads the same bytes anyway.
 
     None when the file cannot be read, which is treated as "unknown" and never as
     "unchanged" — see `_render_changed`.
     """
+    try:
+        stat = render.stat()
+        return _digest(render, stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+@functools.lru_cache(maxsize=512)
+def _digest(render: Path, mtime_ns: int, size: int) -> str:  # noqa: ARG001 -- the stamp is the cache's key
+    """The file's SHA-256, cached on its stamp; a theme holds far fewer pictures than the cache."""
+    with render.open("rb") as picture:
+        return f"sha256:{hashlib.file_digest(picture, 'sha256').hexdigest()}"
+
+
+def _stamp(render: Path) -> str | None:
+    """The fingerprint a Player before schema 3 recorded: the file's modification time and size."""
     try:
         stat = render.stat()
     except OSError:
@@ -918,8 +1504,27 @@ def _render_changed(binding: Binding, render: Path) -> bool:
     A binding with no recorded fingerprint — every row written before the column
     existed — counts as changed. That costs one re-upload per work on the first
     pass after an upgrade, which is the honest price of never having looked.
+
+    **A row recorded by an earlier Player holds the file's stamp** (`_stamp`),
+    and is unchanged while the file still has it, so the upgrade itself uploads
+    nothing; once the file is written again, the stamp no longer matches and the
+    work is sent once, as that Player would have sent it.
     """
-    return binding.render_fingerprint != _fingerprint(render)
+    recorded = binding.render_fingerprint
+    if recorded is None:
+        return True
+    if recorded == _fingerprint(render):
+        return False
+    return recorded != _stamp(render)
+
+
+def _known_as(identity: str | None) -> str | None:
+    """A set's identity as the journal names it: enough to tell two sets apart, and not the set's own id.
+
+    The full id goes to the server in the client heartbeat; a journal is what
+    gets pasted into an issue in a public repository.
+    """
+    return None if identity is None else f"set-{hashlib.sha256(identity.encode()).hexdigest()[:8]}"
 
 
 def _say_the_wall_recovered() -> None:

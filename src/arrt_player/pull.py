@@ -150,6 +150,8 @@ class _Poll(Enum):
     MEDIA_FAILING = "media_failing"
     #: No answer, or a 5xx: back off, and send nothing else.
     UNREACHABLE = "unreachable"
+    #: The manifest route answered, and the cache could not take what it sent: back off, but the server is there.
+    UNWRITABLE = "unwritable"
 
 
 class Pull:
@@ -195,6 +197,7 @@ class Pull:
         self._heartbeat_failing = ReportOnce()
         self._media_failing = ReportOnce()
         self._hold_ran_out = ReportOnce()
+        self._unwritable = ReportOnce()
         self._skipped: set[str] = set()
         #: When the feed was first held for a master that may yet arrive, or
         #: None while nothing is being held. One wait for the episode, not one
@@ -212,8 +215,14 @@ class Pull:
     # -- the loop ---------------------------------------------------------------------------
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Pull until asked to stop, backing off while the server cannot be reached."""
-        self._media.mkdir(parents=True, exist_ok=True)
+        """Pull until asked to stop, backing off while the server cannot be reached.
+
+        **Two loops, each running one body that `cycle` runs too**: the
+        manifest's (`_manifest_turn`, then the wait it names) and the
+        heartbeat's (`_heartbeat_turn`, every poll interval), so a backoff never
+        delays a report. A crash in the heartbeat loop ends the pull; a crash
+        in the manifest loop cancels the heartbeat loop on the way out.
+        """
         log.info(
             "pulling the manifest for wall %s from %s into %s",
             self._settings.wall_id,
@@ -231,8 +240,7 @@ class Pull:
             heartbeats = asyncio.create_task(self._heartbeats(session, stop), name=f"heartbeat:{self._settings.wall_id}")
             try:
                 while not stop.is_set():
-                    polled = await self._poll(session)
-                    wait = self._interval if polled is _Poll.ANSWERED else self._next_backoff()
+                    _, wait = await self._manifest_turn(session)
                     await _rest(stop, wait, heartbeats)
                     if heartbeats.done():
                         # Re-raises a heartbeat loop that crashed, so the pull
@@ -244,22 +252,24 @@ class Pull:
                     await heartbeats
 
     async def cycle(self, session: aiohttp.ClientSession) -> bool:
-        """One poll: the manifest, then the heartbeat. False when the next poll should back off.
-
-        `run` does the same on two clocks, the manifest poll's and the
-        heartbeat's, so a backoff never delays a report.
-        """
-        polled = await self._poll(session)
-        if self._server_heard:
-            await self._forward_heartbeat(session)
+        """One turn of each of `run`'s loops, the manifest's then the heartbeat's. False when the next poll should back off."""
+        polled, _ = await self._manifest_turn(session)
+        await self._heartbeat_turn(session)
         return polled is _Poll.ANSWERED
 
-    async def _poll(self, session: aiohttp.ClientSession) -> _Poll:
+    async def _manifest_turn(self, session: aiohttp.ClientSession) -> tuple[_Poll, float]:
+        """One manifest poll, and how long to wait before the next: the interval after an answer, else the backoff."""
         polled = await self._pull_manifest(session)
         self._server_heard = polled is not _Poll.UNREACHABLE
         if polled is _Poll.ANSWERED:
             self._backoff = BACKOFF_START_SECONDS
-        return polled
+            return polled, self._interval
+        return polled, self._next_backoff()
+
+    async def _heartbeat_turn(self, session: aiohttp.ClientSession) -> None:
+        """Forward the heartbeat, if the server answered the last manifest poll."""
+        if self._server_heard:
+            await self._forward_heartbeat(session)
 
     async def _heartbeats(self, session: aiohttp.ClientSession, stop: asyncio.Event) -> None:
         """Forward the heartbeat every poll interval while the server answers, whatever the manifest's backoff is doing.
@@ -274,8 +284,8 @@ class Pull:
         while not stop.is_set():
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self._interval)
-            if not stop.is_set() and self._server_heard:
-                await self._forward_heartbeat(session)
+            if not stop.is_set():
+                await self._heartbeat_turn(session)
 
     def _next_backoff(self) -> float:
         wait = self._backoff
@@ -402,13 +412,13 @@ class Pull:
             if isinstance(outcome, _Retry):
                 missing.append(work)
                 failed.add(work.sha256)
-                why, gone = outcome.why, outcome.unreachable
+                # A cache that refused one master refuses the rest too.
+                why, gone = outcome.why, outcome.unreachable or outcome.unwritable
         self._failing = failed
         if missing:
             return self._hold_or_adopt(feed, document, missing, why)
         self._media_settled()
-        self._cache_feed(feed, document, served_etag)
-        return _Poll.ANSWERED
+        return _Poll.ANSWERED if self._cache_feed(feed, document, served_etag) else _Poll.UNWRITABLE
 
     def _media_settled(self) -> None:
         """Nothing is being waited for: the feed the server serves has every master here."""
@@ -450,34 +460,49 @@ class Pull:
         self._cache_feed(feed, document, None)
         return _Poll.MEDIA_FAILING
 
-    def _cache_feed(self, feed: Feed, document: dict[str, Any], served_etag: str | None) -> None:
+    def _cache_feed(self, feed: Feed, document: dict[str, Any], served_etag: str | None) -> bool:
+        """Write the feed, evict what it does not name, then its ETag. False when the cache refused any of it.
+
+        **A cache that cannot be written costs the new feed, not the wall** (#9):
+        the feed already cached stays where the watcher reads it, and the next
+        poll, under the backoff, is answered whole and tries again.
+        """
         manifest = self._cache / CACHED_MANIFEST_FILENAME
         text = json.dumps(document, indent=2).encode("utf-8")
-        previous = self._cached_render_names()
-        # **The old ETag goes before the manifest it describes is replaced**, and
-        # a new one is written only after: an ETag left beside a manifest it
-        # does not describe gets a 304 if the server goes back to that ETag's
-        # document, and the wall keeps a feed the server no longer serves. In
-        # this order a crash between the writes leaves no ETag, which costs one
-        # full download.
-        (self._cache / ETAG_FILENAME).unlink(missing_ok=True)
-        # The same feed again, as every poll past a hold brings, is not
-        # rewritten: the watcher would read it as new each time.
-        written = not _holds(manifest, text)
-        if written:
-            _write_atomically(manifest, text)
-        if served_etag:
-            _write_atomically(self._cache / ETAG_FILENAME, served_etag.encode("utf-8"))
-        held = {Path(work.media_path).name for work in feed.works.values() if (self._cache / work.media_path).is_file()}
-        kept = self._evict(held | previous)
-        if written:
-            log.info(
-                "cached the feed for this wall with %d of %d works' media; %d held",
-                len(held),
-                len(feed.works),
-                kept,
-                extra={"event": "pull.adopted", "works": len(feed.works), "media_held": len(held)},
-            )
+        try:
+            previous = self._cached_render_names()
+            # **The old ETag goes before the manifest it describes is replaced**,
+            # and a new one is written last: an ETag left beside a manifest it
+            # does not describe gets a 304 if the server goes back to that
+            # ETag's document, and the wall keeps a feed the server no longer
+            # serves. In this order a crash, or a write the cache refuses,
+            # anywhere before the end leaves no ETag, which costs one full
+            # download and asks for all of this again.
+            (self._cache / ETAG_FILENAME).unlink(missing_ok=True)
+            # The same feed again, as every poll past a hold brings, is not
+            # rewritten: the watcher would read it as new each time.
+            written = not _holds(manifest, text)
+            if written:
+                _write_atomically(manifest, text)
+            self._media.mkdir(parents=True, exist_ok=True)
+            held = {Path(work.media_path).name for work in feed.works.values() if (self._cache / work.media_path).is_file()}
+            kept = self._evict(held | previous)
+            if written:
+                log.info(
+                    "cached the feed for this wall with %d of %d works' media; %d held",
+                    len(held),
+                    len(feed.works),
+                    kept,
+                    extra={"event": "pull.adopted", "works": len(feed.works), "media_held": len(held)},
+                )
+            if served_etag:
+                _write_atomically(self._cache / ETAG_FILENAME, served_etag.encode("utf-8"))
+        except OSError as exc:
+            self._report_unwritable(exc)
+            return False
+        if self._unwritable.end():
+            log.info("the cache for this wall can be written again", extra={"event": "pull.cache_writable"})
+        return True
 
     async def _cache_media(  # noqa: PLR0911 -- one return per way a master can end, each said where it happens
         self, session: aiohttp.ClientSession, work: Work, declared: int | None
@@ -507,9 +532,14 @@ class Pull:
         headers = self._auth() if _same_origin(address, self._server) else {}
         temporary = self._media / f".{name}.tmp"
         try:
+            _on_disk(self._media.mkdir, parents=True, exist_ok=True)
             async with session.get(address, headers=headers, timeout=_MEDIA_TIMEOUT) as response:
                 status = response.status
                 digest = await _stream_to(response, temporary, declared) if status == HTTPStatus.OK else None
+        except _CacheRefused as exc:
+            # Caught first, and not an `OSError`: a full card is not the server gone.
+            self._report_unwritable(exc.cause)
+            return _Retry(f"the cache refused it ({exc.cause})", unwritable=True)
         except _UNREACHABLE as exc:
             return _Retry(f"{type(exc).__name__} fetching it", unreachable=True)
         if status == HTTPStatus.NOT_FOUND:
@@ -526,14 +556,19 @@ class Pull:
             )
             return False
         if digest != sha:
-            temporary.unlink(missing_ok=True)
+            _discard_quietly(temporary)
             self._skip_once(
                 f"mismatch:{sha}",
                 "the master for work %s did not match its hash and was discarded; skipping it",
                 work_id,
             )
             return False
-        temporary.replace(self._media / name)
+        try:
+            temporary.replace(self._media / name)
+        except OSError as exc:
+            _discard_quietly(temporary)
+            self._report_unwritable(exc)
+            return _Retry(f"the cache refused it ({exc})", unwritable=True)
         return True
 
     def _evict(self, referenced: set[str]) -> int:
@@ -654,6 +689,16 @@ class Pull:
                 self._server,
                 why,
                 extra={"event": "pull.unreachable", "server_url": self._server},
+            )
+
+    def _report_unwritable(self, exc: OSError) -> None:
+        if self._unwritable.begin():
+            log.error(
+                "the cache for this wall at %s cannot be written (%s); the wall keeps showing the feed already cached, "
+                "and each poll tries again",
+                self._cache,
+                exc,
+                extra={"event": "pull.cache_unwritable", "cache_dir": str(self._cache), "errno": exc.errno},
             )
 
     def _report_reachable(self) -> None:
@@ -955,6 +1000,16 @@ class LabelPull:
             return LabelAnswer(reachable=True)
         return await self._ask(self._url)
 
+    @property
+    def cache_path(self) -> Path | None:
+        """Where this pull caches its label's document, or None for an id it will not cache.
+
+        **The one rule for a label id's file**: whatever removes a label's cached
+        document (`__main__.LabelCacheSweep`) learns the path here, never derives
+        it beside this, so the file removed is the file written.
+        """
+        return self._cache_path
+
     def cached(self) -> CachedLabel | None:
         """The last document accepted for this label and when the server last answered, or None if there is none it can read.
 
@@ -1048,15 +1103,20 @@ class LabelPull:
                 self._label_id,
                 extra={"event": "label.document_readable", "label_id": self._label_id},
             )
-        self._etag = served_etag or None
-        self._keep(body)
+        # **No ETag for a document the cache did not take**: asked with one,
+        # the server answers 304 and the document is never cached while it
+        # stays the server's latest.
+        self._etag = (served_etag or None) if self._keep(body) else None
         return LabelAnswer(reachable=True, document=document)
 
-    def _keep(self, body: bytes | None) -> None:
-        """Cache an accepted document, stamped now. **A cache that cannot be written costs the cache, not the label.**"""
+    def _keep(self, body: bytes | None) -> bool:
+        """Cache an accepted document, stamped now; False when the cache refused it.
+
+        **A cache that cannot be written costs the cache, not the label.**
+        """
         path = self._cache_path
         if path is None or body is None:
-            return
+            return True
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             _write_atomically(path, body)
@@ -1068,13 +1128,9 @@ class LabelPull:
             with contextlib.suppress(OSError):
                 _discard(path)
             self._report_uncacheable(exc)
-            return
-        if self._uncacheable.end():
-            log.info(
-                "the document for label %s is cached again",
-                self._label_id,
-                extra={"event": "label.cache_writable", "label_id": self._label_id},
-            )
+            return False
+        self._report_cacheable()
+        return True
 
     def _stamp(self) -> None:
         """Move the cached document's stamp to now, at most once per `LABEL_ANSWER_STAMP_SECONDS`."""
@@ -1091,11 +1147,23 @@ class LabelPull:
             return
         except OSError as exc:
             self._report_uncacheable(exc)
+            return
+        # A refused stamp began the episode too, and a 304 a minute may be all
+        # the server sends for as long as its document stands.
+        self._report_cacheable()
 
     def _set_stamp(self, path: Path) -> None:
         instant = self._now().timestamp()
         os.utime(path, (instant, instant))
         self._stamped = self._monotonic()
+
+    def _report_cacheable(self) -> None:
+        if self._uncacheable.end():
+            log.info(
+                "the document for label %s is cached again",
+                self._label_id,
+                extra={"event": "label.cache_writable", "label_id": self._label_id},
+            )
 
     def _report_uncacheable(self, exc: OSError) -> None:
         if self._uncacheable.begin():
@@ -1136,6 +1204,24 @@ class _Retry:
     why: str
     #: The server stopped answering, as against answering with an error.
     unreachable: bool = False
+    #: The cache refused the master's bytes: the server may be fine.
+    unwritable: bool = False
+
+
+class _CacheRefused(Exception):
+    """A write to the cache failed. **Not an `OSError`**, so `_UNREACHABLE` never reads it as the server gone."""
+
+    def __init__(self, cause: OSError) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _on_disk[**P, T](action: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run one file operation, its `OSError` raised as `_CacheRefused`."""
+    try:
+        return action(*args, **kwargs)
+    except OSError as exc:
+        raise _CacheRefused(exc) from exc
 
 
 def _declared_size(document: dict[str, Any], work_id: str) -> int | None:
@@ -1156,7 +1242,9 @@ async def _stream_to(response: aiohttp.ClientResponse, path: Path, limit: int) -
     digest = hashlib.sha256()
     received = 0
     try:
-        with path.open("wb") as handle:
+        # Each file operation is the cache's, said as `_CacheRefused`; the
+        # body's own errors are the server's, and stay as they come.
+        with _on_disk(path.open, "wb") as handle:
             async for chunk in response.content.iter_chunked(_CHUNK_BYTES):
                 received += len(chunk)
                 if received > limit:
@@ -1164,17 +1252,25 @@ async def _stream_to(response: aiohttp.ClientResponse, path: Path, limit: int) -
                     _discard(path)
                     return None
                 digest.update(chunk)
-                handle.write(chunk)
-            handle.flush()
-            os.fsync(handle.fileno())
+                _on_disk(handle.write, chunk)
+            _on_disk(handle.flush)
+            _on_disk(os.fsync, handle.fileno())
     except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the partial file must go on any exit
-        _discard(path)
+        # Quietly: a cache that refused the write may refuse the unlink, and
+        # that second refusal must not hide the first.
+        _discard_quietly(path)
         raise
     return digest.hexdigest()
 
 
 def _discard(path: Path) -> None:
     path.unlink(missing_ok=True)
+
+
+def _discard_quietly(path: Path) -> None:
+    """`_discard`, on a cache that may refuse the unlink too."""
+    with contextlib.suppress(OSError):
+        _discard(path)
 
 
 async def _read_capped(response: aiohttp.ClientResponse) -> bytes | None:
@@ -1226,5 +1322,5 @@ def _write_atomically(path: Path, data: bytes) -> None:
             os.fsync(handle.fileno())
         temporary.replace(path)
     except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
-        temporary.unlink(missing_ok=True)
+        _discard_quietly(temporary)
         raise

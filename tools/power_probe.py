@@ -57,21 +57,22 @@ owes, and an unattended daemon meeting its first prompt is a daemon that stops.
 
 Read the state, which is always safe and needs no flag:
 
-    cd arrt-player && uv run python tools/power_probe.py
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py
 
 Measure a gesture, from whatever state the set is in now:
 
-    cd arrt-player && uv run python tools/power_probe.py --click --i-am-at-the-set
-    cd arrt-player && uv run python tools/power_probe.py --hold 3 --i-am-at-the-set
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py --click --i-am-at-the-set
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py --hold 3 --i-am-at-the-set
 
 Skip the art channel when only the REST reading is wanted — which is also how to
 find out whether the art channel opens at all in a given state, since a run
 *with* it reports that as a datum rather than failing:
 
-    cd arrt-player && uv run python tools/power_probe.py --no-art-channel
+    cd arrt-player && uv run --frozen --no-dev python tools/power_probe.py --no-art-channel
 
-The set's address and client name come from this deployment's `.env`, the same
-road `__main__` takes; `--host` overrides it for a set that is not this wall's.
+The set's address and client name come from this deployment's settings, the same
+road `__main__` takes (`.env`, then the settings page's file for a key `.env`
+leaves empty, as `TV_ADDRESS` usually is); `--host` overrides it for a set that is not this wall's.
 Record what comes out in `samsung-tv-state-findings.md`, with the date — a reading
 whose provenance is unrecorded is what let the previous sketch be mistaken for
 measurement. The banner prints that provenance so a pasted transcript carries it.
@@ -684,7 +685,9 @@ def _intermediate(before: Reading, samples: list[Reading]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--host", help="the set's address; defaults to TV_ADDRESS from this deployment's .env")
+    parser.add_argument(
+        "--host", help="the set's address; defaults to TV_ADDRESS from this deployment's .env or its settings page"
+    )
     parser.add_argument("--port", type=int, help="websocket port; defaults to TV_PORT")
     parser.add_argument("--rest-port", type=int, default=8001, help="REST port, where PowerState is read (default 8001)")
     parser.add_argument("--client-name", help="pairing name; defaults to TV_CLIENT_NAME")
@@ -763,7 +766,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _settings_into(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
-    """Fill what the operator did not give from this deployment's `.env`.
+    """Fill what the operator did not give from this deployment's settings (`.env` and the settings page's file).
 
     The same road `__main__` takes, so on the machine that owns the wall the short
     invocation is both convenient and correct. **Nothing falls back to a literal
@@ -811,7 +814,7 @@ def _settings_into(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
         args.art_token_file = args.art_token_file or settings.tv_token_file
 
     if not args.host:
-        parser.error("no set to probe: set TV_ADDRESS in .env, or pass --host")
+        parser.error("no set to probe: set the Frame's address on the settings page or TV_ADDRESS in .env, or pass --host")
     if not args.port:
         args.port = 8002
     if not args.client_name:

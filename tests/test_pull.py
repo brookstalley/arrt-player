@@ -19,6 +19,7 @@ import logging
 import os
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
 
 import aiohttp
 import pytest
@@ -301,8 +302,7 @@ async def test_a_manifest_replaced_while_its_etag_cannot_be_written_leaves_no_ol
 
     monkeypatch.setattr(pull_module, "_write_atomically", etag_write_fails)
     stub.publish("w2")
-    with pytest.raises(OSError, match="No space"):
-        await pull.cycle(session)
+    assert await pull.cycle(session) is False, "a feed whose ETag the cache refused was not backed off"
 
     assert _works(http_settings) == ["w2"]
     assert not etag_path.exists()
@@ -553,6 +553,300 @@ async def test_a_master_that_keeps_failing_is_said_once_and_backed_off(pull, stu
     assert len([message for message in messages if "could not be fetched" in message]) == 1
     assert len([message for message in messages if "arrive again" in message]) == 1
     assert _works(http_settings) == ["w2"]
+
+
+# -- a cache that cannot be written ---------------------------------------------------------
+
+#: The two ways a Pi's card refuses a write: full, and remounted read-only by the kernel after an error.
+_UNWRITABLE = [
+    pytest.param(errno.ENOSPC, id="disk-full"),
+    pytest.param(errno.EROFS, id="read-only"),
+]
+
+#: A slot covering the whole of the test clock's day, so a wall draws its one work whatever the hour.
+_WHOLE_DAY = ("2026-06-21T00:00:00+00:00", "2026-06-22T00:00:00+00:00")
+
+
+class _RefusingCache:
+    """`_write_atomically`, refusing every write under `root` while `refusing` is set, as a full or read-only card does."""
+
+    def __init__(self, monkeypatch, root, code: int) -> None:
+        self._real = pull_module._write_atomically
+        self._root = root
+        self._code = code
+        self.refusing = False
+        #: Each write refused, by path.
+        self.refused: list = []
+        monkeypatch.setattr(pull_module, "_write_atomically", self)
+
+    def __call__(self, path, data: bytes) -> None:
+        if self.refusing and path.is_relative_to(self._root):
+            self.refused.append(path)
+            raise OSError(self._code, os.strerror(self._code))
+        self._real(path, data)
+
+
+def _events(caplog) -> list:
+    return [record.__dict__.get("event") for record in caplog.records]
+
+
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_feed_the_cache_cannot_take_leaves_the_wall_drawing_the_last_one_and_the_pull_running(
+    stub, http_settings, clock, monkeypatch, caplog, code
+):
+    """#9: the write's `OSError` used to end the pull, which the supervisor restarted 5 to 300 s later into the same disk."""
+    monkeypatch.setattr(pull_module, "BACKOFF_START_SECONDS", 0.02)
+    stub.publish_feed([("a", *_WHOLE_DAY)])
+    etag_path = http_settings.wall_dir / ETAG_FILENAME
+    cache = _RefusingCache(monkeypatch, http_settings.wall_dir, code)
+    output = RecordingOutput(screen=(1280, 720))
+    wall = screen_wall(wall=http_settings, output=output, watcher=_watcher(http_settings), clock=clock.as_clock())
+    stop = asyncio.Event()
+    running = asyncio.create_task(Pull(http_settings, interval_seconds=0.02).run(stop))
+    try:
+        await _until(etag_path.is_file)
+        await tick_until(wall.tick, lambda: len(output.shown) == 1)
+        cache.refusing = True
+        stub.publish_feed([("b", *_WHOLE_DAY)])
+        with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+            await _until(lambda: len(cache.refused) >= 3 or running.done())
+            ended_during = running.done()
+            for _ in range(10):
+                await wall.tick()
+                await asyncio.sleep(0.01)
+            shown_during = list(output.shown)
+            works_during = _works(http_settings)
+            etag_during = etag_path.exists()
+            cache.refusing = False
+            if not ended_during:
+                await _until(etag_path.is_file)
+                await tick_until(wall.tick, lambda: len(output.shown) == 2)
+    finally:
+        stop.set()
+        await asyncio.wait({running}, timeout=5)
+
+    assert not ended_during, f"the pull ended on the cache's {errno.errorcode[code]}: {running.exception()!r}"
+    assert works_during == ["a"], "the feed already cached did not stay while the new one could not be written"
+    assert shown_during == output.shown[:1], "the wall stopped drawing what it had while the cache refused the new feed"
+    assert not etag_during, "an ETag was stored for a feed the cache could not take"
+    assert _works(http_settings) == ["b"], "the next poll after the cache recovered did not write the feed"
+    assert output.shown[1] != output.shown[0]
+    events = _events(caplog)
+    assert events.count("pull.cache_unwritable") == 1, events
+    assert events.count("pull.cache_writable") == 1, events
+    assert events.index("pull.cache_unwritable") < events.index("pull.cache_writable")
+
+
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_cache_that_cannot_be_written_is_said_once_over_three_polls_and_its_end_once(
+    pull, stub, session, http_settings, monkeypatch, caplog, code
+):
+    stub.publish("w1")
+    assert await pull.cycle(session) is True
+    cache = _RefusingCache(monkeypatch, http_settings.wall_dir, code)
+    cache.refusing = True
+    stub.publish("w2")
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+        answered = [await pull.cycle(session) for _ in range(3)]
+        polls_refused = len(cache.refused)
+        unwritable_said = _events(caplog).count("pull.cache_unwritable")
+        cache.refusing = False
+        assert await pull.cycle(session) is True
+        assert await pull.cycle(session) is True
+
+    assert answered == [False, False, False], "a feed the cache could not take was not backed off"
+    assert polls_refused == 3, "a poll did not ask the cache again"
+    assert unwritable_said == 1, _events(caplog)
+    assert _events(caplog).count("pull.cache_unwritable") == 1
+    assert _events(caplog).count("pull.cache_writable") == 1, _events(caplog)
+    assert _works(http_settings) == ["w2"]
+    assert (http_settings.wall_dir / ETAG_FILENAME).is_file()
+
+
+async def test_an_eviction_the_cache_refuses_leaves_no_etag_so_the_next_poll_does_it_again(
+    pull, stub, session, http_settings, monkeypatch, caplog
+):
+    """The ETag is written last, so a refusal anywhere in the adoption is asked about again rather than answered 304."""
+    first = stub.publish("w1")
+    await pull.cycle(session)
+    real_evict = Pull._evict
+    refusing = {"on": True}
+
+    def evict_refused(self, referenced):
+        if refusing["on"]:
+            raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+        return real_evict(self, referenced)
+
+    monkeypatch.setattr(Pull, "_evict", evict_refused)
+    stub.publish("w2")
+    etag_path = http_settings.wall_dir / ETAG_FILENAME
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+        assert await pull.cycle(session) is False
+        etag_during = etag_path.exists()
+        refusing["on"] = False
+        assert await pull.cycle(session) is True
+
+    assert not etag_during, "an ETag was stored for an adoption the cache did not finish"
+    assert _media(first, "w1") not in _held(http_settings), "the next poll did not evict what the refusal left"
+    assert etag_path.is_file()
+    assert _events(caplog).count("pull.cache_writable") == 1, _events(caplog)
+
+
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_master_the_cache_cannot_take_holds_the_feed_and_is_said_as_the_cache(
+    pull, stub, session, http_settings, monkeypatch, caplog, code
+):
+    """The master's own write, the manifest's sibling: once reported as the server gone, and its `replace` uncaught."""
+    stub.publish("w1")
+    await pull.cycle(session)
+    media = http_settings.wall_dir / MEDIA_DIRNAME
+    real_open = Path.open
+    refusing = {"on": True}
+
+    def open_refusing_the_media_cache(path, *args, **kwargs):
+        if refusing["on"] and path.parent == media and path.name.endswith(".tmp"):
+            raise OSError(code, os.strerror(code))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_refusing_the_media_cache)
+    stub.publish("w1", "w2")
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+        for _ in range(3):
+            assert await pull.cycle(session) is False, "a master the cache refused was not backed off"
+        works_during = _works(http_settings)
+        events_during = _events(caplog)
+        refusing["on"] = False
+        assert await pull.cycle(session) is True
+
+    assert works_during == ["w1"], "the feed was adopted before every master was answered for"
+    assert events_during.count("pull.cache_unwritable") == 1, events_during
+    assert "pull.unreachable" not in events_during, "a cache that refused a master was reported as the server gone"
+    assert _works(http_settings) == ["w1", "w2"]
+    assert _events(caplog).count("pull.cache_writable") == 1, _events(caplog)
+
+
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_client_document_the_cache_cannot_take_is_followed_said_once_and_cached_when_it_can_be(
+    client_link, client_settings, monkeypatch, caplog, code
+):
+    cache = _RefusingCache(monkeypatch, client_settings.cache_dir, code)
+    cache.refusing = True
+    link = client_link()
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+        during = [await link.fetch() for _ in range(3)]
+        cache.refusing = False
+        after = await link.fetch()
+
+    assert all(document is not None for document in during), "a document the cache refused was not handed to the walls"
+    assert len(cache.refused) == 3, "a poll did not ask the cache again"
+    assert after is not None
+    assert after == during[0]
+    assert link.cached() == after
+    assert (client_settings.cache_dir / CLIENT_ETAG_FILENAME).is_file()
+    assert _events(caplog).count("client.cache_unwritable") == 1, _events(caplog)
+    assert _events(caplog).count("client.cache_writable") == 1, _events(caplog)
+
+
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_label_document_the_cache_cannot_take_is_followed_said_once_and_cached_when_it_can_be(
+    stub, client_settings, clock, monkeypatch, caplog, code
+):
+    """The label's ETag used to be kept for a document the cache never took, so the
+    same document came back 304 and was never cached while the server kept it."""
+    stub.map_label("l-hall", "epd-0", WALL_ID, _showing_art())
+    cache = _RefusingCache(monkeypatch, client_settings.cache_dir, code)
+    cache.refusing = True
+    link = _label_link(stub, client_settings, clock)
+    try:
+        with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+            during = [await link.fetch() for _ in range(3)]
+            cache.refusing = False
+            await link.fetch()
+    finally:
+        await link.close()
+
+    assert during[0].document is not None, "a document the cache refused was not handed to the renderer"
+    assert len(cache.refused) == 3, "a poll did not ask the cache again"
+    cached = _label_link(stub, client_settings, clock).cached()
+    assert cached is not None, "the label document was never cached once the cache could take it"
+    assert cached.document == during[0].document
+    assert _events(caplog).count("label.cache_unwritable") == 1, _events(caplog)
+    assert _events(caplog).count("label.cache_writable") == 1, _events(caplog)
+
+
+# -- production runs the bodies the tests drive -----------------------------------------------
+
+
+class _Sentinel(Exception):
+    """Raised by a patched body, so a caller that runs it is seen to."""
+
+
+@pytest.mark.parametrize("body", ["_manifest_turn", "_heartbeat_turn"])
+async def test_run_and_cycle_drive_the_same_manifest_and_heartbeat_bodies(pull, stub, session, http_settings, monkeypatch, body):
+    """O-6: `cycle` is what about a hundred tests drive; `run` is what a Player runs.
+    Patch one body, and both callers raise it."""
+    stub.publish("w1")
+    heartbeat = http_settings.heartbeat_root / f"display-heartbeat-{WALL_ID}.json"
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(_heartbeat("2026-09-30T12:00:00+00:00"))
+    real = getattr(Pull, body)
+
+    async def raising(self, *args):
+        await real(self, *args)
+        raise _Sentinel(body)
+
+    monkeypatch.setattr(Pull, body, raising)
+    stop = asyncio.Event()
+    running = asyncio.create_task(Pull(http_settings, interval_seconds=0.02).run(stop))
+    try:
+        await asyncio.wait({running}, timeout=5)
+        ended = running.done()
+    finally:
+        stop.set()
+        await asyncio.wait({running}, timeout=5)
+    with pytest.raises(_Sentinel):
+        await pull.cycle(session)
+
+    assert ended, f"run did not end on what {body} raised: it did not drive it, or it waited on a heartbeat loop left running"
+    assert isinstance(running.exception(), _Sentinel)
+    left = [task.get_name() for task in asyncio.all_tasks() if task.get_name() == f"heartbeat:{WALL_ID}"]
+    assert left == [], "the pull ended and left its heartbeat loop posting"
+
+
+async def test_run_waits_the_interval_after_an_answer_and_backs_off_doubling_to_the_ceiling_after_none(
+    stub, http_settings, monkeypatch
+):
+    """The manifest loop's cadence, which only `run` had before `cycle` and it shared a body."""
+    stub.publish("w1")
+    stub.manifest_status = 503
+    waits: list[float] = []
+
+    async def rest(stop, seconds, beside):
+        waits.append(seconds)
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(pull_module, "_rest", rest)
+    stop = asyncio.Event()
+    running = asyncio.create_task(Pull(http_settings, interval_seconds=0.5).run(stop))
+    try:
+        await _until(lambda: len(waits) >= 7 or running.done())
+        failing = list(waits[:7])
+        stub.manifest_status = None
+        await _until(lambda: 0.5 in waits or running.done())
+        stub.manifest_status = 503
+        await _until(lambda: waits[-1] != 0.5 or running.done())
+    finally:
+        stop.set()
+        await asyncio.wait({running}, timeout=5)
+
+    assert failing == [2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0], "the backoff did not double from 2 s to its 60 s ceiling"
+    after_answers = waits[waits.index(0.5) :]
+    first_failure_after = next(wait for wait in after_answers if wait != 0.5)
+    assert first_failure_after == 2.0, f"the answer did not reset the backoff: {waits}"
 
 
 # -- what a restarted Player asks with ---------------------------------------------------
@@ -954,6 +1248,47 @@ async def test_the_cached_document_is_stamped_as_answered_once_a_minute_while_th
     assert stamped_early.answered_at == first, "the stamp was moved more often than once a minute"
     assert stamped_later is not None
     assert stamped_later.answered_at == clock.as_clock().now(), "a 304 a minute on did not stamp the cached document"
+
+
+@pytest.mark.parametrize("code", _UNWRITABLE)
+async def test_a_stamp_that_succeeds_after_a_refused_one_says_the_label_is_cached_again(
+    stub, client_settings, clock, monkeypatch, caplog, code
+):
+    """A refused stamp began the episode and only a fresh document's write ended it,
+    so a label the server kept answering 304 stayed reported unwritable after its
+    cache could be stamped again."""
+    stub.map_label("l-hall", "epd-0", WALL_ID, _showing_art())
+    real_utime = os.utime
+    refused: list = []
+
+    def utime(path, times=None):
+        if refusing and Path(path).is_relative_to(client_settings.cache_dir):
+            refused.append(path)
+            raise OSError(code, os.strerror(code))
+        real_utime(path, times)
+
+    refusing = False
+    monkeypatch.setattr(pull_module.os, "utime", utime)
+    link = _label_link(stub, client_settings, clock)
+    try:
+        with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+            await link.fetch()
+            refusing = True
+            clock.advance(LABEL_STAMP_SECONDS + 1)
+            refused_answer = await link.fetch()
+            refusing = False
+            stamped_answer = await link.fetch()
+    finally:
+        await link.close()
+
+    assert refused_answer == LabelAnswer(reachable=True), "the refused stamp was not on a 304"
+    assert stamped_answer == LabelAnswer(reachable=True), "the stamp after it was not on a 304"
+    assert len(refused) == 1, "the stamp was not refused once"
+    stamped = _label_link(stub, client_settings, clock).cached()
+    assert stamped is not None
+    assert stamped.answered_at == clock.as_clock().now(), "the stamp after the refused one did not move the stamp"
+    assert _events(caplog).count("label.cache_unwritable") == 1, _events(caplog)
+    assert _events(caplog).count("label.cache_writable") == 1, _events(caplog)
 
 
 async def test_a_document_this_reader_refuses_leaves_the_cached_one(stub, client_settings, clock):

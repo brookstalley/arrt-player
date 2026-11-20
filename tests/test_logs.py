@@ -8,6 +8,7 @@ project's very first chunk existed to undo.
 """
 
 import ast
+import asyncio
 import json
 import logging
 import pathlib
@@ -145,6 +146,68 @@ class TestTheLineShape:
 
         assert "thing" in json.loads(capsys.readouterr().err.strip())
 
+    def test_a_bound_wall_rides_every_line_inside_the_block_and_none_outside(self, capsys):
+        logs.configure()
+
+        with logs.wall_context("hall"):
+            logging.getLogger("arrt_player.pull").warning("unreachable", extra={"event": "pull.unreachable"})
+        logging.getLogger("arrt_player.client").info("stopped", extra={"event": "client.stopped"})
+
+        inside, outside = (json.loads(line) for line in capsys.readouterr().err.strip().splitlines())
+        assert inside["wall_id"] == "hall"
+        assert "wall_id" not in outside, "a process-level line named a wall"
+
+    def test_a_bound_label_carries_its_label_and_the_wall_it_captions(self, capsys):
+        logs.configure()
+
+        with logs.wall_context("porch"):
+            with logs.label_context("label-1", "hall"):
+                logging.getLogger("arrt_player.label_renderer").info("drawn", extra={"event": "label.drawn"})
+            logging.getLogger("arrt_player.pull").info("after", extra={"event": "pull.adopted"})
+
+        drawn, after = (json.loads(line) for line in capsys.readouterr().err.strip().splitlines())
+        assert (drawn["label_id"], drawn["wall_id"]) == ("label-1", "hall")
+        assert after["wall_id"] == "porch", "the outer wall was not restored"
+        assert "label_id" not in after
+
+    @pytest.mark.parametrize("field", ["wall_id", "label_id"])
+    def test_a_wall_or_label_the_call_site_passes_is_never_overwritten(self, capsys, field):
+        """A line about another wall than the worker's says so itself; the bound one would be the wrong wall."""
+        logs.configure()
+
+        with logs.label_context("bound-label", "bound-wall"):
+            logging.getLogger("arrt_player.test").info("explicit", extra={"event": "x.y", field: "passed"})
+
+        line = json.loads(capsys.readouterr().err.strip())
+        assert line[field] == "passed"
+
+    def test_a_bound_work_is_stamped_over_one_the_call_site_passes_as_it_always_was(self, capsys):
+        """Kept as it was when the wall and label joined it: `display.state` passes the work
+        the screen now shows, None when dark, inside the block of the work it was showing,
+        and its line has always carried that block's work."""
+        logs.configure()
+
+        with logs.work_context("bound-work"):
+            logging.getLogger("arrt_player.wall").info("dark", extra={"event": "display.state", "work_id": None})
+
+        assert json.loads(capsys.readouterr().err.strip())["work_id"] == "bound-work"
+
+    async def test_a_thread_and_a_task_each_carry_the_wall_they_were_started_for(self, capsys):
+        """`asyncio.to_thread` and a task copy the context they start in, so two walls' lines stay apart."""
+        logs.configure()
+
+        def draws() -> None:
+            logging.getLogger("arrt_player.compose").info("drawn", extra={"event": "compose.done"})
+
+        async def worker(wall_id: str) -> None:
+            with logs.wall_context(wall_id):
+                await asyncio.sleep(0)
+                await asyncio.to_thread(draws)
+
+        await asyncio.gather(worker("A"), worker("B"))
+
+        assert sorted(json.loads(line)["wall_id"] for line in capsys.readouterr().err.strip().splitlines()) == ["A", "B"]
+
     def test_configuring_twice_does_not_duplicate_every_line(self, capsys):
         logs.configure()
         logs.configure()
@@ -164,7 +227,9 @@ class TestTheLineShape:
         assert someone_else in logging.getLogger().handlers
 
 
-_LEVELS = {"debug", "info", "warning", "error", "exception", "critical"}
+#: The logger's methods a line is written through, `log.log(level, …)` among
+#: them: the screen's brightness line chooses its level as it is written.
+_LEVELS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
 _SOURCE = pathlib.Path(logs.__file__).parent
 
 
@@ -201,6 +266,8 @@ class TestEveryLineIsFindableByItsEvent:
         `log` calls, so it has to be seen reaching both."""
         assert _SOURCE / "__main__.py" in _MODULES
         assert sum(1 for module in _MODULES for _ in _log_calls(ast.parse(module.read_text()))) > 100
+        brightness = ast.parse((_SOURCE / "displays" / "screen_brightness.py").read_text())
+        assert any(call.func.attr == "log" for call in _log_calls(brightness)), "a `log.log` call went unwalked"
 
     @pytest.mark.parametrize("module", _MODULES, ids=lambda path: str(path.relative_to(_SOURCE)))
     def test_every_log_call_passes_its_event_as_a_field(self, module):

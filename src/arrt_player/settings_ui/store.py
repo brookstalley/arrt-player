@@ -18,13 +18,20 @@ cookie is genuine, under a secret that survives the restart a save causes
 add its keys without guessing what an older file meant. A version this code does
 not know is refused rather than read in part.
 
-**Version 2 is version 1 plus the slideshow's keys** (`SLIDESHOW_KEYS`). A
-version 1 file is read as it stands, since every key it may hold is still
-managed, and the next write makes it version 2. An older Player refuses a
-version 2 file and names the version, which is the point of bumping it: without
-the bump it would refuse the slideshow keys as unmanaged, a less useful message.
-Rolling back across it means deleting the slideshow keys and setting `version`
-back to 1 by hand (`deploy/README.md`).
+**Version 2 is version 1 plus the slideshow's keys** (`SLIDESHOW_KEYS`), and
+**version 3 is version 2 plus the Frame's address** (`FRAME_KEYS`). A file of any
+of them is read as it stands, since every key it may hold is still managed. An
+older Player refuses a newer version and names it, which is the point of
+bumping it: without the bump it would refuse the new keys as unmanaged, a less
+useful message.
+
+**A write names the oldest of the two layouts this release writes that holds
+its keys** (`layout_for`): version 3 only while the file holds `TV_ADDRESS`,
+version 2 otherwise, never 1. So the release before this one reads every file
+this one writes, until the page is given the Frame's address; rolling back then
+means moving `TV_ADDRESS` back into `.env`, deleting it from `values` and
+setting `version` to 2 by hand. Rolling back across version 2 means deleting
+the slideshow keys and setting `version` to 1 (`deploy/README.md`).
 
 **It holds `CLIENT_TOKEN` and `REDDIT_SESSION` in the clear**, as `.env` does: the
 Player has to send them. The file is created 0600, and written by temp-and-rename with an `fsync`
@@ -42,16 +49,17 @@ from typing import Final
 #: The file, directly under `CACHE_DIR`.
 SETTINGS_FILENAME: Final[str] = ".settings.json"
 
-#: The layout this code writes.
-VERSION: Final[int] = 2
+#: The newest layout this code writes, and the one a file holding a key of
+#: `FRAME_KEYS` is written as.
+VERSION: Final[int] = 3
 
-#: The layouts this code reads. Version 1 holds a subset of version 2's keys.
-READABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, VERSION})
+#: The layout a file holding none of `FRAME_KEYS` is written as, so the release
+#: before this one, which reads versions 1 and 2, still reads it.
+VERSION_WITHOUT_THE_FRAME: Final[int] = 2
 
-#: The keys the page may set. Everything else stays in `.env`: a page that could
-#: move `CACHE_DIR` or its own port could lose its own file or lock itself out.
-#: `TV_CLIENT_NAME` is absent on purpose, because changing it costs a pairing
-#: prompt at the television.
+#: The layouts this code reads. Each holds a subset of the next one's keys.
+READABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, 2, VERSION})
+
 #: The slideshow's keys, new in version 2: which mode the Player runs in, and
 #: the slideshow's listing, cookie, dwell limits and screen.
 SLIDESHOW_KEYS: Final[tuple[str, ...]] = (
@@ -62,7 +70,18 @@ SLIDESHOW_KEYS: Final[tuple[str, ...]] = (
     "SLIDESHOW_MAX_SECONDS",
     "SLIDESHOW_OUTPUT",
 )
-MANAGED_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN", "PLAYER_NAME", *SLIDESHOW_KEYS)
+#: The Frame's key, new in version 3: the television's address on the LAN. The
+#: rest of the Frame (its port, its token's path, its panel, the location it
+#: follows) stays in `.env`: they are facts of the installation, measured or set
+#: once, and the address is the one a household has to change (a router hands
+#: the set a new lease).
+FRAME_KEYS: Final[tuple[str, ...]] = ("TV_ADDRESS",)
+#: The keys the page may set. Everything else stays in `.env`: a page that could
+#: move `CACHE_DIR` or its own port could lose its own file or lock itself out.
+#: `TV_CLIENT_NAME` is absent on purpose, because changing it costs a pairing
+#: prompt at the television; so is `TV_TOKEN_FILE`, which the page reads (to
+#: forget a pairing when the address changes) and never moves.
+MANAGED_KEYS: Final[tuple[str, ...]] = ("SERVER_URL", "CLIENT_TOKEN", "PLAYER_NAME", *SLIDESHOW_KEYS, *FRAME_KEYS)
 
 #: The keys the page takes and never shows back.
 SECRET_KEYS: Final[frozenset[str]] = frozenset({"CLIENT_TOKEN", "REDDIT_SESSION"})
@@ -126,9 +145,14 @@ def read(cache_dir: Path) -> Stored:
     return Stored(values=values, password=password, session_secret=secret)
 
 
+def layout_for(values: Mapping[str, str]) -> int:
+    """The layout a file holding `values` is written as: the oldest this release writes that holds them."""
+    return VERSION if any(key in values for key in FRAME_KEYS) else VERSION_WITHOUT_THE_FRAME
+
+
 def write(cache_dir: Path, stored: Stored) -> None:
     """Replace the file atomically, owner-only. Raises `OSError` on failure."""
-    document: dict[str, object] = {"version": VERSION, "values": dict(stored.values), "auth": {}}
+    document: dict[str, object] = {"version": layout_for(stored.values), "values": dict(stored.values), "auth": {}}
     auth: dict[str, str] = {}
     if stored.password is not None:
         auth["password"] = stored.password

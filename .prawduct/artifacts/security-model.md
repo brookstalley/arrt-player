@@ -111,8 +111,9 @@ The Player authenticates outward to two peers, the server and the television, or
 The Player's one inbound surface (`settings_ui/server.py`, served from
 `__main__.run_settings_page` on `UI_BIND`:`UI_PORT`, default every interface and
 8771, `config.py:load_ui`). It can set `SERVER_URL` and `CLIENT_TOKEN`, so whoever
-holds it can point the Player at a host of their choosing, which makes it as
-sensitive as the token itself.
+holds it can point the Player at a host of their choosing, and the Frame's
+address (`TV_ADDRESS`), so whoever holds it can point the Player at a television
+of their choosing too. That makes it as sensitive as the token itself.
 
 - **First password needs the setup code.** `__main__.settings_page` mints one
   (`auth.new_setup_code`, 12 random bytes) only when no password is stored, and
@@ -177,17 +178,32 @@ sensitive as the token itself.
   Every response also sets `X-Frame-Options: DENY`, `nosniff`,
   `Referrer-Policy: same-origin` (not `no-referrer`, under which a browser sends
   `Origin: null` and every form would be refused) and `no-store`, except `/static`, which a browser may keep a day (`server.SECURITY_HEADERS`, `STATIC_CACHE_CONTROL`).
-- **What it can change, and how.** `SERVER_URL`, `CLIENT_TOKEN` and
-  `PLAYER_NAME`, and only where the environment does not set them
-  (`config.load_ui` › `pinned`); a pinned key is shown read-only and a POST
-  cannot change it. **The server's address and its token move together**: when
+- **What it can change, and how.** `SERVER_URL`, `CLIENT_TOKEN`, `PLAYER_NAME`
+  and `TV_ADDRESS` (and the slideshow's keys), and only where the environment does
+  not set them (`config.load_ui` › `pinned`); a pinned key is shown read-only and
+  a POST cannot change it. An empty `TV_ADDRESS` in `.env` does not pin it
+  (`config._beneath_the_environment`), because `.env.example` ships it empty. **The server's address and its token move together**: when
   the environment pins either, the page locks both, and a new address saved
   without a token clears the stored one, so the page can never send a token to
   a host it was not issued for (`server._locked`, `server._next_values`;
   `tests/test_settings_ui.py::TestSavingTheServer`, `::TestWhatTheEnvironmentPins`).
   Values are judged by the functions `config.load` uses (`server_url_problem`,
   which also refuses userinfo since the address is logged, `client_token_problem`,
-  `player_name_problem`). A save restarts the process with SIGTERM to itself.
+  `player_name_problem`, `tv_address_problem`), and the save as a whole by
+  `config.resolve`, which is `load` with the page's file swapped in, so the page
+  cannot write a file the next start would refuse. A save restarts the process
+  with SIGTERM to itself only in setup mode or when what the Player runs on
+  changes (`server._commit`), and says which.
+- **A new Frame address forgets the television's pairing, before anything is
+  written.** The pairing token belongs to the set that issued it, so the page
+  removes the token file (`server._forget_pairing`, which finds it by the same
+  derivation the Frame uses, `config.tv_token_path`) and the set at the new
+  address is asked to pair: a prompt somebody accepts at the set. A token file
+  that will not go leaves the save unmade and says so
+  (`settings_page.pairing_not_forgotten`), so the old token is never kept beside
+  the new address. Changing `TV_ADDRESS` in `.env` by hand forgets nothing.
+  What the new address does to the pictures on each television is in § What it
+  does to the television, and the page says it before and after the save.
 - **The token is written, never read back.** The token field is always empty;
   the page says only whether one is set
   (`::test_the_token_is_never_shown_only_whether_one_is_set`). A save logs the
@@ -290,7 +306,11 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   `set_artmode` or wake-on-LAN in `src/` (searched 2026-10-27); the only
   remote-control channel the daemon opens is the library's own token check
   during construction. The read of `PowerState` is one REST GET
-  (`tests/test_samsung_client.py::test_the_librarys_power_read_is_a_get_and_nothing_else`).
+  (`tests/test_samsung_client.py::test_the_librarys_power_read_is_a_get_and_nothing_else`),
+  and so is the read of the set's identity (`SamsungTv.read_identity`: one GET of
+  the device description through its own short-lived client, no pairing and no
+  art channel), which the wall sends on each new connection **whatever the set is
+  showing, a programme included**, because it changes nothing on the set.
   No test asserts the absence of a key press in `src/`; the norm index records
   that the daemon's power guard arrives with Player power control.
   `tools/power_probe.py` presses power and refuses to without
@@ -309,7 +329,51 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   `FrameDisplay._remove_orphans` removes every content id in `MY-C0002`
   (`tv/client.py:UPLOADED_CATEGORY`, "my-pictures") that no row of this wall's
   `tv_binding` names. A fresh store therefore clears the category. Whatever else
-  shares that category on the set is removed with it.
+  shares that category on the set is removed with it. **That holds for a
+  television the Player meets with no record of it, which includes a different
+  set at the Frame's address: the uploaded-pictures category is cleared, and the
+  pictures the household put there go with the Player's own.** The settings page
+  says so before a new address is saved and after.
+- **A binding is used only on the set it was made on.** A set's content ids are its
+  own, so an id recorded on one set names some other picture on the next one:
+  selecting it would show a stranger's picture, and removing it delete one. The
+  store records the set's identity, `device.duid`, and the wall reads it from the
+  connected set on every new connection (the wall's start, after every outage,
+  after a failure that may have dropped the connection) before it selects,
+  uploads or removes by any binding (`FrameDisplay._know_the_set`,
+  `SamsungTv.read_identity`, `DisplayState.belongs_to`). On a different set the
+  bindings are set aside under the old identity and the wall starts on the new
+  one as on a first run; the first set's come back, with a fresh fourteen-day
+  wait, if the wall returns to it (`data-model.md` § DisplayState).
+- **A removal is sent only from a store whose recorded identity is the connected
+  set's** (`FrameDisplay._may_remove`, checked in `_remove_orphans`, which every
+  removal passes through, retirements included). A store that cannot say which
+  set it was made on sends no removal: one written before schema 4 takes the
+  first identity read as its own and removes nothing until then, and one the wall
+  holds in memory while the set will not say has no recorded identity at all.
+  The cost of the rule is that **the old set keeps the Player's pictures** until
+  the Player is pointed at it again or somebody removes them there by hand; the
+  journal (`binding.set_changed`) and the settings page say so.
+- **While the set will not say which set it is, the wall waits, and after
+  fifteen minutes goes on without it.** It uses no binding and says so once
+  (`tv.unidentified`), asking again on its own ladder. After
+  `displays/frame.py:IDENTITY_PATIENCE_SECONDS` (15 minutes) it shows art from an empty store
+  held in memory, uploading the work it shows and then the feed's other works
+  one a pass, and removing nothing (`tv.unidentified_going_on`). An outage drops
+  that store and starts the fifteen minutes again, so a connection that flaps
+  uploads nothing more. Once the set says, the wall returns to the device's
+  store, with its own bindings, and the reconciliation that leaving the store in
+  memory owes removes what it uploaded: **never the picture on the wall before
+  another has been selected**, because what a Frame does when the image it shows
+  is deleted has never been measured. The same holds for every removal of an
+  image the Player knows is up.
+  **Known limit, recorded and not fixed:** a set that opens its art channel and
+  never gives its `device.duid` gains one theme of the store in memory's copies
+  per outage and its fifteen minutes, and nothing removes them, because a
+  removal needs a store that records the connected set. What would retire it is
+  the measurement of whether any set does this (`samsung-tv-state-findings.md` § What is still owed, item 8); no
+  cap is built for it. Held by `tests/test_bindings.py::TestABindingIsUsedOnlyOnTheSetItWasMadeOn`
+  and `::TestASetThatWillNotSayWhichItIs`.
 - **It stops on SIGTERM and closes the art channel** (`__main__.py:_run`,
   `client.py:Supervisor.stop_all`), because a killed client holds the set's slot
   for minutes. The unit sends SIGTERM and waits 90 s (`deploy/display.service`).
@@ -317,7 +381,10 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
 ## Data Privacy
 
 - **No personal data.** The Player stores artworks' ids, images and label text,
-  its own settings, and per-set content ids (`data-model.md`).
+  its own settings, and per-set content ids and each set's `device.duid`
+  (`data-model.md`). A `duid` is a device's id, not the address or the MAC the
+  same reply carries, neither of which the Player reads or records; the journal
+  names a set by a short hash of it, never the id (`displays/frame.py:_known_as`).
 - **What leaves the device in Arrt mode**, all to the server: the client heartbeat (outputs,
   their screen sizes, and the Frame's `device.duid`;
   `client.py:client_heartbeat`, `FrameIdentity`) and each wall's heartbeat
@@ -343,16 +410,19 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   Authentication.
 - **The repository is public.** No addresses, hostnames or usernames in any file
   the repository can commit, documents, `deploy/` and `.prawduct/` included
-  (`tests/test_repository.py::test_no_source_file_carries_a_deployment_value`,
-  `::test_no_file_in_the_working_tree_carries_a_deployment_value`,
+  (`tests/test_repository.py::test_no_file_in_the_working_tree_carries_a_deployment_value`,
   `::test_no_tracked_file_carries_this_machines_deployment_values`, which match
   shapes, not values): private, CGNAT, link-local and unique-local addresses,
   home-directory paths, `.local` and `.lan` names beyond the three the product's
   own examples use, and `user@host` logins. A hit that is recorded rather than fixed
   is listed with its reason in the test's `_ACCEPTED_RESIDUE`.
 - **Retention.** The journal is volatile and bounded
-  (`deploy/journald.conf.d/10-bound-the-journal.conf`). The cache keeps a retired
-  wall's directory indefinitely (`data-model.md` § The cache).
+  (`deploy/journald.conf.d/10-bound-the-journal.conf`). The cache keeps the
+  directory of a wall that left the Player for a week of the Player reading
+  documents that do not place it, then removes it (`client.WallCaches`;
+  `data-model.md` § The cache). A Frame store holds the bindings of every set the
+  wall has been moved away from, for as long as the store lasts
+  (`data-model.md` § DisplayState).
 
 ## Abuse Prevention
 
@@ -398,21 +468,49 @@ file the Player creates is `tvpi`'s alone.
   Player) and `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`. The
   checkout, venv and `.env` are `tvpi`'s and `uv run` syncs the venv at start, so
   the code directory stays writable: **`ProtectSystem=strict` and root-owned code
-  wait for the owner's ruling.** Nothing sets `PrivateDevices=`, `DevicePolicy=`
+  wait for the owner's ruling, which on 2026-11-19 was "not now".** Nothing sets `PrivateDevices=`, `DevicePolicy=`
   or `ProtectKernelModules=`, because the display card, the render node, SPI,
   GPIO and the DDC bus are reached through the groups above
   (`test_the_unit_is_sandboxed_as_far_as_tvpi_owning_the_checkout_allows`,
   `test_the_sandbox_leaves_the_devices_the_walls_draw_through`,
   `test_the_directives_the_sandbox_must_not_move_are_as_they_were`).
+- **Told apart from a wedged Player, and restarted.** `Type=notify`: the Player
+  sends `READY=1` once its mode is running and `WATCHDOG=1` only for progress (a
+  finished supervisor cycle, a slideshow step, or in setup mode the page's loop
+  turning), never for the loop merely being alive, and `WatchdogSec=300` ends one
+  that stops (`notify.Watchdog`, `PettingSupervisor`; `test_the_unit_waits_for_the_players_word_and_ends_one_that_stops_making_progress`).
+  **`NotifyAccess=all`, because the unit's main process is `uv`**, which starts the
+  Player's Python as its child, so `main` would have systemd drop every message.
+  The watchdog's signal is SIGTERM (`WatchdogSignal=SIGTERM`), the norm's stop, so
+  a restart closes the art channel; **a Player whose event loop is itself stuck
+  cannot run that handler and is SIGKILLed after `TimeoutAbortSec=90`**, the one
+  way out of a loop that will not turn, the same exception the unit already
+  accepts for a wedged panel driver. Setup mode's pet proves the loop turns, not
+  that a request was answered, because probing the page would need an HTTP client
+  beside the pull's and a false failure would restart the Player under someone
+  mid-setup. A single stuck wall worker is not watched, by design.
+- **Restricted further, with no change of path, device or ownership.**
+  `LockPersonality`, `RestrictNamespaces`, `RestrictSUIDSGID`, `RestrictRealtime`,
+  `ProtectHostname`, `ProtectKernelLogs`, `ProtectControlGroups`,
+  `SystemCallArchitectures=native` and an empty `CapabilityBoundingSet`, each
+  checked in the unit's comments against what the Player and mpv open
+  (`test_the_unit_is_restricted_as_far_as_needs_no_path_device_or_update_step`).
+  `ProtectClock=` is left out and forbidden by that test, because it implies a
+  device allowlist that would hide the display card, SPI, GPIO and the DDC bus.
+  None of it has run under systemd (the last bullet).
 - **mpv starts with only `PATH`, `HOME`, `XDG_CACHE_HOME`, `LANG` and `LC_ALL`**
   (`mpv.MPV_ENVIRONMENT`), so no token, cookie or other `.env` value reaches the
   process that decodes files strangers posted. **mpv still runs as `tvpi`**, which
   can read `.env`, the settings file and the token file; the environment is not
-  the only door, and closing the others waits on the same ruling.
-- **Not yet run under systemd.** Whether the hardened unit starts, whether it still
-  draws on the screen, the label and the DDC bus, whether mpv draws with the
-  reduced environment, and whether the kernel enforces the memory bound are the
-  operator's checks on the Pi (the runbook's steps 9a and 14a).
+  the only door. **That is the owner's accepted state** (2026-11-19, "not now":
+  root-owned code and `ProtectSystem=strict` are "too heavy for right now", and
+  the wave-1 sandbox "stands as it is"); closing the other doors waits on that
+  ruling being reopened, and no unit directive added since changes it.
+- **Not yet run under systemd.** Whether the hardened unit starts and reaches
+  `active` in every mode, whether it still draws on the screen, the label and the
+  DDC bus, whether mpv draws with the reduced environment, whether the kernel
+  enforces the memory bound, and whether a stopped Player is restarted by the
+  watchdog are the operator's checks on the Pi (the runbook's steps 9a, 13a–14c).
 
 `tests/test_deploy_unit.py` also checks the environment file, the restart
 policy, the absolute interpreter path, no home-directory path and the stop

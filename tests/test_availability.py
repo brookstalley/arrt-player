@@ -1,4 +1,4 @@
-"""A television that is asleep, and a the server that is gone.
+"""A television that is asleep, and a server that is gone.
 
 Neither is an incident. The set is asleep most of the time, and the ratified norm
 says the Player's ability to show art never depends on the other one being

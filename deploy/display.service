@@ -28,7 +28,61 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# **Started once the Player says so, and restarted when it stops making
+# progress.** The Player sends READY=1 when its mode is running and WATCHDOG=1
+# each time it makes progress (`src/arrt_player/notify.py`): the supervisor
+# finished a cycle, the slideshow reached its next step, or, in setup mode, the
+# page is still served by a loop that turns. Never for the loop merely being
+# alive. A start refused by configuration sends nothing and exits 2, which
+# Restart=always answers every RestartSec, as before.
+Type=notify
+# **`all`, not `main`, because the main process is uv.** `uv run` starts the
+# Player's Python as its child and waits for it (measured with uv 0.11: the
+# Player's parent process is `uv`; the runbook checks it on the Pi), so with
+# `main` systemd would drop every message the Player sends, never see READY=1,
+# and fail each start at TimeoutStartSec. Every process in
+# this cgroup is the Player's own: uv, its Python, and the slideshow's mpv,
+# whose environment is an allowlist without NOTIFY_SOCKET (`mpv.MPV_ENVIRONMENT`).
+NotifyAccess=all
+# **Above the longest honest gap between two pets, with room for the stalls no
+# constant bounds.** In Arrt mode a pet follows each finished supervisor cycle:
+# the 30 s client poll (`config.DEFAULT_CLIENT_POLL_SECONDS`), the Frame's
+# identity read (5 s, `client.IDENTITY_READ_BUDGET_SECONDS`), the heartbeat and
+# the client document (30 s each, the client session's total timeout in
+# `pull.ClientPull`), and a pet held back by the rate limit (5 s,
+# `notify.PET_MIN_SECONDS`): 100 s. In slideshow mode a pet follows each step:
+# the longest wait (5 s, `NOT_SHOWN_PAUSE_S`), then the longest load (mpv
+# stopped, 5 s; started, 2 x `START_TIMEOUT_SECONDS`; the file put up, 4 x
+# `LOAD_TIMEOUT_SECONDS`: 85 s) and the rate limit: 95 s. Setup mode pets every
+# 30 s (`notify.SETUP_PET_SECONDS`). What no constant bounds is given the
+# 200 s left: the first pass's integrity read of every composed picture on the
+# loop (the operator's check 12 measures it), a retired wall's directory
+# removed in the cycle, a Pi reclaiming memory at MemoryHigh. The wall's own
+# long waits (a slot's dwell, the pull's one-minute backoff, a master's
+# minutes of download, a failing master's ten-minute hold) run on tasks beside
+# the supervisor and never delay its cycle. Too short restarts a healthy Player,
+# and a restart reconnects to the Frame; tests/test_deploy_unit.py derives the
+# floor from the same constants.
+WatchdogSec=300
+# **The orderly stop, as `systemctl stop` sends it**: the stop event, every
+# worker closing what it holds, the art channel closed. systemd sends SIGCONT
+# after it, so a Player held by SIGSTOP stops this way too. A Player whose event
+# loop is itself stuck never runs the handler that sets the stop event; after
+# TimeoutAbortSec it is SIGKILLed, the one way out of a loop that will not
+# turn, as TimeoutStopSec's comment below accepts for a wedged panel driver.
+WatchdogSignal=SIGTERM
+# **The same window as TimeoutStopSec, stated rather than inherited.** Unset,
+# systemd falls back to TimeoutStopSec unless the manager's
+# DefaultTimeoutAbortSec says otherwise; a watchdog's SIGTERM can land inside a
+# television connection exactly as `systemctl stop`'s can.
+TimeoutAbortSec=90
+# **Room for a start that syncs.** Type=simple had no start deadline; now a
+# start is failed if READY=1 has not come by this. A start is seconds, but
+# `uv run` installs what the lock names and the venv lacks before the Player
+# runs, and killing that install every 90 s (the default) would never let it
+# finish. The runbook syncs before it starts, so this is the margin, not the
+# plan.
+TimeoutStartSec=600
 User=tvpi
 Group=tvpi
 
@@ -78,6 +132,53 @@ ProtectHome=yes
 # which glibc's getaddrinfo opens to learn the host's addresses for the
 # AI_ADDRCONFIG flag aiohttp's resolver passes.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# (AF_UNIX also carries READY=1 and WATCHDOG=1: NOTIFY_SOCKET is a datagram
+# socket under /run/systemd, which nothing above hides.)
+
+# **The restrictions that change no path, device or update step**, each checked
+# against what the Player and mpv do: they open the display card, the render
+# node, SPI, GPIO, the DDC bus and the decoder (`/dev/video*`) through the
+# groups above, write under CACHE_DIR, the checkout and /var/lib/tvpi, run uv,
+# Python and mpv (aarch64, none set-uid or carrying file capabilities), and
+# open the sockets above. None of the lines below names a path or a device.
+#
+# personality(2) left as it is: nothing here changes its execution domain.
+LockPersonality=yes
+# No new namespace of any kind: neither Python, uv nor mpv makes one (mpv runs
+# no sandbox of its own). systemd's own, for the lines above, are made before.
+RestrictNamespaces=yes
+# No set-user-id or set-group-id bit set on a file: the Player's only chmods
+# make its settings and the television's token 0600.
+RestrictSUIDSGID=yes
+# No realtime scheduling: mpv is started with --no-audio, so it has no audio
+# thread to raise, and neither the panel's driver nor the Player asks for one.
+RestrictRealtime=yes
+# The hostname neither set nor seen to change: the settings page reads it once
+# for the address it prints, from the namespace's copy taken at start.
+ProtectHostname=yes
+# /dev/kmsg and /proc/kmsg hidden and syslog(2) refused: the Player's journal
+# is its own stdout and stderr, which this leaves.
+ProtectKernelLogs=yes
+# /sys/fs/cgroup read-only: the memory bounds above are systemd's to apply,
+# and the Player reads and writes nothing there.
+ProtectControlGroups=yes
+# System calls of this machine's own architecture only; the Pi's uv, Python
+# and mpv are all aarch64 (Trixie, `deploy/README.md`).
+SystemCallArchitectures=native
+# No capability can be gained. tvpi holds none and nothing it runs carries
+# one, so this takes nothing away; it closes the road for a binary that would.
+CapabilityBoundingSet=
+#
+# **Left out on purpose, each because it would hide a device or a path:**
+# ProtectClock= (it implies DeviceAllow=char-rtc, and one DeviceAllow= turns
+# the device policy into an allowlist: the display card, the render node, SPI,
+# GPIO and the DDC bus would all be refused at the next start),
+# PrivateDevices=, DevicePolicy=, DeviceAllow=, ProtectKernelModules= and
+# ProtectKernelTunables= (/dev and /sys), MemoryDenyWriteExecute= (mpv's GPU
+# drivers and the libraries Python loads can map code they write),
+# ProcSubset=pid (the GPIO libraries can read the board from /proc), and
+# ProtectSystem=strict, which waits on the checkout being root's (the owner,
+# 2026-11-19: "not yet").
 
 # **A bound on memory, so an exhausted Pi loses the Player and not sshd.** As a
 # share of the Pi's RAM, so one line fits any Pi: 4.8 GB and 6 GB on the

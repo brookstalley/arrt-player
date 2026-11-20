@@ -22,6 +22,8 @@ it, and ending the worker when it dies, so the supervisor starts both again.
 """
 
 import asyncio
+import dataclasses
+from functools import partial
 from typing import ClassVar
 
 import pytest
@@ -325,6 +327,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
     A crash used to write `daemon.stopped` at INFO — the identical line a clean
     shutdown writes — so an operator reading the log could not tell a wall
     somebody switched off from one falling over in a `Restart=always` loop.
+    The Frame wall's lines are `frame.crashed` and `frame.stopped` since wave 2's
+    Chunk 03 (`FrameDisplay.journal_name`).
     """
     import logging
 
@@ -343,8 +347,8 @@ async def test_a_crash_is_distinguishable_from_a_clean_stop_in_the_log(settings,
         await daemon.run(asyncio.Event())
 
     events = [r.__dict__.get("event") for r in caplog.records]
-    assert "daemon.crashed" in events, "a crash left no ERROR behind"
-    assert "daemon.stopped" not in events, "a crash reported itself as a clean shutdown"
+    assert "frame.crashed" in events, "a crash left no ERROR behind"
+    assert "frame.stopped" not in events, "a crash reported itself as a clean shutdown"
     assert any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
@@ -465,16 +469,134 @@ async def test_a_store_from_a_newer_player_parks_its_wall_and_says_so_once(monke
 async def test_a_frame_wall_called_once_more_after_it_was_taken_away_touches_nothing(monkeypatch, settings, tv):
     """The supervisor calls a worker once more, already stopped, when its wall is taken
     away while it waits to restart; for the Frame that is no loop, no pull and no set."""
-    from arrt_player.client import WallStop
+    from arrt_player.client import WorkerStop
 
     async def must_not_run(stop) -> None:
         raise AssertionError("the Frame's loop ran for a wall that was taken away")
 
     _wire(monkeypatch, tv, daemon_run=must_not_run)
-    stop = WallStop()
+    stop = WorkerStop()
     stop.retire()
 
     await asyncio.wait_for(entry.run_frame_wall(settings, stop), timeout=5)
 
     assert _PullRecorder.started == []
     assert not settings.state_path.exists(), "the wall's store was opened for a wall that was taken away"
+
+
+# -- which outputs a Player reports and draws on, with and without the file outputs ----------
+
+
+_CONNECTORS = {"card1-HDMI-A-1": ("connected", "1920x1080\n"), "card1-HDMI-A-2": ("disconnected", "")}
+
+
+@pytest.fixture
+def connectors(tmp_path, monkeypatch):
+    """A kernel listing a connected screen and an empty socket, as every output reader of the entry point sees it."""
+    from fakes import drm_tree
+
+    from arrt_player.client import client_outputs
+
+    drm = drm_tree(tmp_path / "drm", _CONNECTORS)
+    monkeypatch.setattr(entry, "client_outputs", partial(client_outputs, drm_root=drm))
+    return drm
+
+
+@pytest.fixture
+def drawing_to_files(client_settings, tmp_path):
+    from arrt_player.config import FileOutputSettings
+
+    return dataclasses.replace(
+        client_settings,
+        frame=None,
+        files=FileOutputSettings(directory=tmp_path / "drawn", screen=(640, 360), label=True),
+    )
+
+
+def test_without_the_file_outputs_a_player_reports_exactly_its_hardware(client_settings, connectors):
+    from arrt_player.client import client_outputs
+
+    reported = entry.player_outputs(client_settings, frame_identity="the-frames-duid")
+
+    assert reported == client_outputs(client_settings, drm_root=connectors, frame_identity="the-frames-duid")
+    assert [(output.name, output.kind) for output in reported] == [
+        ("frame", "frame"),
+        ("hdmi-a-1", "framebuffer"),
+        ("hdmi-a-2", "framebuffer"),
+    ]
+    assert entry.label_panels(client_settings) == {}, "a Player with no panel and no file label holds a label output"
+
+
+def test_drawing_to_files_it_reports_its_file_outputs_instead_of_its_hardware(drawing_to_files, connectors):
+    from arrt_player.displays.file_output import FileLabelPanel
+
+    reported = entry.player_outputs(drawing_to_files)
+
+    assert [output.document() for output in reported] == [
+        {"name": "file-screen-0", "kind": "framebuffer", "connected": True, "screen": [640, 360]}
+    ], "a connected HDMI screen was listed beside the file screen"
+    panels = entry.label_panels(drawing_to_files)
+    assert list(panels) == ["file-label-0"]
+    assert isinstance(panels["file-label-0"], FileLabelPanel)
+    assert panels["file-label-0"].report().document() == {
+        "name": "file-label-0",
+        "kind": "epaper",
+        "connected": True,
+        "size": [1448, 1072],
+    }
+    no_label = dataclasses.replace(drawing_to_files, files=dataclasses.replace(drawing_to_files.files, label=False))
+    assert entry.label_panels(no_label) == {}
+
+
+class _DrawnOn:
+    """What `run_wall` would leave black: the output it built, captured at `go_dark`."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.outputs: list[object] = []
+
+        async def captured(output, *, wall_id, output_name):
+            self.outputs.append(output)
+
+        monkeypatch.setattr(entry, "go_dark", captured)
+
+
+async def _retired_run(settings, name: str, kind: str = "framebuffer") -> None:
+    from arrt_player.client import OutputReport, WorkerStop
+
+    stop = WorkerStop()
+    stop.retire()
+    output = OutputReport(name=name, kind=kind, connected=True, screen=(640, 360))
+    await entry.run_wall(settings, settings.wall("living-room"), output, stop)
+
+
+async def test_a_wall_on_an_hdmi_connector_is_drawn_through_kernel_mode_setting(monkeypatch, client_settings, drawing_to_files):
+    from arrt_player.kms import KmsOutput
+
+    drawn = _DrawnOn(monkeypatch)
+
+    await _retired_run(client_settings, "hdmi-a-1")
+    # Without the file outputs, a connector that happens to share the file screen's name is still a connector.
+    await _retired_run(client_settings, "file-screen-0")
+
+    assert [type(output) for output in drawn.outputs] == [KmsOutput, KmsOutput]
+
+
+async def test_a_wall_on_the_file_screen_is_drawn_to_its_directory_and_follows_no_sun(monkeypatch, drawing_to_files):
+    from arrt_player.displays.file_output import FileScreenOutput
+
+    drawn = _DrawnOn(monkeypatch)
+
+    await _retired_run(drawing_to_files, "file-screen-0")
+
+    assert [type(output) for output in drawn.outputs] == [FileScreenOutput]
+    assert drawn.outputs[0].directory == drawing_to_files.files.directory / "file-screen-0"
+    assert drawn.outputs[0].screen == (640, 360)
+
+    called: dict[str, object] = {}
+
+    async def recording(wall, output, stop, **kwargs):
+        called.update(kwargs)
+
+    monkeypatch.setattr(entry, "run_screen_wall", recording)
+    await _retired_run(drawing_to_files, "file-screen-0")
+    assert called.get("brightness") is None, "the file screen was handed a brightness to drive over DDC/CI"

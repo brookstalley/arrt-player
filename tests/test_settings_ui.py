@@ -9,6 +9,7 @@ log record.
 
 import asyncio
 import base64
+import dataclasses
 import html
 import json
 import logging
@@ -28,9 +29,13 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from conftest import journal
 
+# The configuration's own refused examples, so the page is held to the same ones a start refuses.
+from test_config import FRAME, REFUSED_SECONDS, REFUSED_TV_ADDRESSES, SECONDS_KEYS, a_slideshow, an_environment
+
 from arrt_player import __main__ as entry
+from arrt_player import config
 from arrt_player.client import OutputReport, player_name
-from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequired, UiSettings
+from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequired, UiSettings, load
 from arrt_player.programmes.slideshow_status import SlideshowStatus
 from arrt_player.settings_ui import auth, store
 from arrt_player.settings_ui import server as server_module
@@ -90,7 +95,8 @@ class TestTheFile:
         [
             ("not json", "not JSON"),
             ("[]", "object"),
-            ('{"version": 3}', "version 3"),
+            # The first layout past the newest this code reads, whatever that is.
+            (f'{{"version": {store.VERSION + 1}}}', f"version {store.VERSION + 1}"),
             ('{"version": true}', "version True"),
             ('{"version": 1, "values": {"CACHE_DIR": "/elsewhere"}}', "CACHE_DIR"),
             ('{"version": 1, "values": {"SERVER_URL": 8770}}', "not text"),
@@ -1119,12 +1125,11 @@ async def signed_in(page: TestClient) -> TestClient:
 
 def pin(state: PageState, **values: str) -> None:
     """The environment setting these keys, as `load_ui` would have resolved it."""
-    state.ui = UiSettings(
-        cache_dir=state.ui.cache_dir,
-        bind=state.ui.bind,
-        port=state.ui.port,
+    state.ui = dataclasses.replace(
+        state.ui,
         pinned=frozenset(values),
         pinned_values={name: value for name, value in values.items() if name != "CLIENT_TOKEN"},
+        environment={**state.ui.environment, **values},
     )
 
 
@@ -1763,3 +1768,509 @@ class TestWhatTheSlideshowSays:
         assert 'value="slideshow" checked' not in before
         assert 'value="slideshow" checked' in after
         assert 'value="arrt" checked' not in after
+
+
+# -- the Frame's address, the server's name, and what a save says (Chunk 09) ---------------
+
+#: The sun a Frame follows, without the Frame: what a Player with a Frame keeps in `.env`.
+LOCATION = {key: value for key, value in FRAME.items() if key != "TV_ADDRESS"}
+#: Two television addresses, from the range kept for documentation (RFC 5737).
+OLD_SET, NEW_SET = "192.0.2.20", "192.0.2.21"
+SERVER = "http://arrt.example:8770"
+
+
+def give_location(state: PageState, **environment: str) -> None:
+    """The Player started with a location in `.env`, and keeps its pairing token where the Frame would."""
+    state.ui = dataclasses.replace(
+        state.ui, environment={**LOCATION, **environment}, tv_token_file=state.ui.cache_dir / config.TV_TOKEN_FILENAME
+    )
+
+
+def paired(state: PageState) -> Path:
+    """A pairing token on disk, as the library leaves one."""
+    path = state.ui.tv_token_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("the-sets-token", encoding="utf-8")
+    return path
+
+
+def running(state: PageState, cache_dir: Path, values: dict[str, str]) -> None:
+    """A Player out of setup mode, its page's file holding `values`."""
+    stored = store.read(cache_dir)
+    store.write(cache_dir, stored.with_values(values))
+    state.missing = ()
+
+
+def alert(document: str) -> str:
+    """The page's problem paragraph, as a person reads it."""
+    found = re.findall(r'<p class="note error" role="alert">(.*?)</p>', document)
+    assert len(found) == 1, f"expected one problem paragraph, found {found}"
+    return html.unescape(found[0])
+
+
+def said(document: str) -> str:
+    return visible(document)
+
+
+def refusal_from_load(environment: dict[str, str]) -> str:
+    with pytest.raises(ConfigError) as raised:
+        load(environment)
+    return str(raised.value)
+
+
+class TestTheFramesAddress:
+    async def test_an_address_saved_here_is_the_one_the_next_start_gives_the_frame(self, signed_in, state, cache_dir, restarts):
+        give_location(state)
+
+        response = await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=f" {NEW_SET} ")
+
+        assert response.status == 200
+        assert load({"CACHE_DIR": str(cache_dir), **LOCATION}).frame.tv_address == NEW_SET
+        assert '"version": 3' in store.path_in(cache_dir).read_text(encoding="utf-8")
+
+    async def test_before_any_save_the_page_says_a_new_address_asks_that_set_to_pair(self, signed_in):
+        document = await (await signed_in.get("/")).text()
+
+        assert '<input id="tv_address" name="tv_address" value=""' in document
+        assert "the television at the new address is asked to pair: expect a prompt on that set" in said(document)
+        assert "forgets this Player's pairing with the set at the old one" in said(document)
+        # What happens to the pictures, on each television: the Player tells them apart by their own ids.
+        assert "The same television at a new address keeps the pictures this Player put on it" in said(document)
+        assert "old television keeps this Player's pictures until the Player is pointed at it again" in said(document)
+
+    async def test_a_new_address_forgets_the_old_sets_pairing_and_says_so(self, signed_in, state, cache_dir, restarts):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        token = paired(state)
+
+        response = await save(signed_in, server_url=SERVER, tv_address=NEW_SET)
+
+        assert not token.exists(), "the old set's token would be sent to the new address"
+        text = said(await response.text())
+        assert f"The television at {NEW_SET} will be asked to pair as the Player starts again" in text
+        assert f"The pairing with the television at {OLD_SET} is forgotten." in text
+        assert f"If the set at {NEW_SET} is the same television, the pictures this Player put on it are kept" in text
+        assert f"the television at {OLD_SET} keeps the pictures this Player put on it until" in text
+
+    async def test_clearing_the_address_forgets_the_pairing_and_says_there_is_no_frame(
+        self, signed_in, state, cache_dir, restarts
+    ):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        token = paired(state)
+
+        response = await save(signed_in, server_url=SERVER, tv_address="")
+
+        assert not token.exists()
+        assert "TV_ADDRESS" not in store.read(cache_dir).values
+        assert "This Player no longer drives a Frame" in said(await response.text())
+        assert "The pictures it put on the television stay there." in said(await response.text())
+        assert '"version": 2' in store.path_in(cache_dir).read_text(encoding="utf-8")
+
+    async def test_an_address_set_beside_a_token_kept_from_before_forgets_it(self, signed_in, state, restarts):
+        """A token whose set the page never knew (an address once in `.env`) may be any set's."""
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN)
+        token = paired(state)
+
+        response = await save(signed_in, server_url=SERVER, tv_address=NEW_SET)
+
+        assert not token.exists()
+        assert "The pairing kept from an earlier television is forgotten." in said(await response.text())
+        assert "a television this Player drove before keeps the pictures this Player put on it" in said(await response.text())
+
+    async def test_the_same_address_saved_again_keeps_the_pairing(self, signed_in, state, cache_dir, restarts):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        token = paired(state)
+
+        response = await save(signed_in, server_url=SERVER, tv_address=OLD_SET, player_name="Hall")
+
+        assert token.exists()
+        assert store.read(cache_dir).values["PLAYER_NAME"] == "Hall"
+        assert "pair" not in said(await response.text())
+
+    async def test_a_refused_save_keeps_the_pairing(self, signed_in, state, cache_dir, restarts):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        token = paired(state)
+
+        response = await save(signed_in, server_url=SERVER, tv_address=REFUSED_TV_ADDRESSES[0])
+
+        assert response.status == 400
+        assert token.exists()
+        assert store.read(cache_dir).values["TV_ADDRESS"] == OLD_SET
+
+    async def test_a_token_that_will_not_go_saves_nothing(self, signed_in, state, cache_dir, restarts, caplog):
+        """The new address is not written while the old set's token is still where the Frame reads it."""
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        await settled()
+        state.ui.tv_token_file.mkdir()  # a path `unlink` refuses, as a read-only directory would
+
+        response = await save(signed_in, server_url=SERVER, tv_address=NEW_SET)
+        await settled()
+
+        assert response.status == 500
+        assert "could not be forgotten" in alert(await response.text())
+        assert store.read(cache_dir).values["TV_ADDRESS"] == OLD_SET
+        assert restarts.count == 1, "a save that saved nothing restarted the Player"
+        assert any(getattr(record, "event", None) == "settings_page.pairing_not_forgotten" for record in caplog.records)
+
+    async def test_a_file_that_will_not_write_once_the_pairing_is_forgotten_says_the_set_will_ask_again(
+        self, signed_in, state, cache_dir, restarts, monkeypatch
+    ):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        paired(state)
+
+        def refuse(*_args):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(store, "write", refuse)
+        response = await save(signed_in, server_url=SERVER, tv_address=NEW_SET)
+
+        assert response.status == 500
+        assert "already forgotten, so it will ask to pair again" in alert(await response.text())
+
+    @pytest.mark.parametrize("address", REFUSED_TV_ADDRESSES)
+    async def test_each_address_a_start_refuses_is_refused_here_in_the_same_words(
+        self, signed_in, state, cache_dir, restarts, address
+    ):
+        give_location(state)
+        words = refusal_from_load(an_environment(cache_dir, TV_ADDRESS=address))
+
+        response = await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=address)
+        await settled()
+
+        assert response.status == 400
+        assert alert(await response.text()) == words
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0
+
+    async def test_an_address_without_the_sun_a_frame_follows_is_refused_in_the_words_of_a_start(
+        self, signed_in, state, cache_dir, restarts
+    ):
+        """No field is wrong; together they would stop the Player, which is the case only the one validator sees."""
+        environment = an_environment(cache_dir, frame=False, TV_ADDRESS=NEW_SET)
+        words = refusal_from_load(environment)
+
+        response = await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=NEW_SET)
+        await settled()
+
+        assert response.status == 400
+        assert words in alert(await response.text())
+        assert "LATITUDE" in words
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0
+
+    async def test_an_address_on_a_player_drawing_to_files_is_refused_by_that_rule(
+        self, signed_in, state, cache_dir, restarts, tmp_path
+    ):
+        """`ClientSettings.files` drives no hardware, and refuses `TV_ADDRESS` beside it: from the page as from `.env`."""
+        files = {"FILE_OUTPUT_DIR": str(tmp_path / "drawn")}
+        give_location(state, **files)
+        words = refusal_from_load(an_environment(cache_dir, TV_ADDRESS=NEW_SET, **files))
+
+        shown = said(await (await signed_in.get("/")).text())
+        response = await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=NEW_SET)
+
+        assert "This Player draws to files (FILE_OUTPUT_DIR in .env), so it drives no television" in shown
+        assert response.status == 400
+        assert "FILE_OUTPUT_DIR is set beside TV_ADDRESS" in words
+        assert words in alert(await response.text())
+        assert store.read(cache_dir).values == {}
+
+    @pytest.mark.parametrize(
+        ("headers", "status"),
+        [({"Host": "rebound.example"}, server_module.HOST_REFUSED), ({"Origin": "http://elsewhere.example"}, 403)],
+    )
+    async def test_a_form_carrying_an_address_goes_through_the_host_and_origin_checks(
+        self, signed_in, state, cache_dir, restarts, headers, status
+    ):
+        give_location(state)
+        form = {"server_url": SERVER, "client_token": TOKEN, "player_name": "", "tv_address": NEW_SET}
+
+        response = await post(signed_in, "/settings", form, **headers)
+
+        assert response.status == status
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0
+
+
+class TestWhereAValueComesFrom:
+    """One rule (`config._beneath_the_environment`): `.env` wins, the page fills what it leaves empty. Both orders."""
+
+    async def test_an_address_env_sets_is_shown_read_only_and_says_which_of_the_pages_it_overrides(
+        self, signed_in, state, cache_dir, restarts
+    ):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+        pin(state, TV_ADDRESS=NEW_SET)
+
+        document = await (await signed_in.get("/")).text()
+        await save(signed_in, server_url=SERVER, tv_address="192.0.2.99")
+
+        assert f'name="tv_address" value="{NEW_SET}" disabled' in document
+        assert f"This page holds '{OLD_SET}' for it too, which is not used while .env sets it." in said(document)
+        assert "tv_address-pairing" not in document, "a save here changes no pinned address, so it forgets no pairing"
+        assert store.read(cache_dir).values["TV_ADDRESS"] == OLD_SET
+        assert load({**an_environment(cache_dir), "TV_ADDRESS": NEW_SET}).frame.tv_address == NEW_SET
+
+    async def test_the_pages_address_with_nothing_in_env_is_shown_editable_and_used(self, signed_in, state, cache_dir, restarts):
+        give_location(state)
+        await save(signed_in, server_url=SERVER, client_token=TOKEN, tv_address=OLD_SET)
+
+        document = await (await signed_in.get("/")).text()
+
+        assert f'name="tv_address" value="{OLD_SET}" aria-describedby' in document
+        assert "not used while .env sets it" not in said(document)
+        assert load({"CACHE_DIR": str(cache_dir), **LOCATION}).frame.tv_address == OLD_SET
+
+    async def test_a_value_env_pins_and_the_page_agrees_with_says_nothing_of_an_override(self, signed_in, state, cache_dir):
+        await save(signed_in, player_name="Hall")
+        pin(state, PLAYER_NAME="Hall")
+
+        assert "not used while .env sets it" not in said(await (await signed_in.get("/")).text())
+
+    async def test_a_secret_the_page_holds_under_an_env_one_is_never_shown(self, signed_in, state, cache_dir, restarts):
+        await save(signed_in, server_url=SERVER, client_token="the-pages-own-token")
+        pin(state, CLIENT_TOKEN=TOKEN)
+
+        document = await (await signed_in.get("/")).text()
+
+        assert "the-pages-own-token" not in document
+        assert TOKEN not in document
+        assert "This page holds a value for it too" in said(document)
+
+
+class TestWhatASaveSays:
+    async def test_it_names_what_changed_in_the_fields_words_and_that_the_player_restarts(self, signed_in, restarts):
+        response = await save(signed_in, server_url=SERVER, client_token=TOKEN)
+        await settled()
+
+        text = said(await response.text())
+        assert "Saved: Server address and Token." in text
+        assert "The Player is restarting onto them. Under systemd it is back in a few seconds" in text
+        assert restarts.count == 1
+
+    async def test_a_save_that_changes_nothing_says_nothing_restarts(self, signed_in, restarts):
+        await save(signed_in, player_name="Hall")
+
+        response = await save(signed_in, player_name="Hall")
+
+        assert "Nothing changed, so nothing was saved and nothing restarts." in said(await response.text())
+
+    async def test_slideshow_fields_saved_in_arrt_mode_say_it_stays_in_arrt_mode_and_restart_nothing(
+        self, signed_in, state, cache_dir, restarts, caplog
+    ):
+        """#46: the owner saved a listing with the mode still on Arrt, and the page let it look as if it took."""
+        running(state, cache_dir, {"SERVER_URL": SERVER, "CLIENT_TOKEN": TOKEN})
+        caplog.set_level(logging.INFO)
+
+        response = await save_slideshow(signed_in, server_url=SERVER, player_mode="arrt")
+        await settled()
+
+        text = said(await response.text())
+        assert "Saved: Listing address." in text, "the choice and the menu posted as they were are no change"
+        assert "Nothing restarts. The Player stays in Arrt mode, showing walls from its server" in text
+        assert "wait until the mode is A Reddit slideshow" in text
+        assert restarts.count == 0
+        assert store.read(cache_dir).values["SLIDESHOW_URL"]
+        saved = [record for record in caplog.records if getattr(record, "event", None) == "settings_page.saved"]
+        assert [record.restarting for record in saved] == [False]
+
+    async def test_in_setup_mode_they_restart_and_still_say_the_mode_did_not_change(self, signed_in, restarts):
+        response = await save_slideshow(signed_in, player_mode="arrt")
+        await settled()
+
+        assert "The Player stays in Arrt mode" in said(await response.text())
+        assert restarts.count == 1
+
+    async def test_a_running_slideshows_own_settings_restart_it(self, signed_in, state, cache_dir, restarts):
+        """The entry point gives a running slideshow's page its status and leaves `mode` at its default."""
+        running(
+            state, cache_dir, {"PLAYER_MODE": "slideshow", "SLIDESHOW_URL": LISTING_EXAMPLE, "REDDIT_SESSION": a_cookie(None)}
+        )
+        state.slideshow = SlideshowStatus()
+
+        response = await save_slideshow(signed_in, slideshow_url="https://www.reddit.com/r/EarthPorn/top/?t=year")
+        await settled()
+
+        text = said(await response.text())
+        assert restarts.count == 1
+        assert "The Player is restarting onto them." in text, "a slideshow told it restarts into the mode it is in"
+        assert "The Player stays" not in text
+
+    async def test_a_running_slideshow_saving_the_servers_settings_restarts_nothing(self, signed_in, state, cache_dir, restarts):
+        running(
+            state, cache_dir, {"PLAYER_MODE": "slideshow", "SLIDESHOW_URL": LISTING_EXAMPLE, "REDDIT_SESSION": a_cookie(None)}
+        )
+        state.slideshow = SlideshowStatus()
+
+        response = await save_slideshow(signed_in, slideshow_url=LISTING_EXAMPLE, server_url=SERVER, client_token=TOKEN)
+        await settled()
+
+        assert "Nothing restarts. The Player stays a Reddit slideshow" in said(await response.text())
+        assert restarts.count == 0
+
+    async def test_a_switch_of_mode_says_the_mode_it_restarts_into(self, signed_in, restarts):
+        response = await save_slideshow(signed_in, reddit_session=a_cookie(None))
+
+        assert "The Player is restarting as a Reddit slideshow." in said(await response.text())
+
+    async def test_it_names_the_walls_that_start_again(self, signed_in, state, cache_dir, restarts):
+        running(state, cache_dir, {"SERVER_URL": SERVER, "CLIENT_TOKEN": TOKEN})
+        document = {
+            "client_id": "c1",
+            "name": "Lounge",
+            "walls": [
+                {"wall_id": "w1", "name": "Hall", "output": "hdmi-a-1"},
+                {"wall_id": "w2", "name": "Office", "output": "frame"},
+            ],
+        }
+        (cache_dir / CLIENT_DOCUMENT_FILENAME).write_text(json.dumps(document), encoding="utf-8")
+
+        response = await save(signed_in, server_url=SERVER, client_token="a-new-token")
+
+        assert "and with it every wall it shows: Hall and Office." in said(await response.text())
+
+    async def test_a_save_that_leaves_setup_mode_short_says_what_is_still_missing(self, signed_in, restarts):
+        response = await save(signed_in, server_url=SERVER)
+
+        assert "Until Token is set, it serves only this page." in said(await response.text())
+
+
+class TestTheNameTheServerGives:
+    """audit-5 F7a: once paired, the name is the server's, shown read-only with where to change it."""
+
+    def given(self, cache_dir: Path, name: str = "Lounge") -> None:
+        (cache_dir / CLIENT_DOCUMENT_FILENAME).write_text(
+            json.dumps({"client_id": "c1", "name": name, "walls": []}), encoding="utf-8"
+        )
+
+    async def test_with_a_cached_document_it_is_the_servers_read_only_with_where_to_rename_it(
+        self, signed_in, cache_dir, restarts
+    ):
+        await save(signed_in, player_name="Our name")
+        self.given(cache_dir)
+
+        document = await (await signed_in.get("/")).text()
+
+        assert 'name="player_name" value="Lounge" disabled' in document
+        assert "To rename it, rename it on the server, under Settings › Players." in said(document)
+        assert "Its own name, used whenever the server's cannot be read, is Our name." in said(document)
+
+    async def test_without_one_it_is_the_players_own_and_editable(self, signed_in, restarts):
+        await save(signed_in, player_name="Our name")
+
+        document = await (await signed_in.get("/")).text()
+
+        assert 'name="player_name" value="Our name" aria-describedby' in document
+        assert "Settings › Players" not in said(document)
+
+    async def test_a_post_cannot_change_the_players_own_name_while_the_server_names_it(self, signed_in, cache_dir, restarts):
+        await save(signed_in, player_name="Our name")
+        self.given(cache_dir)
+
+        await save(signed_in, player_name="Changed")
+
+        assert store.read(cache_dir).values["PLAYER_NAME"] == "Our name"
+
+    async def test_a_form_without_the_name_leaves_it_as_it_is(self, signed_in, cache_dir, restarts):
+        await save(signed_in, player_name="Our name")
+
+        await post(signed_in, "/settings", {"server_url": SERVER, "client_token": TOKEN})
+
+        assert store.read(cache_dir).values["PLAYER_NAME"] == "Our name"
+
+
+class _Nesting(HTMLParser):
+    """Where the page's one save sits: the elements open around the button its caption describes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.open: list[tuple[str, dict[str, str | None]]] = []
+        self.around: list[tuple[str, dict[str, str | None]]] | None = None
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "input":
+            return
+        named = dict(attrs)
+        if tag == "button" and named.get("aria-describedby") == "act-caption":
+            self.around = list(self.open)
+        self.open.append((tag, named))
+
+    def handle_endtag(self, tag: str) -> None:
+        while self.open and self.open.pop()[0] != tag:
+            pass
+
+
+class TestThePagesOneSave:
+    """#46: the button sat inside "This Player", so it read as that section's, while it saved every one."""
+
+    async def test_it_is_the_settings_forms_and_inside_no_section(self, signed_in):
+        parser = _Nesting()
+        document = await (await signed_in.get("/")).text()
+        parser.feed(document)
+
+        assert parser.around is not None, "the page has no save"
+        assert [tag for tag, _ in parser.around if tag == "section"] == []
+        assert ("form", {"method": "post", "action": "/settings"}) in parser.around
+        assert "Saves every section above." in said(document)
+
+    async def test_without_a_cookie_the_slideshow_section_says_so_plainly(self, signed_in):
+        hint = re.search(r'id="reddit_session-hint">(.*?)</p>', await (await signed_in.get("/")).text()).group(1)
+
+        assert "No cookie is set. A slideshow cannot play without one: paste it here." in html.unescape(hint)
+        assert "keep the current one" not in hint
+
+    async def test_without_a_token_the_field_does_not_offer_to_keep_one(self, signed_in):
+        hint = re.search(r'id="client_token-hint">(.*?)</p>', await (await signed_in.get("/")).text()).group(1)
+
+        assert "No token is set." in hint
+        assert "keep the current one" not in hint
+
+
+class TestThePairingLabels:
+    """The server's dialog and this page say "Server address" and "Token" alike; here they are said in one place."""
+
+    async def test_the_fields_are_labelled_from_the_one_place(self, signed_in, monkeypatch):
+        monkeypatch.setattr(
+            server_module, "PAIRING_LABELS", {"SERVER_URL": "The server's words", "CLIENT_TOKEN": "Its other words"}
+        )
+
+        document = await (await signed_in.get("/")).text()
+
+        assert '<label for="server_url">The server&#x27;s words</label>' in document
+        assert '<label for="client_token">Its other words</label>' in document
+
+    def test_the_labels_are_written_nowhere_else_in_the_page(self):
+        source = Path(server_module.__file__).read_text(encoding="utf-8")
+
+        assert [source.count(f'"{label}"') for label in server_module.PAIRING_LABELS.values()] == [1, 1]
+
+
+#: A listing Reddit's slideshow takes, the test's own.
+LISTING_EXAMPLE = "https://www.reddit.com/r/EarthPorn/top/?t=month"
+
+#: The `*_SECONDS` keys the page writes, from the configuration's own scan and the page's own keys.
+PAGE_SECONDS_KEYS = sorted(set(SECONDS_KEYS) & set(store.MANAGED_KEYS))
+
+
+class TestTheSecondsThePageWrites:
+    def test_the_page_writes_some(self):
+        assert PAGE_SECONDS_KEYS == ["SLIDESHOW_MAX_SECONDS", "SLIDESHOW_MIN_SECONDS"]
+
+    @pytest.mark.parametrize("value", REFUSED_SECONDS)
+    @pytest.mark.parametrize("key", PAGE_SECONDS_KEYS)
+    async def test_each_value_a_start_refuses_is_refused_here_with_its_reason(self, signed_in, cache_dir, restarts, key, value):
+        words = refusal_from_load(a_slideshow(cache_dir, **{key: value}))
+
+        response = await save_slideshow(signed_in, reddit_session=a_cookie(None), **{server_module._SLIDESHOW_FIELDS[key]: value})
+        await settled()
+
+        assert response.status == 400
+        assert alert(await response.text()) in words, "the page's reason is not the one a start gives"
+        assert store.read(cache_dir).values == {}
+        assert restarts.count == 0

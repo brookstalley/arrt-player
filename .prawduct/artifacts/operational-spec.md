@@ -36,7 +36,8 @@ for a release.
 | Interpreter | `/usr/local/bin/uv run --frozen --no-dev --group raster --group epaper python -m arrt_player`, named absolutely: a start takes the lockfile as it is and never resolves over the network |
 | Account | A system account named by the unit's `User=`, with `SupplementaryGroups=spi gpio video` |
 | Dependency groups | `uv sync --frozen --no-dev --group raster --group epaper` on the Pi. A bare `uv sync` removes both, and the label stops (CLAUDE.md, runbook step 8) |
-| Bounds and sandbox | `MemoryHigh=60%`, `MemoryMax=75%`; `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome=yes`, `RestrictAddressFamilies` (`security-model.md` § The deploy unit) |
+| Bounds and sandbox | `MemoryHigh=60%`, `MemoryMax=75%`; `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome=yes`, `RestrictAddressFamilies`, and the restrictions that move no path or device (`security-model.md` § The deploy unit) |
+| Start and watchdog | `Type=notify`, `NotifyAccess=all` (the main process is `uv`), `WatchdogSec=300`, `WatchdogSignal=SIGTERM`, `TimeoutStartSec=600`, `TimeoutAbortSec=90`. The Player sends `READY=1` when its mode runs and `WATCHDOG=1` only for progress (`notify.py`); a Player that stops making progress is stopped by SIGTERM and started again by `Restart=always` |
 | Inbound | The settings page on `UI_BIND`:`UI_PORT` (default 8771), which answers only to its own names (`UI_ALLOWED_HOSTS` adds more) and nothing else. Otherwise it makes outbound HTTP to `SERVER_URL` and talks to the Frame on its LAN address |
 
 **Guarded properties of the unit**, each held by `tests/test_deploy_unit.py`: the
@@ -45,12 +46,13 @@ start rate limit (`StartLimitIntervalSec=0`) and `RestartSec=` is at least 5; no
 path is under a home directory; the interpreter is absolute and frozen, without the
 dev group; `MemoryHigh` sits below `MemoryMax`, both a share of RAM; the sandbox
 directives are set and the devices the walls draw through stay reachable;
-`TimeoutStopSec` is at least 45 and `KillSignal=SIGTERM`.
+`TimeoutStopSec` is at least 45 and `KillSignal=SIGTERM`; the unit waits for the Player's word and ends one that stops making progress, a start that syncs is not killed before it finishes, and the directives the sandbox must not move are as they were.
 
 **Nothing of the hardened unit has run under systemd.** Whether the kernel enforces
 the memory bound, whether the sandboxed Player starts and draws on the screen, the
-label and the DDC bus, and whether mpv draws with its reduced environment are the
-operator's checks on the Pi (runbook steps 9a and 14a).
+label and the DDC bus, whether mpv draws with its reduced environment, whether each
+mode reaches `active` under `Type=notify`, and whether the watchdog restarts a
+stopped Player are the operator's checks on the Pi (runbook steps 9a, 13a to 14c).
 
 **A release** is `.prawduct/runbooks/moving-the-pi-player-to-a-new-revision.md`:
 § The first time moves a Pi off the shared monorepo checkout once, and § Steps
@@ -77,12 +79,16 @@ it when wave 3 landed). For the current checks, use runbook steps 13–16.
 ### Configuration
 
 `.env.example` is the specification. Three values are required and have no
-default: `SERVER_URL`, `CLIENT_TOKEN`, `CACHE_DIR` (`config.load`). `TV_ADDRESS`
-gives the client a Frame output and makes `LOCATION_NAME`, `LATITUDE` and
+default: `SERVER_URL`, `CLIENT_TOKEN`, `CACHE_DIR` (`config.load`); the first two
+may be set on the settings page instead. `TV_ADDRESS` (also the page's) gives the
+client a Frame output and makes `LOCATION_NAME`, `LATITUDE` and
 `LONGITUDE` required (`config._frame`). `EPD_DEVICE` gives it a label output, which
 draws only once `EPD_PANEL_DIAGONAL_INCHES` and `EPD_VIEWING_DISTANCE_INCHES` are
-set. Values in the process environment win over `.env` (`load_dotenv()` without
-`override`).
+set; one panel is the limit by the owner's ruling of 2026-11-19, and a value
+naming more is refused. `FILE_OUTPUT_DIR` makes a Player that draws to files and
+drives no hardware (`FILE_OUTPUT_SCREEN`, `FILE_OUTPUT_LABEL`), refused beside
+`TV_ADDRESS` or `EPD_DEVICE`. Values in the process environment win over `.env`
+(`load_dotenv()` without `override`), and over the page's file.
 
 Some intervals are constants in code and not settable from `.env`: the client poll
 (30 s), the label poll (1 s), the heartbeat (60 s), the pull's backoff (2–60 s), the
@@ -145,22 +151,34 @@ Player rebuilds by pulling again. What each loss costs:
 |---|---|---|
 | A wall's media or manifest under `CACHE_DIR` | A re-pull from the server. While the server is also down, the wall has nothing to show | Automatic once the server answers |
 | `CACHE_DIR/.client.json` | Until the server answers, a restarted client knows no walls (`ClientPull.cached`) | Automatic once the server answers |
-| A Frame wall's `display-state.sqlite` | Reconciliation removes every image on the set it cannot account for and uploads the wall again. `deploy/README.md` records about 3.5 minutes for 40 works on a fresh device | Automatic |
+| A Frame wall's `display-state.sqlite` | Reconciliation removes every image on the set it cannot account for and uploads the wall again; **that includes pictures the household put in the set's uploaded-pictures category**. `deploy/README.md` records about 3.5 minutes for 40 works on a fresh device | Automatic |
+| A departed wall's directory | Removed a week after the wall left this Player, counted only while the Player reads its client document; nothing to recover | Automatic (`client.WallCaches`) |
 | The TV token file (default `$CACHE_DIR/token_file`, so wiping `CACHE_DIR` loses it) | A pairing prompt on the television, which somebody has to accept at the set | By hand, at the set |
-| `.env` | The client token is shown once by the server and kept only in `.env` | Issue a new token on the server (Settings › Clients) and rebuild `.env` from `.env.example` |
+| `.env` | The client token is shown once by the server and kept only in `.env` | Issue a new token on the server (Settings › Players) and rebuild `.env` from `.env.example` |
 
 **One state change is one-way.** `display-state.sqlite` carries a schema version
-(`state/store.SCHEMA_VERSION`, 2 today). A Player older than the store refuses it
-and parks that wall (`StateSchemaTooNew`). So rolling back across a release that
-bumps it needs the store removed, at the cost of a re-upload. The settings file's
-layout is versioned too: from v0.8.0 it is layout 2, which an older Player refuses
-by name (exit 2). The runbook's § Going back says what migrates and what to undo.
+(`state/store.SCHEMA_VERSION`, 4 today: 3 added the time a work was last named,
+4 the set's identity and the table that holds another set's bindings aside). A
+Player older than the store refuses it and parks that wall (`StateSchemaTooNew`).
+So rolling back across a release that bumps it needs, on each Frame wall's store,
+the Player stopped and `PRAGMA user_version` set to what the older release
+writes (2 for the release before this one), at the cost of one re-upload per work;
+rolling forward again forgets the recorded identity and takes the first one read.
+Removing the store also works, at the cost of re-uploading the whole library.
+**Before the upgrade, if a Frame's address was ever moved to a different
+television, delete that wall's `display-state.sqlite` first**: nothing on the Pi
+records which set the old rows were made on, so a store from before the identity
+takes the first set it meets as the one they belong to (`data-model.md`
+§ DisplayState). The settings file's layout is versioned too: it is layout 2 or,
+while it holds `TV_ADDRESS`, layout 3, which a release that writes layout 2
+refuses by name (exit 2). The runbook's § Going back says what migrates and what
+to undo.
 
 ## Monitoring
 
 Nothing pages anyone. A failure is noticed when somebody looks at one of these.
 
-- **The server's view of the client.** Settings › Clients, or
+- **The server's view of the client.** Settings › Players, or
   `GET /api/clients` (`heartbeat.age_seconds`, `heartbeat.problem`), and
   `GET /api/walls` (`reads_feed`, `feed_notice`). Runbook steps 15–16 give the
   commands and the expected values. While the server is reachable, the client
@@ -187,8 +205,12 @@ on a current cache has none); `pull.unreachable`,
 `pull.work_skipped`; `pull.crashed`, `client.worker_crashed`,
 `client.worker_ended`, `client.label_crashed`; `rotation.wall_not_ours` (the set is
 in use, correctly left alone); `rotation.wall_unchanged`, `tv.unavailable`;
-`daemon.misconfigured`, `daemon.state_too_new`; `panel.unavailable`,
-`panel.type_scale`, `label.failed`; `heartbeat.failed`; `screen.absent`.
+`daemon.misconfigured`, `daemon.state_too_new`; `frame.crashed`, `store.failed`,
+`store.busy` (the Frame's store); `tv.unidentified`, `tv.unidentified_going_on`,
+`binding.set_changed` (which television is at the Frame's address);
+`binding.retired`; `pull.cache_unwritable`; `notify.unusable`, `notify.unsent`
+(the unit's watchdog); `panel.unavailable`, `panel.type_scale`, `label.failed`;
+`heartbeat.failed`; `screen.absent`.
 
 ## Failure Recovery
 
@@ -204,14 +226,18 @@ do not. The runbook's § If this doesn't work covers a release that will not sta
 | `pull.refused` or `client.refused` with 401 | The client token | Re-issue on the server, update `CLIENT_TOKEN`, restart |
 | `pull.refused` with 403 or 404 | The wall's assignment on the server | Assign the wall to this client and output, or hang a theme on it |
 | A wall worker crashing repeatedly | `client.worker_crashed` tracebacks | The other walls keep running; the worker retries at up to 300 s. Fix the cause; a restart of the unit is not needed |
-| `daemon.state_too_new` | The revision on the Pi | Roll forward. Or remove that wall's `display-state.sqlite` and accept a re-upload |
+| `daemon.state_too_new` | The revision on the Pi | Roll forward. Or set that store's `PRAGMA user_version` to what this revision writes (runbook § Going back), or remove the file and accept a re-upload |
+| `store.failed` repeating | `journalctl -u display.service` for its `fault` (`SQLITE_FULL`, `SQLITE_READONLY`, `SQLITE_IOERR`, `SQLITE_CORRUPT`) | The disk or the file: free space, remount, or remove the damaged `display-state.sqlite`. The wall's pass ends and tries again; **while it persists, each pass uploads a copy the store cannot record** (left open). `store.busy` is a lock and clears by itself |
+| `tv.unidentified`, then `tv.unidentified_going_on` | The set's REST port (a `curl` of its `/api/v2/`, as in `deploy/README.md`) | Nothing to do if the set answers again (`tv.identified`). For fifteen minutes the wall uses none of its pictures on that set; after, it shows art from memory and removes nothing |
+| `binding.set_changed` | Whether the Frame's address was meant to move | Expected after pointing the Player at another television: it uploads every work there and the old set keeps this Player's pictures (`security-model.md` § What it does to the television). Unexpected: the router gave the set another lease, or another set answers at the address; fix the address on the settings page |
+| Unit restarted with `Watchdog timeout` in `systemctl status` | `journalctl -u display.service` before it | The Player stopped making progress. Read what it last logged; `notify.unsent` says systemd's socket refused it. A stop that took 90 s and ended in SIGKILL means its event loop was stuck |
 | Label blank or stale, wall fine | `panel.unavailable` at start, `label.failed` later | The message names the cause: unstated viewing conditions, missing text stack (`uv sync --frozen --no-dev --group raster --group epaper`), or a panel that will not open. The walls are unaffected by design |
 | Art channel refused for minutes | `tv.unavailable` repeating | Wait. The set holds abandoned clients for minutes (`samsung-tv-state-findings.md` § The art channel can refuse to open). Do not SIGKILL or restart in a loop, which makes it worse |
 | Pairing prompt on the television | The token file | The token file was empty or lost. Accept the prompt at the set |
 | HDMI wall shows the text console | `systemctl is-active display.service` | Expected while the Player is stopped (`deploy/README.md` § The Player as a client of the NAS). A wall the server took off the connector leaves it black, not on the console (`screen.blanked`). `screen.absent` while running means no screen seen on the connector (`hdmi-output-findings.md`) |
 
 **Stopping it.** `sudo systemctl stop display.service`, which sends SIGTERM and
-waits up to 90 s. Never SIGKILL: the set holds the abandoned art channel for
+waits up to 90 s (the watchdog's stop is the same SIGTERM). Never SIGKILL: the set holds the abandoned art channel for
 minutes (runbook step 3).
 
 ## Discrepancies with Arrt's record

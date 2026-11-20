@@ -38,15 +38,20 @@ is answered by `nationality-only`. An instrument locked to one record can render
 a label but cannot ask either question. `--record` with no argument draws the
 reference record the artifacts' measurements were taken against.
 
-It needs the text stack (`uv sync --group raster`); `--panel` additionally needs
-the panel driver (`--group epaper`) and a device to draw on:
+It needs the text stack (the `raster` group, which the deployed venv already holds
+and the lines below name, so a machine without it installs it on the first run);
+`--panel` additionally needs the panel driver (`--group epaper`) and a device to
+draw on. Every line below is frozen and without the dev group, on the Pi and off
+it: without `--frozen` a run re-resolves the lock over the network, and without
+`--no-dev` it installs pytest and the linters into the checkout's venv, which is
+the venv the unit runs from:
 
-    cd arrt-player && uv run --group raster python tools/label_preview.py label.png
-    cd arrt-player && uv run --group raster python tools/label_preview.py label.png --cap-arcmin 11
-    cd arrt-player && uv run --group raster python tools/label_preview.py short.png --record okeeffe
+    cd arrt-player && uv run --frozen --no-dev --group raster python tools/label_preview.py label.png
+    cd arrt-player && uv run --frozen --no-dev --group raster python tools/label_preview.py label.png --cap-arcmin 11
+    cd arrt-player && uv run --frozen --no-dev --group raster python tools/label_preview.py short.png --record okeeffe
 
     # away from the deployment, or trying a different wall on for size:
-    cd arrt-player && uv run --group raster python tools/label_preview.py label.png \\
+    cd arrt-player && uv run --frozen --no-dev --group raster python tools/label_preview.py label.png \\
         --diagonal-inches 10.3 --viewing-distance-inches 120
 
 **`--panel` takes the SPI device, which `display.service` holds while it runs.**
@@ -55,7 +60,7 @@ the same bus:
 
     sudo systemctl stop display.service
     cd <checkout>/arrt-player && sudo -u <service-user> env HOME=<service-home> \\
-        uv run --group raster --group epaper \\
+        uv run --frozen --no-dev --group raster --group epaper \\
         python tools/label_preview.py --panel --cap-arcmin 11 --record hokusai
     sudo systemctl start display.service
 

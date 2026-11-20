@@ -11,6 +11,7 @@ may not have, so the Frame's own required values are required only on a client
 configured with one.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from arrt_player.config import (
     CACHE_DIR_NAMES,
     DEFAULT_UI_BIND,
     DEFAULT_UI_PORT,
+    PAGE_KEYS_READ,
+    PLAIN_COMPONENT,
     RETIRED_SETTINGS,
     ConfigError,
     SetupRequired,
@@ -28,7 +31,10 @@ from arrt_player.config import (
     WallIdUnusable,
     load,
     load_ui,
+    resolve,
+    tv_address_problem,
 )
+from arrt_player.settings_ui import server as settings_server
 from arrt_player.settings_ui import store
 
 FRAME = {
@@ -112,17 +118,18 @@ class TestTheSettingsPagesFile:
         assert load(an_environment(cache_dir, frame=False, SERVER_URL="")).server_url == "http://from-the-page:8770"
 
     def test_the_page_shows_read_only_exactly_the_managed_keys_the_environment_sets(self, cache_dir: Path):
-        ui = load_ui(an_environment(cache_dir, frame=False, PLAYER_NAME="", TV_ADDRESS="10.0.0.1"))
+        """Set and managed is pinned; set and empty is not; set and not the page's (`TV_PORT`) is not."""
+        ui = load_ui(an_environment(cache_dir, frame=False, PLAYER_NAME="", TV_ADDRESS="10.0.0.1", TV_PORT="8002"))
 
-        assert ui.pinned == {"SERVER_URL", "CLIENT_TOKEN"}
+        assert ui.pinned == {"SERVER_URL", "CLIENT_TOKEN", "TV_ADDRESS"}
 
     def test_an_untrustworthy_file_refuses_to_start_and_names_it(self, cache_dir: Path):
         cache_dir.mkdir(parents=True, exist_ok=True)
         store.path_in(cache_dir).write_text('{"version": 99}', encoding="utf-8")
 
-        for resolve in (load, load_ui):
+        for reader in (load, load_ui):
             with pytest.raises(ConfigError, match=r"\.settings\.json"):
-                resolve(an_environment(cache_dir, frame=False))
+                reader(an_environment(cache_dir, frame=False))
 
 
 class TestWhereThePageListens:
@@ -167,7 +174,7 @@ class TestWhereThePageListens:
     @pytest.mark.parametrize(
         ("retired", "replaced_by"),
         [
-            ("WALL_ID", "Settings › Clients"),
+            ("WALL_ID", "Settings › Players"),
             ("WALL_TOKEN", "CLIENT_TOKEN"),
             ("MANIFEST_SOURCE", "SERVER_URL"),
         ],
@@ -214,6 +221,148 @@ class TestWhereThePageListens:
 
         assert settings.frame is None
         assert settings.panel.epd_device == "waveshare_epd.it8951"
+
+
+class TestOnePanelIsTheRecordedLimit:
+    """The owner's ruling of 2026-11-19: one label panel per Player is recorded as
+    the limit for now, and nothing may close off several. So a configuration
+    naming two panels is refused at start, by name, citing the limit as the
+    ruling's — never handed to the driver as one identifier (which would fail as
+    a panel that will not open, and read as broken hardware), and never cut down
+    to its first panel with the second silently undriven."""
+
+    @pytest.mark.parametrize(
+        "named",
+        ["waveshare_epd.it8951,omni_epd.mock", "waveshare_epd.it8951 omni_epd.mock", "waveshare_epd.it8951; omni_epd.mock"],
+    )
+    def test_epd_device_naming_two_panels_is_refused_by_name_citing_the_ruling(self, cache_dir: Path, named: str):
+        with pytest.raises(ConfigError) as refused:
+            load(an_environment(cache_dir, frame=False, EPD_DEVICE=named))
+
+        said = str(refused.value)
+        assert "EPD_DEVICE" in said
+        assert "2 panels" in said, "the refusal does not say how many panels the value names"
+        assert "waveshare_epd.it8951" in said
+        assert "omni_epd.mock" in said
+        assert "one label panel" in said, "the refusal does not name the limit"
+        assert "ruling of 2026-11-19" in said, "the refusal does not cite the ruling the limit is"
+        assert "not a limit of the design" in said
+
+    def test_the_slideshow_refuses_two_panels_as_a_client_does(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="EPD_DEVICE names 2 panels"):
+            load(a_slideshow(cache_dir, EPD_DEVICE="waveshare_epd.it8951,omni_epd.mock"))
+
+    def test_one_panel_with_spaces_around_it_is_one_panel(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir, frame=False, EPD_DEVICE="  omni_epd.mock  "))
+
+        assert settings.panel.epd_device == "omni_epd.mock"
+
+
+class TestDrawingToFiles:
+    """`FILE_OUTPUT_DIR`: a Player with no hardware, which must be impossible to turn on by accident on a wall.
+
+    Off unless the directory is named; every value of its three keys refused by
+    name when it is unusable; never beside a key that drives hardware, never in
+    slideshow mode, and never inside the cache the Player tidies.
+    """
+
+    def test_unset_a_player_draws_to_no_files(self, cache_dir: Path):
+        settings = load(an_environment(cache_dir))
+
+        assert settings.files is None
+        assert "FILE_OUTPUT_DIR is not set" in str(settings.startup_lines()["files"])
+
+    def test_the_directory_alone_is_a_1080p_screen_and_no_label(self, cache_dir: Path, tmp_path: Path):
+        settings = load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn")))
+
+        assert settings.files == config.FileOutputSettings(directory=tmp_path / "drawn", screen=(1920, 1080), label=False)
+        assert settings.startup_lines()["files"]["directory"] == str(tmp_path / "drawn")
+
+    def test_its_size_and_its_label_are_read(self, cache_dir: Path, tmp_path: Path):
+        settings = load(
+            an_environment(
+                cache_dir,
+                frame=False,
+                FILE_OUTPUT_DIR=str(tmp_path / "drawn"),
+                FILE_OUTPUT_SCREEN="640X360",
+                FILE_OUTPUT_LABEL="on",
+            )
+        )
+
+        assert settings.files is not None
+        assert (settings.files.screen, settings.files.label) == ((640, 360), True)
+
+    @pytest.mark.parametrize(
+        "value", ["0x1080", "1920x0", "-1920x1080", "1920", "1920x1080x3", "widexhigh", "1920 x 1080", "16385x1080", "1e3x1080"]
+    )
+    def test_a_size_that_is_not_one_is_refused_by_name(self, cache_dir: Path, tmp_path: Path, value: str):
+        with pytest.raises(ConfigError, match="FILE_OUTPUT_SCREEN"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn"), FILE_OUTPUT_SCREEN=value))
+
+    def test_the_largest_side_is_accepted(self, cache_dir: Path, tmp_path: Path):
+        side = config.FILE_OUTPUT_MAX_SIDE_PX
+        settings = load(
+            an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn"), FILE_OUTPUT_SCREEN=f"{side}x1")
+        )
+
+        assert settings.files is not None
+        assert settings.files.screen == (side, 1)
+
+    @pytest.mark.parametrize("value", ["yes", "true", "1", "label"])
+    def test_a_label_switch_that_is_not_on_or_off_is_refused_by_name(self, cache_dir: Path, tmp_path: Path, value: str):
+        with pytest.raises(ConfigError, match="FILE_OUTPUT_LABEL"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(tmp_path / "drawn"), FILE_OUTPUT_LABEL=value))
+
+    @pytest.mark.parametrize("key", ["FILE_OUTPUT_SCREEN", "FILE_OUTPUT_LABEL"])
+    def test_its_other_keys_without_the_directory_are_refused_by_name(self, cache_dir: Path, key: str):
+        value = "on" if key == "FILE_OUTPUT_LABEL" else "640x360"
+
+        with pytest.raises(ConfigError) as refused:
+            load(an_environment(cache_dir, frame=False, **{key: value}))
+
+        assert key in str(refused.value)
+        assert "FILE_OUTPUT_DIR is not" in str(refused.value)
+
+    def test_a_relative_directory_is_refused_by_name(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="FILE_OUTPUT_DIR must be an absolute path"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR="drawn"))
+
+    @pytest.mark.parametrize("hardware", list(config.FILE_OUTPUT_EXCLUDES))
+    def test_it_is_refused_beside_a_key_that_drives_hardware(self, cache_dir: Path, tmp_path: Path, hardware: str):
+        environment = an_environment(cache_dir, frame=True, FILE_OUTPUT_DIR=str(tmp_path / "drawn"))
+        environment.pop("TV_ADDRESS")
+        environment[hardware] = "10.0.0.1" if hardware == "TV_ADDRESS" else "omni_epd.mock"
+
+        with pytest.raises(ConfigError) as refused:
+            load(environment)
+
+        assert "FILE_OUTPUT_DIR" in str(refused.value)
+        assert hardware in str(refused.value)
+
+    @pytest.mark.parametrize("where", ["the cache", "inside it", "around it"])
+    def test_it_is_refused_where_the_player_tidies(self, cache_dir: Path, where: str):
+        directory = {"the cache": cache_dir, "inside it": cache_dir / "drawn", "around it": cache_dir.parent}[where]
+
+        with pytest.raises(ConfigError, match=r"FILE_OUTPUT_DIR .*CACHE_DIR"):
+            load(an_environment(cache_dir, frame=False, FILE_OUTPUT_DIR=str(directory)))
+
+    @pytest.mark.parametrize("key", list(config.FILE_OUTPUT_KEYS))
+    def test_a_slideshow_refuses_each_of_its_keys_by_name(self, cache_dir: Path, tmp_path: Path, key: str):
+        value = {"FILE_OUTPUT_DIR": str(tmp_path / "drawn"), "FILE_OUTPUT_SCREEN": "640x360", "FILE_OUTPUT_LABEL": "on"}[key]
+
+        with pytest.raises(ConfigError) as refused:
+            load(a_slideshow(cache_dir, **{key: value}))
+
+        assert key in str(refused.value)
+        assert "arrt mode only" in str(refused.value)
+
+    @pytest.mark.parametrize("key", list(config.FILE_OUTPUT_KEYS))
+    def test_each_key_is_documented_under_the_heading_the_servers_test_quotes(self, key: str):
+        example = (Path(config.__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
+        section = example.split("# --- Drawing to files: a Player with no hardware", 1)
+
+        assert len(section) == 2, "the heading the server's test quotes is gone from .env.example"
+        assert re.search(rf"^{key}=$", section[1].split("\n# --- ", 1)[0], re.MULTILINE), f"{key} is not under the heading"
 
 
 class TestTheFrameIsAnOutputAClientMayHave:
@@ -365,6 +514,10 @@ class TestEachWallHasItsOwnDirectory:
         assert load(an_environment(cache_dir)).wall(usable).wall_dir == cache_dir / usable
 
 
+#: The values every `*_SECONDS` key refuses. The settings page is held to refuse them too, for the keys it
+#: writes (`tests/test_settings_ui.py`), so this list is the one both read.
+REFUSED_SECONDS = ["0", "-1", "nan", "inf", "-inf", "1e400"]
+
 #: Every `*_SECONDS` key the configuration reads, from its own source, so a key added later is checked the day it is.
 SECONDS_KEYS = sorted(set(re.findall(r'"([A-Z][A-Z0-9_]*_SECONDS)"', Path(config.__file__).read_text(encoding="utf-8"))))
 
@@ -392,7 +545,7 @@ class TestIntervalsAndTimeouts:
             "SLIDESHOW_MAX_SECONDS",
         } <= set(SECONDS_KEYS)
 
-    @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "1e400"])
+    @pytest.mark.parametrize("value", REFUSED_SECONDS)
     @pytest.mark.parametrize("key", SECONDS_KEYS)
     def test_zero_a_negative_nan_and_infinity_are_refused_by_name(self, cache_dir: Path, key: str, value: str):
         """`MANIFEST_POLL_SECONDS=0` spins the wall loop and the pull; NaN passes every check built on `<`."""
@@ -870,3 +1023,288 @@ class TestAScreensBrightness:
 
         with pytest.raises(ConfigError, match="LATITUDE, LONGITUDE and LOCATION_NAME"):
             load(environment)
+
+
+# -- the Frame's address, which the page manages too ----------------------------------
+
+#: Addresses `TV_ADDRESS` refuses, each a mistake somebody could type: a URL, a port, a path, two sets, a
+#: space, a bad label, a trailing dot, and IPv6 bare and bracketed. The settings page is held to refuse each
+#: in the same words (`tests/test_settings_ui.py`).
+REFUSED_TV_ADDRESSES = [
+    "http://192.0.2.20",
+    "192.0.2.20:8002",
+    "tv.example.com/art",
+    "192.0.2.20,192.0.2.21",
+    "two words",
+    "-tv.example.com",
+    "tv.example.com.",
+    "2001:db8::20",
+    "[2001:db8::20]",
+]
+
+
+class TestTheFramesAddress:
+    @pytest.mark.parametrize("address", REFUSED_TV_ADDRESSES)
+    def test_an_address_the_library_could_not_reach_is_refused_by_name(self, cache_dir: Path, address: str):
+        with pytest.raises(ConfigError, match="TV_ADDRESS") as raised:
+            load(an_environment(cache_dir, TV_ADDRESS=address))
+
+        assert str(raised.value) == tv_address_problem(address)
+
+    def test_an_address_of_spaces_is_refused_by_name_not_driven(self, cache_dir: Path):
+        with pytest.raises(ConfigError, match="only spaces"):
+            load(an_environment(cache_dir, TV_ADDRESS="   "))
+
+    @pytest.mark.parametrize("address", ["192.0.2.20", "tv.example.com", "TV.Example.com", "frame"])
+    def test_an_ipv4_address_or_a_host_name_is_the_frames(self, cache_dir: Path, address: str):
+        assert load(an_environment(cache_dir, TV_ADDRESS=f" {address} ")).frame.tv_address == address
+
+    def test_the_page_supplies_the_address_when_the_environment_does_not(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"TV_ADDRESS": "192.0.2.20"}))
+        environment = an_environment(cache_dir)
+        del environment["TV_ADDRESS"]
+
+        assert load(environment).frame.tv_address == "192.0.2.20"
+
+    def test_the_environment_wins_over_the_pages_address(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"TV_ADDRESS": "192.0.2.20"}))
+
+        assert load(an_environment(cache_dir, TV_ADDRESS="192.0.2.30")).frame.tv_address == "192.0.2.30"
+
+    def test_an_empty_address_in_the_environment_does_not_pin_over_the_pages(self, cache_dir: Path):
+        """`.env.example` ships `TV_ADDRESS=`, so a `.env` copied from it leaves the page in charge."""
+        store.write(cache_dir, store.Stored(values={"TV_ADDRESS": "192.0.2.20"}))
+
+        assert load(an_environment(cache_dir, TV_ADDRESS="")).frame.tv_address == "192.0.2.20"
+
+    @pytest.mark.parametrize("address", REFUSED_TV_ADDRESSES[:3])
+    def test_an_address_from_the_pages_file_is_judged_as_one_from_the_environment(self, cache_dir: Path, address: str):
+        store.write(cache_dir, store.Stored(values={"TV_ADDRESS": address}))
+        environment = an_environment(cache_dir)
+        del environment["TV_ADDRESS"]
+
+        with pytest.raises(ConfigError) as raised:
+            load(environment)
+
+        assert str(raised.value) == tv_address_problem(address)
+
+    def test_the_page_finds_the_pairing_token_where_the_frame_keeps_it(self, cache_dir: Path, tmp_path: Path):
+        for environment in (an_environment(cache_dir), an_environment(cache_dir, TV_TOKEN_FILE=str(tmp_path / "kept"))):
+            assert load_ui(environment).tv_token_file == load(environment).frame.tv_token_file
+
+    def test_a_token_path_the_frame_would_refuse_gives_the_page_none_and_stops_nothing(self, cache_dir: Path):
+        ui = load_ui(an_environment(cache_dir, frame=False, TV_TOKEN_FILE="relative/token"))
+
+        assert ui.tv_token_file is None
+
+
+class TestTheSettingsFilesLayout:
+    """Version 3 holds the Frame's address; a file without it stays version 2, which the release before reads."""
+
+    def test_a_file_without_the_frames_address_is_written_as_layout_2(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"SERVER_URL": "http://arrt.example:8770", "PLAYER_MODE": "arrt"}))
+
+        assert '"version": 2' in store.path_in(cache_dir).read_text(encoding="utf-8")
+
+    def test_a_file_with_the_frames_address_is_written_as_layout_3_and_read_back(self, cache_dir: Path):
+        store.write(cache_dir, store.Stored(values={"TV_ADDRESS": "192.0.2.20"}))
+
+        assert '"version": 3' in store.path_in(cache_dir).read_text(encoding="utf-8")
+        assert store.read(cache_dir).values == {"TV_ADDRESS": "192.0.2.20"}
+
+    def test_a_layout_2_file_the_previous_release_wrote_still_reads(self, cache_dir: Path):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        store.path_in(cache_dir).write_text(
+            '{"version": 2, "values": {"PLAYER_MODE": "slideshow", "SLIDESHOW_URL": "x"}, "auth": {"password": "p"}}',
+            encoding="utf-8",
+        )
+
+        assert store.read(cache_dir) == store.Stored(values={"PLAYER_MODE": "slideshow", "SLIDESHOW_URL": "x"}, password="p")
+
+    def test_the_layout_2_file_holds_only_keys_layout_2_knows(self, cache_dir: Path):
+        """What lets the release before this one read it: no key of version 3's in a version 2 file."""
+        every_other_key = {key: "x" for key in store.MANAGED_KEYS if key not in store.FRAME_KEYS}
+
+        assert store.layout_for(every_other_key) == 2
+        assert all(store.layout_for({**every_other_key, key: "x"}) == 3 for key in store.FRAME_KEYS)
+
+
+class TestTheOneValidator:
+    """`resolve` is `load` with the page's file swapped for the values the page is about to write."""
+
+    def test_it_gives_what_load_gives_from_the_written_file(self, cache_dir: Path):
+        values = {"TV_ADDRESS": "192.0.2.20", "PLAYER_NAME": "Hall"}
+        environment = an_environment(cache_dir)
+        del environment["TV_ADDRESS"]
+
+        judged = resolve(environment, values)
+        store.write(cache_dir, store.Stored(values=values))
+
+        assert judged == load(environment)
+
+    def test_it_never_reads_the_file_on_disk(self, cache_dir: Path):
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        store.path_in(cache_dir).write_text('{"version": 99}', encoding="utf-8")
+
+        assert resolve(an_environment(cache_dir), {}).frame is not None
+
+    def test_it_refuses_in_loads_words(self, cache_dir: Path):
+        environment = an_environment(cache_dir)
+        for name in ("LATITUDE", "LONGITUDE", "LOCATION_NAME"):
+            del environment[name]
+        store.write(cache_dir, store.Stored(values={"PLAYER_NAME": "Hall"}))
+
+        with pytest.raises(ConfigError) as from_load:
+            load(environment)
+        with pytest.raises(ConfigError) as from_resolve:
+            resolve(environment, {"PLAYER_NAME": "Hall"})
+
+        assert str(from_resolve.value) == str(from_load.value)
+
+
+#: Two values `load` accepts for each key the page manages, so changing one is a change `load` could see.
+TWO_VALUES = {
+    "SERVER_URL": ("http://192.0.2.1:8770", "http://192.0.2.2:8770"),
+    "CLIENT_TOKEN": ("token-one", "token-two"),
+    "PLAYER_NAME": ("Hall", "Office"),
+    "PLAYER_MODE": None,  # what switches between the two; read in both
+    "TV_ADDRESS": ("192.0.2.20", "192.0.2.21"),
+    "SLIDESHOW_URL": (LISTING, "https://www.reddit.com/r/EarthPorn/top/?t=year"),
+    "REDDIT_SESSION": (COOKIE, COOKIE.replace("the-secret-part", "another-secret")),
+    "SLIDESHOW_MIN_SECONDS": ("20", "25"),
+    "SLIDESHOW_MAX_SECONDS": ("60", "90"),
+    "SLIDESHOW_OUTPUT": ("hdmi-a-1", "hdmi-a-2"),
+}
+
+
+def _unread(mode: str) -> list[str]:
+    return [key for key in store.MANAGED_KEYS if key not in PAGE_KEYS_READ[mode]]
+
+
+class TestTheKeysEachModeReads:
+    """What lets the page say a change waits for the other mode: outside a mode's set, it changes nothing loaded."""
+
+    def test_every_key_the_page_manages_has_two_values_here(self):
+        assert set(TWO_VALUES) == set(store.MANAGED_KEYS)
+
+    def test_every_key_the_page_manages_is_read_by_some_mode(self):
+        assert set().union(*PAGE_KEYS_READ.values()) == set(store.MANAGED_KEYS)
+
+    @pytest.mark.parametrize(("mode", "key"), [(mode, key) for mode in sorted(PAGE_KEYS_READ) for key in _unread(mode)])
+    def test_a_key_outside_a_modes_set_changes_nothing_that_mode_loads(self, cache_dir: Path, mode: str, key: str):
+        base = a_slideshow(cache_dir) if mode == "slideshow" else an_environment(cache_dir)
+        first, second = TWO_VALUES[key]
+
+        assert load({**base, key: first}) == load({**base, key: second})
+
+    def test_the_parametrisation_is_not_empty(self):
+        assert _unread("arrt")
+        assert _unread("slideshow")
+
+
+# -- the names kept under CACHE_DIR, and the wall ids they forbid (review O-3) ------------
+
+#: The attribute or variable names that hold `CACHE_DIR` where a path is built on it.
+_CACHE_ROOTS = {"cache_dir", "_root"}
+
+
+def _string_constants(trees: dict[str, ast.Module]) -> dict[str, dict[str, str]]:
+    """Each module's names for text: its own module-level `NAME = "…"`, then what it imports from the package."""
+    own = {
+        dotted: {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)
+        }
+        for dotted, tree in trees.items()
+    }
+    names = {dotted: dict(table) for dotted, table in own.items()}
+    for dotted, tree in trees.items():
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module in own:
+                for alias in node.names:
+                    if alias.name in own[node.module]:
+                        names[dotted][alias.asname or alias.name] = own[node.module][alias.name]
+    return names
+
+
+def _names_kept_under_the_cache() -> dict[str, str]:
+    """Every name the Player's code puts directly under `CACHE_DIR`, with where it is built.
+
+    Read from the code that makes the paths (`<cache_dir> / NAME` and `<cache_dir> / f"{PREFIX}…"`), each
+    constant resolved from its module's source, never copied here and never imported (some modules load
+    drivers a test machine may not have).
+    """
+    package = Path(config.__file__).parent
+    trees = {
+        ".".join(("arrt_player", *source.relative_to(package).with_suffix("").parts)).removesuffix(".__init__"): ast.parse(
+            source.read_text(encoding="utf-8")
+        )
+        for source in sorted(package.rglob("*.py"))
+    }
+    constants = _string_constants(trees)
+    found: dict[str, str] = {}
+    for dotted, tree in trees.items():
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)):
+                continue
+            root = node.left.attr if isinstance(node.left, ast.Attribute) else getattr(node.left, "id", None)
+            if root not in _CACHE_ROOTS:
+                continue
+            right = node.right
+            if isinstance(right, ast.JoinedStr) and right.values:
+                right = right.values[0].value if isinstance(right.values[0], ast.FormattedValue) else right.values[0]
+            if isinstance(right, ast.Name) and right.id in constants[dotted]:
+                found[constants[dotted][right.id]] = f"{dotted}.{right.id}"
+            elif isinstance(right, ast.Constant) and isinstance(right.value, str):
+                found[right.value] = f"{dotted}: a literal"
+    return found
+
+
+class TestTheNamesUnderTheCache:
+    def test_the_scan_finds_the_names_it_was_written_for(self):
+        """Not vacuous: plain and dotted, from four modules, the label cache and the removal prefix among them."""
+        found = _names_kept_under_the_cache()
+
+        assert {
+            config.TV_TOKEN_FILENAME,
+            config.CLIENT_DOCUMENT_FILENAME,
+            store.SETTINGS_FILENAME,
+            pull.LABEL_CACHE_DIRNAME,
+            pull.CLIENT_ETAG_FILENAME,
+        } <= set(found)
+        assert any(name.startswith(".removing") for name in found)
+
+    def test_every_name_kept_under_the_cache_is_reserved_or_no_possible_wall_id(self):
+        """A plain name kept there and not in `CACHE_DIR_NAMES` is a wall id that would collide with it."""
+        colliding = {
+            name: where
+            for name, where in _names_kept_under_the_cache().items()
+            if name not in CACHE_DIR_NAMES and PLAIN_COMPONENT.fullmatch(f"{name}x")
+        }
+
+        assert colliding == {}
+
+
+# -- one host helper and one setting name for the page and the configuration (review O-10) --
+
+
+class TestThePageAndTheConfigurationReadNamesAlike:
+    @pytest.mark.parametrize("listed", ["Wall.LAN.", "wall.example.com", "WALL.EXAMPLE.COM.", "192.0.2.10", "::1"])
+    def test_a_name_listed_is_the_name_a_request_carrying_it_is_reduced_to(self, cache_dir: Path, listed: str):
+        """With a port and without, as a browser sends either: both go through the one helper."""
+        ui = load_ui(an_environment(cache_dir, frame=False, UI_ALLOWED_HOSTS=listed))
+        bracketed = f"[{listed}]" if ":" in listed else listed
+
+        assert {settings_server.hostname(host) for host in (bracketed, f"{bracketed}:8771")} <= ui.allowed_hosts
+
+    def test_the_setting_is_named_in_one_place(self):
+        literal = '"UI_ALLOWED_HOSTS"'
+        sources = {module.__name__: Path(module.__file__).read_text(encoding="utf-8") for module in (config, settings_server)}
+
+        assert {name: text.count(literal) for name, text in sources.items()} == {config.__name__: 1, settings_server.__name__: 0}
+        assert settings_server.ALLOWED_HOSTS_SETTING is config.ALLOWED_HOSTS_SETTING

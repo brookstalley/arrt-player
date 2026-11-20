@@ -12,10 +12,13 @@ wall's pull, with the Frame's driver for the Frame (`run_frame_wall`) and the
 screen's for a screen this host draws on (`run_screen_wall`).
 
 **And one label renderer per mapped label output** (`labels-and-surfaces.md`):
-`run_label` for the e-paper panel, which this module opens once per process
-(`label_panel`) because it is the client's, not any wall's. The Frame's identity
-is read here too, at the client, so a Frame with no wall on it still says who it
-is (`FrameIdentity`).
+`run_label`, on the panel its label names among this client's panels, which this
+module opens once per process (`label_panels`) because they are the client's,
+not any wall's. **The panels are held by output name, zero or more of them, as
+the displays are** (the owner's ruling of 2026-11-19): the configuration
+describes one today (`config.PANEL_OUTPUT`), and nothing here assumes it. The
+Frame's identity is read here too, at the client, so a Frame with no wall on it
+still says who it is (`FrameIdentity`).
 
 **A dead pull ends its own wall's worker, and the supervisor starts it again.**
 A pull that stops leaves its wall rotating its cache, taking no updates and
@@ -38,6 +41,22 @@ port costs the page and nothing else, because a wall never waits on its settings
 Until a password is set the page needs the setup code minted here and printed with
 its address; it is new on every start and dies once a password is set.
 
+**A Player with `FILE_OUTPUT_DIR` set drives no hardware at all**: its outputs
+are a screen and a label drawn to that directory (`player_outputs`,
+`label_panels`, `run_wall`), placed, composed for and drawn by the same
+supervisor, schedule and renderer as any other, so a real Player process can be
+tested against a real server where there is no screen, television or panel. It
+says so once at start, at WARNING, because on a wall it would be a fault.
+
+**systemd is told when the Player is up, and each time it makes progress**
+(`notify`), because the unit is `Type=notify` with a watchdog: `READY=1` once
+each mode is running, and `WATCHDOG=1` only for progress, never for the loop
+merely being alive. In Arrt mode, and with file outputs, progress is the
+supervisor finishing a cycle (`PettingSupervisor`); in slideshow mode, the
+programme reaching its next step (`petting`); in setup mode, the page still
+served by a loop that turns. A start refused by configuration sends nothing
+and exits 2. What a stuck Player then meets is in the unit's comment.
+
 **In slideshow mode there is no server, supervisor or pull** (`run_slideshow`).
 One programme plays a Reddit listing on one HDMI screen through mpv and
 captions it on the panel, beside the same page. Its parts are composed in
@@ -53,25 +72,29 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
+from typing import Any
 
-from arrt_player import logs
+from arrt_player import logs, notify
 from arrt_player.client import (
     FRAME_KIND,
     FrameIdentity,
     LabelAssignment,
     OutputReport,
     Supervisor,
+    WorkerStop,
     client_outputs,
-    wall_retired,
+    is_retired,
 )
 from arrt_player.config import (
     ARRT_MODE,
+    FILE_SCREEN_OUTPUT,
     PANEL_OUTPUT,
     SLIDESHOW_MODE,
     ClientSettings,
     ConfigError,
+    FileOutputSettings,
     FrameSettings,
     PanelSettings,
     ScreenBrightnessSettings,
@@ -84,18 +107,20 @@ from arrt_player.config import (
     load_ui,
 )
 from arrt_player.ddc import Ddc, DdcBus, I2cTransport, bus_for
+from arrt_player.displays import file_output
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import ScreenOutput, go_dark, screen_wall
 from arrt_player.displays.screen_brightness import ScreenBrightness
+from arrt_player.episodes import ReportOnce
 from arrt_player.kms import KmsOutput
 from arrt_player.label_renderer import LabelPanel, LabelRenderer
 from arrt_player.manifest import Watcher
 from arrt_player.mpv import MpvOutput, renderer_problems
 from arrt_player.panel import Geometry, LabelSurface, SurfaceUnavailable
 from arrt_player.panel.legibility import TypeScale, ViewingConditionsUnknown, margin_for, type_scale_for
-from arrt_player.programmes.slideshow import Screen, Slideshow
+from arrt_player.programmes.slideshow import Screen, Slideshow, Wait, wait_for_stop
 from arrt_player.programmes.slideshow_status import SlideshowStatus
-from arrt_player.pull import ClientPull, LabelPull, Pull
+from arrt_player.pull import LABEL_CACHE_DIRNAME, ClientPull, LabelPull, Pull
 from arrt_player.settings_ui import auth, server, store
 from arrt_player.sources.cache import MediaCache
 from arrt_player.sources.fetch import Fetcher
@@ -239,6 +264,37 @@ def label_panel(settings: PanelSettings) -> LabelPanel | None:
     return LabelPanel(name=PANEL_OUTPUT, surface=surface, error=None, size=size)
 
 
+def label_panels(settings: ClientSettings) -> dict[str, LabelPanel]:
+    """Every label panel this client holds, by output name: the e-paper one, the file label, or none.
+
+    **A mapping, not a panel**, so that what holds, reports, draws on and closes
+    the panels never assumes there is one: the configuration's limit
+    (`config.PANEL_OUTPUT`) is the configuration's, and a second panel would be
+    a second entry here and nothing more. The file label (`FILE_OUTPUT_LABEL`)
+    is one such entry; the configuration never gives a Player both it and a panel.
+    """
+    panels: dict[str, LabelPanel] = {}
+    panel = label_panel(settings.panel)
+    if panel is not None:
+        panels[panel.name] = panel
+    if settings.files is not None and settings.files.label:
+        drawn = file_output.file_label_panel(settings.files)
+        panels[drawn.name] = drawn
+    return panels
+
+
+def player_outputs(settings: ClientSettings, *, frame_identity: str | None = None) -> list[OutputReport]:
+    """Every output this client reports and drives: its file screen alone when it draws to files, else its hardware's.
+
+    **Instead of the hardware, never beside it.** With `FILE_OUTPUT_DIR` set no
+    HDMI connector is listed (and the configuration refuses a Frame beside it),
+    so the server can place a wall only where this Player will draw it.
+    """
+    if settings.files is not None:
+        return [file_output.output_report(settings.files)]
+    return client_outputs(settings, frame_identity=frame_identity)
+
+
 def frame_tv(settings: FrameSettings) -> SamsungTv:
     """The Frame's television client, as every reader of it is built."""
     return SamsungTv(
@@ -254,25 +310,93 @@ def frame_tv(settings: FrameSettings) -> SamsungTv:
 
 async def run_label(
     settings: ClientSettings,
-    panel: LabelPanel,
+    panels: Mapping[str, LabelPanel],
     assignment: LabelAssignment,
-    stop: asyncio.Event,
-    retired: asyncio.Event,
+    stop: WorkerStop,
     *,
     clock: Clock | None = None,
 ) -> None:
-    """The supervisor's label worker: one renderer on this client's panel, until stopped."""
-    # One clock for both: the pull stamps the server's last answer by `now`, and
-    # the renderer reads that stamp back against its own `now`.
+    """The supervisor's label worker: one renderer on the panel its label names, until stopped.
+
+    **Only on that panel.** A label naming an output this client holds no panel
+    for is said once by name and not drawn, never drawn on another panel: the
+    supervisor already refuses one its label outputs do not list, so reaching
+    here is the two disagreeing, which a restart would not mend. It waits to be
+    stopped rather than ending, which the supervisor would answer with a restart
+    and a line every backoff step.
+    """
+    panel = panels.get(assignment.output)
+    if panel is None:
+        if not stop.is_set():
+            log.error(
+                "label %s names label output %s, and this client holds no panel by that name (it holds %s); it is not drawn",
+                assignment.label_id,
+                assignment.output,
+                ", ".join(sorted(panels)) or "none",
+                extra={"event": "label.no_panel", "label_id": assignment.label_id, "output": assignment.output},
+            )
+            await stop.wait()
+        return
+    # One clock for all three: the pull stamps the server's last answer by `now`,
+    # the renderer reads that stamp back against its own `now`, and the offline
+    # hold runs on the same clock's monotonic as the pull's stamp throttle.
     clock = clock if clock is not None else Clock.system()
     renderer = LabelRenderer(
         assignment=assignment,
         link=LabelPull(settings, assignment.label_id, now=clock.now, monotonic=clock.monotonic),
         panel=panel,
         now=clock.now,
+        monotonic=clock.monotonic,
         poll_seconds=settings.label_poll_seconds,
     )
-    await renderer.run(stop, retired)
+    with file_output.captioning(assignment):
+        await renderer.run(stop)
+
+
+class LabelCacheSweep:
+    """Removes the cached documents of labels the current client document does not map (`Supervisor`'s `forget_labels`).
+
+    **Every file under `LABEL_CACHE_DIRNAME` that no mapped label would read is
+    removed**: a retired label's, one moved to another client's panel, one the
+    server deleted, and an atomic write's leftover. A label the document maps
+    keeps its file whichever of this client's outputs it is on, and whether or
+    not this client can draw it. The supervisor calls this only once a document
+    has been read, so an unreadable or absent one removes nothing.
+
+    **Never raises**: a cache that cannot be swept costs disk, and is said once
+    per episode.
+    """
+
+    def __init__(self, settings: ClientSettings) -> None:
+        self._settings = settings
+        self._directory = settings.cache_dir / LABEL_CACHE_DIRNAME
+        self._unsweepable = ReportOnce()
+
+    def __call__(self, mapped: Collection[str]) -> None:
+        kept = {path for label_id in mapped if (path := LabelPull(self._settings, label_id).cache_path) is not None}
+        try:
+            found = [entry for entry in self._directory.iterdir() if entry not in kept and entry.is_file()]
+            for entry in found:
+                entry.unlink(missing_ok=True)
+                log.info(
+                    "removed %s: no label this client is given reads it",
+                    entry.name,
+                    extra={"event": "label.cache_forgotten", "path": str(entry)},
+                )
+        except FileNotFoundError:
+            # Nothing has been cached yet.
+            return
+        except OSError as exc:
+            if self._unsweepable.begin():
+                log.warning(
+                    "the cached documents of labels this client no longer draws cannot be removed from %s (%s)",
+                    self._directory,
+                    exc,
+                    extra={"event": "label.cache_unsweepable"},
+                )
+            return
+        if self._unsweepable.end():
+            log.info("the label cache can be swept again", extra={"event": "label.cache_sweepable"})
 
 
 async def run_frame_wall(settings: Settings, stop: asyncio.Event, *, clock: Clock | None = None) -> None:
@@ -329,6 +453,7 @@ async def run_screen_wall(
     *,
     clock: Clock | None = None,
     brightness: ScreenBrightnessSettings | None = None,
+    output_for: Callable[[WallSettings, str], ScreenOutput] | None = None,
 ) -> None:
     """One wall on a screen this host draws on: the wall's loop on the screen and the wall's pull, until stopped.
 
@@ -337,15 +462,19 @@ async def run_screen_wall(
     the connector starts only once this worker has finished. Called already
     stopped, which is the supervisor's last call for a wall taken away between
     restarts, it does only that.
+
+    `output_for` builds what the wall draws on: an HDMI connector's
+    (`screen_output`) unless the caller names another.
     """
+    build = output_for if output_for is not None else screen_output
     if stop.is_set():
-        if wall_retired(stop):
-            await go_dark(screen_output(wall, output), wall_id=wall.wall_id, output_name=output)
+        if is_retired(stop):
+            await go_dark(build(wall, output), wall_id=wall.wall_id, output_name=output)
         return
     wall.wall_dir.mkdir(parents=True, exist_ok=True)
     watcher = Watcher(wall.manifest_path)
     clock = clock if clock is not None else Clock.system()
-    drawn_on = screen_output(wall, output)
+    drawn_on = build(wall, output)
     screen = screen_wall(
         wall=wall,
         output=drawn_on,
@@ -356,7 +485,7 @@ async def run_screen_wall(
     try:
         await _beside_its_pull(wall, stop, screen.run)
     finally:
-        if wall_retired(stop):
+        if is_retired(stop):
             await go_dark(drawn_on, wall_id=wall.wall_id, output_name=output)
 
 
@@ -407,10 +536,21 @@ def screen_output(
     return KmsOutput(output)
 
 
+def file_screen_output(settings: FileOutputSettings, wall: WallSettings, output: str) -> ScreenOutput:
+    """What a wall on the file screen draws on: a directory, named for the output, under `FILE_OUTPUT_DIR`."""
+    return file_output.FileScreenOutput(settings, wall_id=wall.wall_id, name=output)
+
+
 async def run_wall(settings: ClientSettings, wall: WallSettings, output: OutputReport, stop: asyncio.Event) -> None:
-    """The supervisor's worker: the wall on the Frame for the Frame, on a screen this host draws for anything else."""
+    """The supervisor's worker: the wall on the Frame for the Frame, on a screen this host draws for anything else.
+
+    The file screen is a screen like a connector's, drawn to a directory, and
+    with no brightness to follow: it has no DDC/CI bus.
+    """
     if output.kind == FRAME_KIND:
         await run_frame_wall(settings.frame_wall(wall.wall_id), stop)
+    elif settings.files is not None and output.name == FILE_SCREEN_OUTPUT:
+        await run_screen_wall(wall, output.name, stop, output_for=partial(file_screen_output, settings.files))
     else:
         await run_screen_wall(wall, output.name, stop, brightness=settings.screen_brightness)
 
@@ -457,6 +597,49 @@ def _pull_ended(task: asyncio.Task[None], ending: asyncio.Event, wall_id: str) -
         extra={"event": "pull.crashed", "wall_id": wall_id},
     )
     ending.set()
+
+
+class PettingSupervisor(Supervisor):
+    """The supervisor, petting systemd's watchdog each time it finishes a cycle.
+
+    **A finished cycle is Arrt mode's progress**: the outputs reported, the
+    client document asked for and matched, the walls' directories swept. Each
+    step is bounded (the Frame's identity by its budget, each request by the
+    pull's session timeout), so a cycle that does not finish is a supervisor or
+    a loop that is stuck. A wall's own worker is not watched here: one stuck
+    wall is that wall's fault, and a restart would blank every other wall.
+    """
+
+    def __init__(
+        self,
+        *,
+        watchdog: notify.Watchdog,
+        **kwargs: Any,  # noqa: ANN401 -- passed through whole to Supervisor's own keywords
+    ) -> None:
+        super().__init__(**kwargs)
+        self._watchdog = watchdog
+
+    async def cycle(self) -> None:
+        await super().cycle()
+        self._watchdog.progress()
+
+
+def petting(watchdog: notify.Watchdog, wait: Wait = wait_for_stop) -> Wait:
+    """The slideshow's wait, petting the watchdog as each wait begins.
+
+    **The programme waits only between steps of its playback**: after a look at
+    the cache found nothing ready, after a load the screen answered, and after
+    each check of what is up. Each wait therefore follows a step that finished,
+    and a step that never finishes (a screen whose renderer stopped answering,
+    a brightness exchange that never returns) stops the pets. The listing and
+    the fill run on tasks of their own and never wait here.
+    """
+
+    async def waiting(stop: asyncio.Event, seconds: float) -> bool:
+        watchdog.progress()
+        return await wait(stop, seconds)
+
+    return waiting
 
 
 def settings_page(
@@ -508,8 +691,14 @@ async def run_slideshow(
     screen: Callable[[SlideshowSettings], Screen] = slideshow_screen,
     problems: Callable[[], list[str]] = renderer_problems,
     clock: Clock | None = None,
+    watchdog: notify.Watchdog | None = None,
 ) -> int:
-    """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped."""
+    """Slideshow mode: the programme on its screen and the label panel, beside the settings page, until stopped.
+
+    `READY=1` goes once the page is started and the programme is built, as it
+    starts to play; each step of its playback pets `watchdog` (`petting`).
+    """
+    watchdog = watchdog if watchdog is not None else notify.Watchdog.silent()
     log.info("starting a slideshow", extra={"event": "slideshow.starting", **settings.startup_lines()})
     status = SlideshowStatus(renderer_problems=tuple(problems()))
     for problem in status.renderer_problems:
@@ -534,7 +723,9 @@ async def run_slideshow(
                 brightness=slideshow_brightness(settings, clock if clock is not None else Clock.system()),
                 listing_path=settings.listing_path,
                 status=status,
+                wait=petting(watchdog),
             )
+            watchdog.ready()
             await programme.run(stop)
     finally:
         if panel is not None:
@@ -588,6 +779,9 @@ async def _run() -> int:
         loop.add_signal_handler(received, stop.set)
 
     ui = load_ui()
+    # Before the settings are read, so that its one line about the socket comes
+    # first, and nothing is sent for a start refused by configuration below.
+    watchdog = notify.Watchdog.from_environment()
 
     try:
         settings = load()
@@ -598,34 +792,50 @@ async def _run() -> int:
             ", ".join(exc.missing),
             extra={"event": "daemon.setup_mode", "missing": list(exc.missing), "mode": exc.mode},
         )
-        served = await run_settings_page(settings_page(ui, missing=exc.missing, mode=exc.mode), stop)
-        return 0 if served else 1
+        page = asyncio.create_task(
+            run_settings_page(settings_page(ui, missing=exc.missing, mode=exc.mode), stop), name="settings-page"
+        )
+        watchdog.ready()
+        await watchdog.while_running(page)
+        return 0 if await page else 1
 
     if isinstance(settings, SlideshowSettings):
-        return await run_slideshow(settings, ui, stop)
+        return await run_slideshow(settings, ui, stop, watchdog=watchdog)
 
+    if settings.files is not None:
+        # Once, and loud: on a wall this would be a Player showing nothing.
+        log.warning(
+            "this Player draws its walls and labels to files in %s, and drives no screen, television or panel",
+            settings.files.directory,
+            extra={"event": "files.drawing", **settings.files.file_lines()},
+        )
     clock = Clock.system()
     identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
-    panel = label_panel(settings.panel)
-    supervisor = Supervisor(
+    panels = label_panels(settings)
+    supervisor = PettingSupervisor(
+        watchdog=watchdog,
         settings=settings,
         link=ClientPull(settings),
         worker=partial(run_wall, settings),
-        outputs=lambda: client_outputs(settings, frame_identity=identity.value if identity is not None else None),
+        outputs=lambda: player_outputs(settings, frame_identity=identity.value if identity is not None else None),
         now=clock.now,
         monotonic=clock.monotonic,
-        label_worker=partial(run_label, settings, panel) if panel is not None else None,
-        label_outputs=lambda: [panel.report()] if panel is not None else [],
+        label_worker=partial(run_label, settings, panels, clock=clock) if panels else None,
+        label_outputs=lambda: [panel.report() for panel in panels.values()],
+        forget_labels=LabelCacheSweep(settings),
         frame_identity=identity,
     )
     page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
+    # Once the settings are read and the panels open, before the first poll: a
+    # server down at boot delays no start, and the walls start from the cache.
+    watchdog.ready()
     try:
         await supervisor.run(stop)
     finally:
         # After every renderer has stopped. A draw that ran past its budget is
         # left running, so one may still be in the driver: `close` waits for it,
         # for at most the label budget. On e-paper this is the panel's power-down.
-        if panel is not None:
+        for panel in panels.values():
             panel.close()
         stop.set()
         await page
