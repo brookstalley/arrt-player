@@ -86,6 +86,7 @@ from arrt_player.client import (
     WorkerStop,
     client_outputs,
     is_retired,
+    settings_url,
 )
 from arrt_player.config import (
     ARRT_MODE,
@@ -810,12 +811,15 @@ async def _run() -> int:
             extra={"event": "files.drawing", **settings.files.file_lines()},
         )
     clock = Clock.system()
-    identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
+    identity = (
+        FrameIdentity(frame_tv(settings.frame).read_identity, monotonic=clock.monotonic) if settings.frame is not None else None
+    )
     panels = label_panels(settings)
+    link = ClientPull(settings, monotonic=clock.monotonic)
     supervisor = PettingSupervisor(
         watchdog=watchdog,
         settings=settings,
-        link=ClientPull(settings),
+        link=link,
         worker=partial(run_wall, settings),
         outputs=lambda: player_outputs(settings, frame_identity=identity.value if identity is not None else None),
         now=clock.now,
@@ -824,6 +828,7 @@ async def _run() -> int:
         label_outputs=lambda: [panel.report() for panel in panels.values()],
         forget_labels=LabelCacheSweep(settings),
         frame_identity=identity,
+        settings_url=lambda: settings_url(ui, link.local_address),
     )
     page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
     # Once the settings are read and the panels open, before the first poll: a

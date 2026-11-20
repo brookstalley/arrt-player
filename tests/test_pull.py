@@ -23,6 +23,7 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestServer
 from arrt_contract import transport
 from conftest import WALL_ID, tick_until
@@ -1759,3 +1760,157 @@ async def test_a_feed_pulled_from_the_server_reaches_a_screen_composed(pull, stu
     with Image.open(shown) as picture:
         assert picture.size == (1280, 720)
     assert stub.majors_requested == [2]
+
+
+# -- the client heartbeat the server refuses ------------------------------------------------------
+
+#: How long a refused client heartbeat is held before it is sent again unchanged:
+#: five minutes. Stated here, once, and compared with the module below; when this
+#: Player pins a contract that states it, this is where it is quoted from the package.
+REFUSED_RESEND_SECONDS = 300.0
+
+#: The client heartbeat's rows that refuse the report for what it says: every row
+#: that answers with the table's error body, but the token's (`no_valid_token`),
+#: which a report cannot fix by changing.
+REPORT_REFUSALS = [
+    answer
+    for answer in transport()["routes"]["client_heartbeat"]["answers"]
+    if answer["body"] == "error" and answer["case"] != "no_valid_token"
+]
+
+
+def _client_heartbeat(**changes: object) -> dict:
+    return {
+        "reported_at": "2026-10-02T14:00:05+00:00",
+        "outputs": [{"name": "frame", "kind": "frame", "connected": True, "screen": None}],
+        **changes,
+    }
+
+
+def _client_heartbeat_posts(stub) -> int:
+    return stub.requests.count(("POST", CLIENT_HEARTBEAT_ROUTE))
+
+
+@pytest.fixture
+async def held_link(client_settings, stub):
+    """A `ClientPull` against the double on a clock only the test moves, and the clock."""
+    clock = _Ticking()
+    link = ClientPull(replace(client_settings, server_url=stub.url), monotonic=clock)
+    yield link, clock
+    await link.close()
+
+
+def test_the_statuses_that_hold_a_report_are_the_tables_refusals_of_it():
+    assert {answer["status"] for answer in REPORT_REFUSALS} == pull_module.CLIENT_HEARTBEAT_REFUSALS
+    assert pull_module.REFUSED_REPORT_RESEND_SECONDS == REFUSED_RESEND_SECONDS
+
+
+@pytest.mark.parametrize("refusal", REPORT_REFUSALS, ids=[answer["case"] for answer in REPORT_REFUSALS])
+async def test_a_report_the_server_refuses_is_held_until_it_changes(held_link, stub, refusal):
+    """The same report gets the same answer: sent once, and again at once when it says something new."""
+    link, clock = held_link
+    stub.client_heartbeat_status = refusal["status"]
+
+    assert await link.report(_client_heartbeat()) is False
+    clock.now += 60
+    assert await link.report(_client_heartbeat(reported_at="2026-10-02T14:01:05+00:00")) is False
+    assert _client_heartbeat_posts(stub) == 1, "a refused, unchanged report was sent again within the hold"
+
+    clock.now += 1
+    await link.report(_client_heartbeat(settings_url="http://192.0.2.10:8771/"))
+    assert _client_heartbeat_posts(stub) == 2, "a changed report was held with the one refused before it"
+
+
+async def test_a_held_report_is_sent_again_once_per_lapse_with_nothing_changed(held_link, stub):
+    """A server that refuses it for ever hears it once in five minutes; one that comes to accept it hears it within five."""
+    link, clock = held_link
+    stub.client_heartbeat_status = 400
+    refused_at = clock.now
+
+    async def at(elapsed: float) -> bool:
+        clock.now = refused_at + elapsed
+        return await link.report(_client_heartbeat())
+
+    await at(0)
+    for elapsed in (30, REFUSED_RESEND_SECONDS - 1):
+        await at(elapsed)
+    assert _client_heartbeat_posts(stub) == 1, "the held report was sent again before its hold lapsed"
+    await at(REFUSED_RESEND_SECONDS)
+    for elapsed in (REFUSED_RESEND_SECONDS + 30, 2 * REFUSED_RESEND_SECONDS - 1):
+        await at(elapsed)
+    assert _client_heartbeat_posts(stub) == 2, "the lapse sent the held report other than once"
+
+    stub.client_heartbeat_status = None
+    assert await at(2 * REFUSED_RESEND_SECONDS) is True, "the server that came to accept it did not hear it"
+    assert len(stub.client_heartbeats) == 1
+    assert await at(2 * REFUSED_RESEND_SECONDS + 30) is True, "an accepted report was held"
+
+
+async def _answering(status: int, body: bytes):
+    """A server that answers every client heartbeat with `status` and `body`: a proxy, a portal, a server starting."""
+    posts: list[bytes] = []
+
+    async def answer(request: web.Request) -> web.Response:
+        posts.append(await request.read())
+        return web.Response(status=status, body=body)
+
+    app = web.Application()
+    app.router.add_post(CLIENT_HEARTBEAT_ROUTE, answer)
+    server = TestServer(app)
+    await server.start_server()
+    return server, posts
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (429, b""),
+        (408, b""),
+        (404, b"<html><body>404 Not Found</body></html>"),
+        (403, b"Forbidden"),
+        (405, b""),
+        (200, b"<html><body>Sign in to this network</body></html>"),
+        (413, b"<html><head><title>413 Request Entity Too Large</title></head></html>"),
+        (400, b'{"detail": [{"msg": "bad request"}]}'),
+        (422, b'{"error": "A status no row of the table names."}'),
+    ],
+    ids=["429", "408", "404-proxy", "403-proxy", "405", "200-portal", "413-proxy", "400-framework", "422"],
+)
+async def test_an_answer_that_is_not_the_servers_refusal_of_the_report_leaves_it_sent_on_the_next_cycle(
+    client_settings, status, body
+):
+    """Read as the table's `unanswered` case is: nothing is known recorded, and the report goes on being sent."""
+    server, posts = await _answering(status, body)
+    clock = _Ticking()
+    link = ClientPull(replace(client_settings, server_url=str(server.make_url("")).rstrip("/")), monotonic=clock)
+    try:
+        assert await link.report(_client_heartbeat()) is False
+        clock.now += 30
+        assert await link.report(_client_heartbeat()) is False
+    finally:
+        await link.close()
+        await server.close()
+
+    assert len(posts) == 2, f"a {status} that is not the server's refusal of the report held it"
+
+
+async def test_a_report_refused_for_its_token_goes_on_being_sent(held_link, stub):
+    link, clock = held_link
+    stub.tokens = {}
+
+    for _ in range(3):
+        assert await link.report(_client_heartbeat()) is False
+        clock.now += 30
+
+    assert _client_heartbeat_posts(stub) == 3, "a report refused for its token was held"
+
+
+async def test_the_link_knows_the_address_it_reached_the_server_from(held_link, stub):
+    """Read off its own connection, as the connection is handed out: nothing else is opened to learn it."""
+    link, _clock = held_link
+    assert link.local_address is None
+
+    await link.fetch()
+
+    assert link.local_address == "127.0.0.1"
+    assert stub.seen == [("GET", CLIENT_ROUTE)], "learning the address cost a request of its own"

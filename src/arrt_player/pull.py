@@ -62,6 +62,8 @@ from typing import Any, Final
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
+from aiohttp.connector import Connection
+from aiohttp.tracing import Trace
 
 from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
 from arrt_player.config import CACHED_MANIFEST_FILENAME, PLAIN_COMPONENT, ClientSettings, WallSettings
@@ -137,6 +139,24 @@ MANIFEST_MAX_BYTES: Final[int] = 16 * 1024 * 1024
 
 #: How much of a body is read at a time.
 _CHUNK_BYTES: Final[int] = 64 * 1024
+
+#: The statuses with which the server refuses a client heartbeat for what it
+#: says: the transport table's `not_json` and `not_a_client_heartbeat` (400) and
+#: `too_large` (413), each answered with the table's error body. The same report
+#: gets the same answer, so a report refused this way is held (`ClientPull.report`).
+#: `401` is the token's fault, not the report's, and is not among them.
+CLIENT_HEARTBEAT_REFUSALS: Final[frozenset[int]] = frozenset({HTTPStatus.BAD_REQUEST, HTTPStatus.REQUEST_ENTITY_TOO_LARGE})
+
+#: How long a client heartbeat the server refused is held before it is sent
+#: again unchanged. Long enough that a report the server will always refuse costs
+#: one request in five minutes; short enough that a server which starts accepting
+#: it (one upgraded, or one whose refusal was a fault of its own) hears from this
+#: Player within one such interval. A changed report is sent at once whatever it is.
+REFUSED_REPORT_RESEND_SECONDS: Final[float] = 300.0
+
+#: The most of a refusal's body this Player reads to see whether it is the
+#: server's: the error body is one sentence, and anything past this is not one.
+ERROR_BODY_MAX_BYTES: Final[int] = 64 * 1024
 
 #: A master's own timeout, in place of the session's total. A master is bounded
 #: by the size its feed declares, and a large one over slow Wi-Fi can take longer
@@ -756,6 +776,44 @@ class Pull:
         log.warning(message, work_id, *args, extra={"event": "pull.work_skipped", "work_id": work_id})
 
 
+class _AddressNoting(aiohttp.TCPConnector):
+    """A connector that notes the local address of each connection it hands out.
+
+    **Read as the connection is handed out**, because that is the one moment it
+    is certain to be held: a response whose body has already arrived returns its
+    connection to the pool before `ClientResponse` is given back, and its
+    `connection` is then None.
+    """
+
+    def __init__(self, noted: Callable[[str], None], **kwargs: Any) -> None:  # noqa: ANN401 -- TCPConnector's own keywords
+        super().__init__(**kwargs)
+        self._noted = noted
+
+    async def connect(
+        self,
+        req: aiohttp.ClientRequest,
+        traces: list[Trace],
+        timeout: aiohttp.ClientTimeout,  # noqa: ASYNC109 -- the signature is aiohttp's, overridden
+    ) -> Connection:
+        connection = await super().connect(req, traces, timeout)
+        transport = connection.transport
+        sockname = transport.get_extra_info("sockname") if transport is not None else None
+        if isinstance(sockname, tuple) and sockname and isinstance(sockname[0], str):
+            self._noted(sockname[0])
+        return connection
+
+
+def _is_error_body(body: bytes | None) -> bool:
+    """Whether a body is the transport table's error shape: a JSON object whose `error` is a sentence."""
+    if body is None:
+        return False
+    try:
+        document = json.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(document, dict) and isinstance(document.get("error"), str)
+
+
 class ClientPull:
     """`GET /client` and `POST /client/heartbeat`, with this client's token: the supervisor's `ClientLink`.
 
@@ -767,7 +825,8 @@ class ClientPull:
     walls you have", and each is said once when it starts and once when it ends.
     """
 
-    def __init__(self, settings: ClientSettings) -> None:
+    def __init__(self, settings: ClientSettings, *, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self._monotonic = monotonic
         self._server = settings.server_url
         self._token = settings.client_token
         self._document_path = settings.client_document_path
@@ -780,9 +839,17 @@ class ClientPull:
         self._unreadable = ReportOnce()
         self._uncacheable = ReportOnce()
         self._heartbeat_failing = ReportOnce()
-        #: The last client heartbeat the server refused, without its instant,
-        #: which is not sent again; None once one is accepted.
-        self._refused_report: dict[str, Any] | None = None
+        #: The last client heartbeat the server refused, without its instant, and
+        #: when it was refused; None once one is accepted.
+        self._held: tuple[dict[str, Any], float] | None = None
+        #: This end's address on the last connection to the server, or None
+        #: before the first one.
+        self._local_address: str | None = None
+
+    @property
+    def local_address(self) -> str | None:
+        """The address this Player reached the server from on its last connection, or None before any."""
+        return self._local_address
 
     def cached(self) -> ClientDocument | None:
         """The last document this client accepted, or None if there is none it can read."""
@@ -879,18 +946,25 @@ class ClientPull:
     async def report(self, heartbeat: dict[str, Any]) -> bool:
         """POST the client heartbeat. True when the server answered 204.
 
-        **A report the server refused is not sent again until it changes**
-        (`transport.json`, the client heartbeat's `400` and `413`, and any other
-        `4xx` but `401`, which a `POST` reads as its `400`): the same report gets
-        the same answer, so asking again each poll only fills the server's log.
-        Changed means any field but the instant it was made, so a screen
-        plugged in is sent at once. A refused token is the token's fault, not
-        the report's, and the report goes on being sent; so does one the server
-        failed with a `5xx` or did not answer.
+        **A report the server refused is held**: not sent again until it changes,
+        or until `REFUSED_REPORT_RESEND_SECONDS` have passed, so the same report
+        reaches a server that refuses it once per lapse rather than once per
+        poll, and a server that has come to accept it hears from this Player
+        within one. Changed means any field but the instant it was made, so a
+        screen plugged in, or a new settings address, is sent at once.
+
+        **Refused means the server's word on this report**: a status in
+        `CLIENT_HEARTBEAT_REFUSALS` with the table's error body. Anything else
+        under 500 is not a verdict on the report (a `429`, a proxy's `404`, a
+        captive portal's `200`): it is read as the table's `unanswered` case is,
+        like a `5xx` or no answer, and the report goes on being sent. So does one
+        refused for its token (`401`), which is the token's fault.
         """
         report = {key: value for key, value in heartbeat.items() if key != REPORTED_AT_KEY}
-        if report == self._refused_report:
-            return False
+        if self._held is not None:
+            held, refused_at = self._held
+            if report == held and self._monotonic() - refused_at < REFUSED_REPORT_RESEND_SECONDS:
+                return False
         try:
             async with self._client().post(
                 self._heartbeat_url,
@@ -898,23 +972,29 @@ class ClientPull:
                 headers={**self._auth(), "Content-Type": "application/json"},
             ) as response:
                 status = response.status
+                refused = status in CLIENT_HEARTBEAT_REFUSALS and _is_error_body(
+                    await _read_capped(response, ERROR_BODY_MAX_BYTES)
+                )
         except _UNREACHABLE:
             # Said by `fetch`, which runs on the same poll; a second line here
             # would be the same outage told twice.
             return False
         if status == HTTPStatus.NO_CONTENT:
-            self._refused_report = None
+            self._held = None
             if self._heartbeat_failing.end():
                 log.info("the server is accepting this client's heartbeat again", extra={"event": "client.heartbeat_ok"})
             return True
-        refuses_the_report = status < HTTPStatus.INTERNAL_SERVER_ERROR and status != HTTPStatus.UNAUTHORIZED
-        if refuses_the_report:
-            self._refused_report = report
+        if refused:
+            self._held = (report, self._monotonic())
         if self._heartbeat_failing.begin():
             log.warning(
-                "the server refused this client's heartbeat with %d; %s",
+                "the server did not take this client's heartbeat (it answered %d); %s",
                 status,
-                "it will be sent again when it changes" if refuses_the_report else "it will be sent again",
+                (
+                    f"it will be sent again when it changes, or in {REFUSED_REPORT_RESEND_SECONDS:.0f} seconds"
+                    if refused
+                    else "it will be sent again"
+                ),
                 extra={"event": "client.heartbeat_refused", "status": status},
             )
         return False
@@ -926,7 +1006,9 @@ class ClientPull:
 
     def _client(self) -> aiohttp.ClientSession:
         if self._session is None:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30, connect=10))
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30, connect=10), connector=_AddressNoting(self._note_address)
+            )
         return self._session
 
     def _cached_etag(self) -> str | None:
@@ -942,6 +1024,9 @@ class ClientPull:
             # Missing or unreadable, the answer is the same: ask without one,
             # and the server sends the whole document.
             return None
+
+    def _note_address(self, address: str) -> None:
+        self._local_address = address
 
     def _auth(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
