@@ -24,6 +24,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
+from arrt_contract import transport
 from conftest import WALL_ID, tick_until
 from fakes import RecordingOutput
 from PIL import Image
@@ -57,6 +58,8 @@ from arrt_player.pull import (
 HOLD_SECONDS = 10 * 60
 #: The most of a client or label document the Player reads: 1 MiB, likewise.
 DOCUMENT_CAP_BYTES = 1024 * 1024
+#: The most of a feed the Player reads: the contract's bound for the manifest route.
+MANIFEST_CAP_BYTES = transport()["routes"]["manifest_major"]["max_bytes"]
 #: How often a cached label document is stamped as answered while the server
 #: sends nothing new: a minute, likewise.
 LABEL_STAMP_SECONDS = 60
@@ -1144,6 +1147,41 @@ async def test_a_client_document_larger_than_the_cap_is_refused_and_not_cached(c
     assert await client_link().fetch() is None
 
     assert not client_settings.client_document_path.exists()
+
+
+def _padded_to(document: dict, size: int) -> dict:
+    """`document` with a padding key that makes the double's body exactly `size` bytes."""
+    unpadded = len(json.dumps({**document, "padding": ""}).encode())
+    return {**document, "padding": "x" * (size - unpadded)}
+
+
+async def test_a_feed_past_the_contracts_bound_keeps_the_wall_on_its_feed_said_once_and_asked_for_again(
+    pull, stub, session, http_settings, caplog
+):
+    """A server sending a feed past the route's `max_bytes`: the wall shows what it holds, and is never sent past it."""
+    kept = stub.publish("w1")
+    await pull.cycle(session)
+    etag = (http_settings.wall_dir / ETAG_FILENAME).read_text()
+    stub.manifest = _padded_to(stub.publish("w2"), MANIFEST_CAP_BYTES + 1)
+
+    with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
+        assert await pull.cycle(session) is True
+        assert await pull.cycle(session) is True
+
+    assert _cached(http_settings) == kept, "a feed past the bound replaced the one the wall shows"
+    assert (http_settings.wall_dir / ETAG_FILENAME).read_text() == etag, "the ETag no longer describes the cached feed"
+    assert stub.majors_requested == [2, 2, 2], "the poll after a feed past the bound did not ask again"
+    (refused,) = [record for record in caplog.records if record.__dict__.get("event") == "pull.manifest_refused"]
+    assert f"runs past {MANIFEST_CAP_BYTES} bytes" in refused.getMessage()
+
+
+async def test_a_feed_of_exactly_the_contracts_bound_is_adopted(pull, stub, session, http_settings):
+    published = _padded_to(stub.publish("w1"), MANIFEST_CAP_BYTES)
+    stub.manifest = published
+
+    assert await pull.cycle(session) is True
+
+    assert _cached(http_settings) == published
 
 
 async def test_a_label_document_larger_than_the_cap_is_refused(stub, client_settings):
