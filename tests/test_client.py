@@ -801,7 +801,7 @@ def _page(cache_dir: Path, bind: str, *, allowed: str | None = None) -> UiSettin
     ("bind", "allowed", "local", "expected"),
     [
         (EVERY_INTERFACE, None, "192.0.2.10", "http://192.0.2.10:8771/"),
-        (EVERY_INTERFACE, "Wall.LAN., other.lan", "192.0.2.10", "http://wall.lan:8771/"),
+        (EVERY_INTERFACE, "Wall.LAN., other.example", "192.0.2.10", "http://wall.lan:8771/"),
         (EVERY_INTERFACE, " , wall.lan", None, "http://wall.lan:8771/"),
         (EVERY_INTERFACE, "2001:db8::7", "192.0.2.10", "http://[2001:db8::7]:8771/"),
         ("::", None, "2001:db8::5", "http://[2001:db8::5]:8771/"),
