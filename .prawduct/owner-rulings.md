@@ -4,6 +4,16 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-19, during wave 2 of the audit fixes.** Recorded in full in Arrt's `owner-rulings.md` under the same date ("during wave
+2 of the audit fixes, two rulings"). The one that is the Player's:
+
+- **Arrt Player removes from a television only the pictures it recorded uploading.** The
+  owner: "yes to recommendations", to the advisor's recommendation of exactly that, for a
+  later wave. Until it is built the Player clears every uploaded picture it cannot account
+  for on a set it meets fresh, which is the recorded design (`security-model.md`). Built by
+  `build-plan-audit-wave-3.md`, whose decision on what happens to pictures an older Player
+  uploaded and never recorded is the owner's to veto before any deploy.
+
 **2026-11-19, after wave 1 of the audit fixes.** The full set is in Arrt's `owner-rulings.md` under the same date. The two that are
 the Player's:
 
