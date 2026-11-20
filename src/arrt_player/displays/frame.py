@@ -327,6 +327,11 @@ class FrameDisplay:
         #: asked for again until the next feed, as the orphan path does not ask
         #: again: asking at once learns nothing.
         self._kept_by_the_set: set[str] = set()
+        #: Images the set lists that nothing accounts for, left on it by the
+        #: last reconciliation because the set was showing one of them
+        #: (`_remove_orphans`). Their removal is owed again once the wall shows
+        #: another picture (`prepare`).
+        self._left_on_the_wall: frozenset[str] = frozenset()
 
         #: The set could not be reached at all. Its own ladder, separate from the
         #: wall's: a television that is asleep and one that is awake and ignoring
@@ -422,6 +427,12 @@ class FrameDisplay:
         # the writes' wait, and a set back in art mode should get them this pass.
         await self._take_the_sets_news()
         await self._switch_off_the_slideshow()
+        if self._left_on_the_wall and self._wall_content_id not in self._left_on_the_wall:
+            # The picture left on the wall unaccounted for is no longer up:
+            # its removal is owed now, as news rather than as a retry.
+            self._left_on_the_wall = frozenset()
+            self._reconciliation_owed = True
+            self._reconcile_wait.clear()
         if self._reconciliation_owed and self._reconcile_wait.is_due() and self._writes.is_due():
             # Cleared only when the work actually settled: a set that goes
             # away halfway through raises, and one that cannot say what it
@@ -552,6 +563,15 @@ class FrameDisplay:
         device's store once the set says. **`_on` is set only after the store
         has made the bindings that set's**, so a store fault there ends the pass
         with nothing used, and the next reads the set again.
+
+        **What the set turned out to be is said, and its cleanup owed, before
+        anything after `belongs_to` can fail**: `belongs_to` has committed by
+        then, so a later pass would hear "the same set" and neither the line
+        nor the reconciliation a change of set owes would come again.
+        **Leaving the store in memory owes a reconciliation too**, whatever the
+        set turned out to be: what that store uploaded is on this set and
+        accounted for by nothing on disk. The picture on the wall is among it,
+        and stays until another has been selected (`_remove_orphans`).
         """
         if self._on is not None:
             return
@@ -571,7 +591,12 @@ class FrameDisplay:
             self._go_on_unidentified()
             return
         met = self._store.belongs_to(identity)
-        if self._scratch is not None:
+        from_memory = self._scratch is not None
+        # What this process learned of the wall while the store in memory was
+        # in use was learned on this connection, so of this set: it is kept.
+        self._met(met, identity, learned_on_this_set=from_memory)
+        if from_memory:
+            self._reconciliation_owed = True
             # The picture on the wall is one the store in memory holds: the
             # programme must put this store's up, rather than believe it is.
             self._store.forget_the_wall()
@@ -582,10 +607,13 @@ class FrameDisplay:
         self._going_on_unidentified.end()
         if self._unidentified.end():
             log.info("the television says which set it is again", extra={"event": "tv.identified"})
-        self._met(met, identity)
 
-    def _met(self, met: SetMet, identity: str) -> None:
-        """Say what the store found the set to be, and start afresh on a set the bindings were not made on."""
+    def _met(self, met: SetMet, identity: str, *, learned_on_this_set: bool) -> None:
+        """Say what the store found the set to be, and start afresh on a set the bindings were not made on.
+
+        What the process knows of the set's wall is forgotten on a change of
+        set, as another set's, unless it was `learned_on_this_set`.
+        """
         if met.change is SetChange.ADOPTED:
             log.info(
                 "the display store did not record which television its pictures were put on; they are taken as this one's",
@@ -606,7 +634,8 @@ class FrameDisplay:
                     "restored": met.restored,
                 },
             )
-            self._forget_what_the_set_showed()
+            if not learned_on_this_set:
+                self._forget_what_the_set_showed()
             # As a first run reconciles: the set's own list against its bindings.
             self._reconciliation_owed = True
 
@@ -630,7 +659,8 @@ class FrameDisplay:
         if self._going_on_unidentified.begin():
             log.warning(
                 "the television has not said which set it is for %d minutes; the wall shows art on it without the "
-                "pictures it put on a set before, uploading what it shows, and removes nothing from it until it says",
+                "pictures it put on a set before, uploading the work it shows and then "
+                "every other work of the feed, one a pass, as on a first run, and removes nothing from it until it says",
                 IDENTITY_PATIENCE_SECONDS // 60,
                 extra={"event": "tv.unidentified_going_on"},
             )
@@ -645,12 +675,22 @@ class FrameDisplay:
         self._on = None
 
     def _forget_the_set(self) -> None:
-        """The connection went: whatever answers next is identified before a binding is used on it."""
+        """The connection went: whatever answers next is identified before a binding is used on it.
+
+        **The patience starts again** with the next connection's first
+        unanswered read, so a set that will not say and keeps dropping its
+        connection is given a store in memory, and a theme's uploads, at most
+        once per outage and its `IDENTITY_PATIENCE_SECONDS`, never once per
+        flap. Those uploads are on a set nobody can name, and nothing removes
+        them (`architecture.md`, beside the patience).
+        """
         self._on = None
         if self._scratch is not None:
             # What was uploaded while the set would not say is on a set nobody
             # can name: not carried to whatever answers next.
             self._leave_the_scratch_store()
+        self._unidentified_since = None
+        self._going_on_unidentified.end()
 
     def _leave_the_scratch_store(self) -> None:
         if self._scratch is not None:
@@ -666,6 +706,10 @@ class FrameDisplay:
         self._kept_by_the_set.clear()
         self._brightness_at = None
         self._brightness_value = None
+
+    def _on_the_wall(self) -> set[str | None]:
+        """The ids this process knows to be on the set's wall: its own last selection, and the set's last word."""
+        return {self._wall_content_id, self._announced_content_id} - {None}
 
     def _may_remove(self) -> bool:
         """Whether a removal may be sent: only from a store whose recorded identity is the set's on this connection."""
@@ -1144,14 +1188,30 @@ class FrameDisplay:
         picture with it. The rows go after the set's answer, never before, so a
         removal held or unconfirmed leaves every one in place, still accounted
         for and still owed.
+
+        **The picture on the wall is never asked for**, accounted for or not,
+        until another has been selected: what a Frame does when the image it
+        shows is deleted has never been measured. An unaccounted one is left
+        (`_left_on_the_wall`) and its removal owed again once the wall has
+        moved on. Only a picture this process knows is up is spared (its own
+        last selection, or the set's last announcement): on a first run, or on
+        a set met afresh, it knows nothing of the wall until then, and an
+        upload of the household's that is up is removed like any other the set
+        lists.
         """
         if not self._may_remove():
             # A store that does not know it is this set's accounts for nothing
             # here: its ids may name another set's pictures, and an id it does
-            # not hold may be one of this set's the Player put there.
+            # not hold may be one of this set's the Player put there. Met only
+            # while the store in memory is in use, since `prepare` identifies
+            # the set first; settled for now, because leaving that store owes
+            # the work again (`_know_the_set`).
             return True
         accounted = self._state.accounted_content_ids()
-        orphans = sorted(listed - accounted)
+        unaccounted = listed - accounted
+        on_the_wall = self._on_the_wall()
+        self._left_on_the_wall = frozenset(unaccounted & on_the_wall)
+        orphans = sorted(unaccounted - on_the_wall)
         retiring, claimed = self._retirements(pictures)
         on_the_set = {
             binding.tv_content_id: binding
@@ -1222,7 +1282,7 @@ class FrameDisplay:
         since the last feed, and a binding whose last naming is unknown.
         """
         named = {picture.work_id for picture in pictures}
-        on_the_wall = {self._wall_content_id, self._announced_content_id} - {None}
+        on_the_wall = self._on_the_wall()
         now = self._state.feed_seconds
         retiring: list[Binding] = []
         claimed: set[str] = set()

@@ -871,6 +871,8 @@ class _TracingTv(FakeTv):
     def __init__(self) -> None:
         super().__init__()
         self.trace: list[str] = []
+        #: Each id a removal asked for while the set was displaying it.
+        self.removed_while_displayed: list[str] = []
 
     async def connect(self) -> None:
         connected = self._connected
@@ -910,6 +912,8 @@ class _TracingTv(FakeTv):
 
     async def _send_remove(self, content_ids):
         self.trace.append("remove")
+        if self.displaying in content_ids:
+            self.removed_while_displayed.append(self.displaying)
         return await super()._send_remove(content_ids)
 
     async def _send_set_brightness(self, value: int) -> None:
@@ -1261,7 +1265,10 @@ _WHAT_REACHES_THE_SET = {
     # A set that will not say: the pass ends at the identity read, asked again
     # on the ladder and not on every pass; once the patience is out, the wall
     # shows art from an empty store and removes nothing; when the set says, the
-    # wall goes back to its own store and puts that store's picture up.
+    # wall goes back to its own store and puts that store's picture up, and the
+    # copies the empty store put on the set are removed with no new feed: the
+    # one not on the wall in that pass, and the one on the wall in the pass
+    # after another picture was selected, never before.
     "a set that will not say which it is": (
         _passes(
             _then(_feed("w1", "w2"), _the_set(device_id=None)),
@@ -1269,6 +1276,7 @@ _WHAT_REACHES_THE_SET = {
             _later(10),
             _later(IDENTITY_PATIENCE_SECONDS),
             _then(_the_set(device_id=_THIS_SET), _later(300)),
+            _later(1),
         ),
         [
             ["connect", "identity"],
@@ -1294,6 +1302,9 @@ _WHAT_REACHES_THE_SET = {
                 "identity",
                 "get_artmode",
                 "slideshow off",
+                "list",
+                "get_artmode",
+                "remove",
                 "get_artmode",
                 "get_artmode",
                 "upload",
@@ -1302,6 +1313,7 @@ _WHAT_REACHES_THE_SET = {
                 "get_artmode",
                 "upload",
             ],
+            ["list", "get_artmode", "remove"],
         ],
     ),
     # A store the previous release wrote: the first identity read is taken as
@@ -1357,6 +1369,10 @@ async def test_what_reaches_the_set_in_each_pass_is_unchanged(scenario: str, set
             sent.append(tv.trace[start:])
 
     assert sent == expected
+    # Whatever the scenario: no removal reaches the set for the picture it is
+    # displaying, which leaves it until another picture has been selected. What
+    # a Frame does when the image it shows is deleted has never been measured.
+    assert tv.removed_while_displayed == [], f"removed {tv.removed_while_displayed} while the set displayed it"
 
 
 # -- the set's own news (the wave-1 review's last observation) -------------------

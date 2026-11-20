@@ -1615,6 +1615,115 @@ class TestASetThatWillNotSayWhichItIs:
         assert tv.removed == []
         assert len(_store_events(caplog, "binding.set_adopted")) == 1
 
+    async def test_what_the_store_in_memory_put_up_comes_off_once_the_set_says_with_no_new_feed(
+        self, settings, clock, publish, caplog
+    ):
+        """The copies uploaded while the set would not say are the device store's to account for once it does:
+        the cleanup is owed by the set saying, not by the next feed, and the copy on the wall goes only after
+        the store's own copy of the work has been selected."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory: w1 uploaded and selected, w2 uploaded
+            copies = set(tv.holding) - set(on_the_set.values())
+            assert len(copies) == 2, f"the store in memory put up {sorted(copies)}"
+            shown_copy = tv.displaying
+            assert shown_copy in copies
+
+            tv.device_id = THIS_SET
+            clock.advance(400)
+            await wall.tick()  # the set says; no feed is published from here on
+            assert shown_copy in tv.holding, "the copy on the wall was removed before another picture was selected"
+            assert tv.displaying == on_the_set["w1"]
+            clock.advance(1)
+            await wall.tick()
+
+        assert not copies & set(tv.holding), f"{sorted(copies & set(tv.holding))} stayed on the set once it said"
+        assert set(on_the_set.values()) <= set(tv.holding), "a picture of the device store's own was removed"
+        assert publish.work_of(tv.on_the_wall) == "w1"
+
+    async def test_two_outages_inside_the_patience_upload_the_theme_once(self, settings, clock, publish):
+        """After an outage the set is waited for again, so a flapping connection does not upload a theme per flap."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()
+            await wall.tick()
+            uploaded = len(tv.uploaded)
+            elapsed = 0.0
+            for _ in range(2):
+                # A republish each time, so every pass asks the set something (a quiet pass sends nothing).
+                tv.unavailable = True
+                clock.advance(30)
+                publish(["w2", "w1"], interval_seconds=3600)
+                await wall.tick()
+                tv.unavailable = False
+                for order in (["w1", "w2"], ["w2", "w1"]) * 3:
+                    clock.advance(60)
+                    publish(order, interval_seconds=3600)
+                    await wall.tick()
+                elapsed += 30 + 6 * 60
+            assert elapsed < IDENTITY_PATIENCE_SECONDS
+
+        assert len(tv.uploaded) == uploaded, f"{len(tv.uploaded) - uploaded} more upload(s) after two short outages"
+
+    async def test_a_store_fault_after_the_set_changed_loses_neither_the_line_nor_the_cleanup(
+        self, settings, clock, publish, caplog
+    ):
+        """The store records the change of set and then cannot forget the wall: the change is said once, and the
+        reconciliation a change of set owes is made at a later pass, though the store then answers 'the same set'."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        await _a_life_on(settings, clock, publish, _a_set(THIS_SET))
+        another = _a_set(None, numbered_from=20, **{"MY-F0011": HOUSEHOLDS})
+        removing_what_it_displays: list[bool] = []
+        send_remove = another._send_remove
+
+        async def recording_remove(content_ids):
+            removing_what_it_displays.append(another.displaying in content_ids)
+            return await send_remove(content_ids)
+
+        another._send_remove = recording_remove
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, another, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory
+            another.device_id = ANOTHER_SET
+            armed = _arm(
+                store,
+                lambda: _sqlite_error("SQLITE_BUSY", "database is locked"),
+                failing=lambda statement: statement.startswith("DELETE FROM daemon_state WHERE key = ?"),
+                times=1,
+            )
+            clock.advance(400)
+            await wall.tick()  # the change is recorded, and forgetting the wall fails
+            assert armed.raised == 1
+            assert store.tv_identity == ANOTHER_SET
+            _disarm(store, armed)
+            for _ in range(3):
+                clock.advance(10)
+                await wall.tick()
+            accounted = {binding.tv_content_id for binding in store.bindings()}
+
+        assert len(_store_events(caplog, "binding.set_changed")) == 1, "the change of set was not said once"
+        assert another.removed, "the reconciliation a change of set owes was lost to the fault"
+        assert "MY-F0011" not in another.holding
+        assert not any(removing_what_it_displays), "the picture the store in memory put up was removed while shown"
+        assert not set(another.holding) - accounted, f"{sorted(set(another.holding) - accounted)} stayed on the set"
+
 
 class _AModeThatWillNotRead(FakeTv):
     """A set whose own art-mode flag cannot be read for the still wall's line, as when the read drops the connection."""
