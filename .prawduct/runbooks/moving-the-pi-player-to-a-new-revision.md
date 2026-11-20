@@ -72,7 +72,7 @@ F6. Check `.env` as in step 9a (if it prints a line, go to F9), then install
         sudo cp /opt/arrt-player/deploy/display.service /etc/systemd/system/
         sudo systemctl daemon-reload
 
-F7. Steps 12–16 and step 14a, except that where one of them sends you to step
+F7. Steps 12–16 and steps 13a and 14a to 14c, except that where one of them sends you to step
     17, go to F9 instead. Then check the unit runs from the new checkout:
 
         systemctl show -p WorkingDirectory display.service
@@ -134,11 +134,41 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
    edited the checkout on the Pi. Nothing has changed yet → step 12 to start
    the old revision again, then find out what the edit was before going on.
 
+6a. **IF step 2 showed `deploy/README.md` § The television's identity, a
+    watchdog and the page's Frame address, and a Frame's address was ever moved
+    to a different television:** delete that wall's store before starting the new
+    revision. Nothing on the Pi records which set the old rows were made on, and a
+    store from before this release takes the first set it meets as theirs.
+
+        sudo grep '^CACHE_DIR=' /opt/arrt-player/.env
+        sudo -u tvpi find <that directory> -maxdepth 2 -name 'display-state.sqlite*'
+        sudo -u tvpi rm -f <that directory>/<wall id>/display-state.sqlite{,-wal,-shm}
+
+    **Expected:** `find` names one store per Frame wall, with its `-wal` and
+    `-shm` files if the Player stopped with them; the `rm` removes the three of
+    the wall whose set changed. The cost is a re-upload of that wall's works. **If the Frame has
+    always been the same television, skip this step.** *Why: the Player then
+    removes from the set every uploaded picture it cannot account for, and a
+    store that names the wrong set's ids would also select by them.*
+
 7. **IF step 2 showed a new Player setting:** add it.
 
        sudoedit /opt/arrt-player/.env
 
    *Why `sudo`: `.env` is readable by `tvpi` and root only.*
+
+7a. Check the system packages the Player runs beside it:
+
+        mpv --version | head -1
+
+    **Expected:** `mpv 0.40…` or later.
+    **If `command not found`:** install it (`deploy/README.md` § The slideshow):
+
+        sudo apt-get update && sudo apt-get install --no-install-recommends mpv
+
+    *Why: slideshow mode draws through mpv, and nothing else on the Pi brings
+    it. Arrt mode does not need it yet, but a Pi switched to a slideshow from
+    the page should not have to wait for an install.*
 
 7b. **IF step 2 showed `deploy/README.md` § Two things that can stop an
     upgrade**, check that `.env` holds none of the zero intervals it names:
@@ -161,19 +191,6 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
     Add `UI_ALLOWED_HOSTS=<name>`, several comma-separated, names only. *Why:
     the page refuses any other name with a 421 before any page, and the journal
     says `settings_page.host_refused`.*
-
-7a. Check the system packages the Player runs beside it:
-
-        mpv --version | head -1
-
-    **Expected:** `mpv 0.40…` or later.
-    **If `command not found`:** install it (`deploy/README.md` § The slideshow):
-
-        sudo apt-get update && sudo apt-get install --no-install-recommends mpv
-
-    *Why: slideshow mode draws through mpv, and nothing else on the Pi brings
-    it. Arrt mode does not need it yet, but a Pi switched to a slideshow from
-    the page should not have to wait for an install.*
 
 8. Sync the Player's environment:
 
@@ -215,10 +232,50 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
         sudo systemctl start display.service
 
+12a. **IF steps 10–11 installed a new unit:** check that the unit's main process
+     is `uv` and the Player its child. The unit's `NotifyAccess=all` rests on it:
+     with `main` systemd would drop the Player's `READY=1` and fail every start.
+
+         pid=$(systemctl show -p MainPID --value display.service); ps -o pid=,args= -p "$pid"; pgrep -P "$pid" -a
+
+     **Expected:** the first line is `uv run …`, and `pgrep` prints the Python
+     process that runs `python -m arrt_player`.
+     **If the main process is Python itself:** `NotifyAccess=all` is wider than
+     needed and harmless; tell the owner. **If it is neither:** → step 17.
+
 13. Run `systemctl is-active display.service`.
-    **Expected:** `active`.
-    **If not:** run `systemctl status display.service`. A missing setting is
-    refused by name: fix it with step 7 and repeat step 12. Anything else → step 17.
+    **Expected:** `active`. *Why it may say `activating` for a moment: the unit is
+    `Type=notify` and counts the Player started only when it says `READY=1`,
+    which it does once its mode is running, within seconds.*
+    **If it still says `activating` after a minute, or `failed`:** run
+    `systemctl status display.service`. A missing setting is refused by name: fix
+    it with step 7 and repeat step 12. A start that never says `READY=1` ends with
+    `start operation timed out` after ten minutes → step 17.
+
+13a. **IF steps 10–11 installed a new unit:** check that systemd read the new
+     directives, and that the Player is `active` in the mode it runs.
+
+         systemctl show -p Type,NotifyAccess,WatchdogUSec,WatchdogSignal,TimeoutStartUSec,TimeoutAbortUSec display.service
+
+     **Expected, all of:** `Type=notify`, `NotifyAccess=all`, `WatchdogUSec=5min`,
+     `WatchdogSignal=15` (SIGTERM), `TimeoutStartUSec=10min`, `TimeoutAbortUSec=1min 30s`.
+     **Once per Pi, with the owner:** every mode owes `READY=1`, and a mode that
+     never sends it fails its start. Step 13 checked the mode the Player runs in.
+     To check the others, switch on the settings page to *A Reddit slideshow* and
+     back (step 13 after each: `active` within a minute), and, for setup mode,
+     the Player started with no server address set anywhere (the page serves, and
+     the unit is `active`). Put it back as it was.
+
+13b. **Once per Pi, with the owner (it takes the wall dark for a minute):** check
+     that a refused configuration still restarts every 5 s. Add a line
+     `MANIFEST_POLL_SECONDS=0` with `sudoedit /opt/arrt-player/.env`, run
+     `sudo systemctl restart display.service`, and look:
+
+         systemctl status display.service --no-pager | head -5; journalctl -u display.service -n 5 --no-pager
+
+     **Expected:** `activating (auto-restart)` and the journal saying
+     `Arrt Player cannot start` and `daemon.misconfigured`, again every 5 s.
+     Remove the line, restart, and step 13 says `active`.
 
 14. Read the Player's start in the journal:
 
@@ -260,6 +317,39 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
      **If anything else is not as expected:** → step 17, and keep the line the
      first command printed, if any. It names what the sandbox refused.
 
+14b. **IF steps 10–11 installed a new unit, once per Pi, with the owner:** check
+     that systemd restarts a Player that stops making progress, and that it stops
+     it the orderly way. Stop the Player's Python without ending it:
+
+         sudo kill -STOP $(pgrep -P "$(systemctl show -p MainPID --value display.service)" -f arrt_player)
+
+     Wait six minutes, then:
+
+         journalctl -u display.service --since '8 min ago' --no-pager | grep -iE 'watchdog|Stopping|Started|client.started'
+
+     **Expected:** `Watchdog timeout (limit 5min)!`, then a stop and a start (a
+     `client.started` line), within `WatchdogSec` plus `RestartSec`, about 305 s;
+     step 13 prints `active`; and **no `tv.unavailable` follows the restart**,
+     which says the television's art channel was closed rather than abandoned.
+     The wall keeps its picture while this runs.
+     **If nothing happens:** the Player is being petted when it should not be, or
+     the unit is not `Type=notify` → step 13a.
+     **If `Stopping` is followed by `SIGKILL` after about 90 s:** the Player's
+     event loop is stuck too, which is the one case the unit accepts → tell the
+     owner.
+
+14c. **IF steps 10–11 installed a new unit:** check that the added directives
+     are what systemd reports, and that none stopped a device.
+
+         systemd-analyze security display.service --no-pager | grep -E 'LockPersonality|RestrictNamespaces|RestrictSUIDSGID|RestrictRealtime|ProtectHostname|ProtectKernelLogs|ProtectControlGroups|SystemCallArchitectures|CapabilityBoundingSet'
+
+     **Expected:** a line for each, none marked as exposed. *The tool's wording is
+     systemd's and has not been read on this Pi.* Then repeat step 14a's second
+     command once the wall has run ten minutes: the screen, the label (SPI and
+     GPIO), the DDC bus (`screen.brightness_set`) and mpv each draw. **A directive
+     that stops one is reverted by name in `deploy/display.service`**, and the
+     owner is told which.
+
 15. **On your Mac**, read how the server hears the Pi. `SERVER_URL` is the
     server's address, the same value as in the Pi's `.env`:
 
@@ -289,14 +379,20 @@ forward, and an older Player may refuse them. (To go back from § The first
 time, use F9 there.)
 
 - **The settings page's file, `$CACHE_DIR/.settings.json`, is layout version
-  2** once a Player from v0.8.0 on has saved anything to it. A Player that
-  writes version 1 refuses it by name (`.settings.json is layout version 2`)
+  2** once a Player from v0.8.0 on has saved anything to it, **and layout 3 while
+  it holds `TV_ADDRESS`**, which the page can now set. A Player that writes an
+  older layout refuses a newer one by name (`.settings.json is layout version 3`)
   and exits with status 2, and the unit starts it again every 5 s with every
-  wall dark. Step 19a puts the file back to version 1.
+  wall dark. Step 19a puts the file back to what the old revision writes.
 - **Each Frame wall's store, `$CACHE_DIR/<wall id>/display-state.sqlite`, is
-  widened on open** to the schema the running Player knows. It has been at
-  schema 2 since 2026-08-06, so every revision a Pi has run reads it. A Player
-  older than that shows no art on that wall, saying `daemon.state_too_new`.
+  widened on open** to the schema the running Player knows, and **an older
+  Player refuses a store newer than itself**: it shows no art on that wall,
+  saying `daemon.state_too_new`. A Player from before 2026-11-19 writes schema 2
+  and the release that follows it writes 4, so going back across it parks every
+  Frame wall until step 19b sets each store's version back. The older Player then
+  ignores the new columns and table, and sends every work again (one upload per
+  work); the rows stay, so going forward again loses nothing but the recorded
+  television, which is forgotten and taken from the first read.
 
 17. **IF step 2's sections say the release goes back as a pair** (the server
     and the Player together): roll the server back first, using the homelab
@@ -312,15 +408,24 @@ time, use F9 there.)
 
          sudo -u tvpi git -C /opt/arrt-player show <old>:src/arrt_player/settings_ui/store.py | grep '^VERSION: Final'
 
-     **Expected:** `VERSION: Final[int] = 2` → step 20.
+     **Expected:** `VERSION: Final[int] = 2`, and the file's own layout is not
+     3 (`sudo jq .version <CACHE_DIR>/.settings.json`, with `CACHE_DIR` from
+     `sudo grep '^CACHE_DIR=' /opt/arrt-player/.env`) → step 19b.
+     **If the file prints `3`:** the page holds the Frame's address, which the
+     old revision cannot read. Move it into `.env` first: read it with
+     `sudo jq -r .values.TV_ADDRESS <that directory>/.settings.json`, add
+     `TV_ADDRESS=<it>` to `.env` with `sudoedit /opt/arrt-player/.env`, then as
+     root (`sudoedit <that directory>/.settings.json`) delete `TV_ADDRESS` from
+     `values` and set `version` to `2`. → step 19b.
      **If it prints `fatal: path …`:** the old revision has no settings
-     page and ignores the file → step 20.
+     page and ignores the file → step 19b.
      **If `VERSION: Final[int] = 1`:** read the file's own layout:
 
          sudo grep '^CACHE_DIR=' /opt/arrt-player/.env
          sudo jq .version <that directory>/.settings.json
 
-     If it prints `2`, edit it as root:
+     If it prints `2` or `3`, edit it as root (a `TV_ADDRESS` in `values` moves
+     into `.env` as above):
 
          sudoedit <that directory>/.settings.json
 
@@ -334,13 +439,49 @@ time, use F9 there.)
      **Expected:** `"version":1`, and none of the six keys.
      *Why the edit and not a delete: the file holds the page's password and
      whatever it set, which `.env` does not.* If it printed `1`, or
-     `No such file`, there is nothing to do → step 20.
+     `No such file`, there is nothing to do → step 19b.
+
+19b. Ask the old revision which Frame store schema it writes, and set each
+     Frame wall's store to it. **The Player must be stopped** (step 18).
+
+         sudo -u tvpi git -C /opt/arrt-player show <old>:src/arrt_player/state/store.py | grep '^SCHEMA_VERSION'
+
+     **Expected:** `SCHEMA_VERSION: Final[int] = 2` (call the number `<n>`).
+     **If it prints `fatal: path …`:** the old revision has no store → step 20.
+     For each store, from step 6a's `find`:
+
+         sudo -u tvpi python3 -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('PRAGMA user_version = <n>'); c.commit()" <that directory>/<wall id>/display-state.sqlite
+
+     Then read it back:
+
+         sudo -u tvpi python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA user_version').fetchone())" <that directory>/<wall id>/display-state.sqlite
+
+     **Expected:** `(2,)`, or `(<n>,)` as step 19b printed it.
+     *Why not `3`: a revision that writes schema 2 refuses 3 as it refuses 4, and
+     only the number the old revision writes opens the store (measured against
+     the end of wave 1's code, 2026-11-19), so the number is the one the old
+     revision prints, never the nearest below the store's.* Or delete the store,
+     which costs a re-upload of the whole wall instead of one per work. If the
+     old revision prints 4 or more, the store opens as it is.
 
 20. Repeat steps 8–14, which put the old revision's environment and unit back
     and start it.
     **Expected:** step 14's two lines, from the old revision.
     *A unit from before 2026-11-19 starts `uv run` without `--no-dev`, so its
     first start installs the dev group again, from uv's cache or from PyPI.*
+
+## When the revision is a release: move the server's pinned Player
+
+**On your Mac, once, when a release is cut** (a tag on `main` of this repo), not
+on the Pi. Arrt's test of a real Player against a real server runs the Player at
+the one commit that Arrt's `arrt/tests/system/player-ref.txt` names, fetched from
+this repository, so a change to the Player is tested against the server only when
+that line moves. Open a pull request on Arrt that replaces the 40-hex commit on
+its last line with the release's commit (`git rev-parse <tag>^{commit}`), and say
+in it which release. *Why a commit and not the tag: a tag can be moved.* Until it
+merges, the server's test still runs the older Player. **The file is in the
+server's wave-2 work and had not merged when this was written; if it is not at
+that path, find it by the name `player-ref.txt` in Arrt's `arrt/tests/system/`.**
 
 ## If this doesn't work
 - The old revision won't start either → stop. The wall shows the text console

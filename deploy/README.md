@@ -582,7 +582,7 @@ display.service` prints `active`; and the runbook's steps 13a to 14c.
 **The way back** is the previous revision, plus one change on each Frame wall's
 store: it refuses a schema it does not know, and parks that wall. Stop the Player
 and set the store's version to the one the previous revision writes (the runbook's
-§ Going back, step 18a). Moved `TV_ADDRESS` to the page? Move it back into `.env`,
+§ Going back, step 19b). Moved `TV_ADDRESS` to the page? Move it back into `.env`,
 delete it from `values` in `.settings.json` and set `version` to 2 (step 19a).
 
 ## The two new units, and where everything they name now lives
