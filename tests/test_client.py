@@ -1651,6 +1651,7 @@ PROCESS_EVENTS = frozenset(
         "client.stopped",
         "client.identity_unreadable",
         "client.identity_read",
+        "client.identity_changed",
         "client.unreachable",
         "client.reachable",
         "client.refused",
