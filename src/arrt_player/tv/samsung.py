@@ -51,7 +51,6 @@ import json
 import logging
 import re
 from collections.abc import Awaitable
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, TypeVar
 
@@ -443,8 +442,13 @@ class SamsungTv(TvClient):
         """
         await self._call("set_slideshow_status", self._client().set_slideshow_status(duration=0))
 
-    async def listed_content_ids(self) -> frozenset[str]:
-        return frozenset(entry["content_id"] for entry in await self._available() if "content_id" in entry)
+    async def listed_pictures(self) -> dict[str, str | None]:
+        """The set's list of its uploads: each id, with its `image_date` when the set gives one as text."""
+        return {
+            str(entry["content_id"]): date if isinstance(date := entry.get("image_date"), str) else None
+            for entry in await self._available()
+            if entry.get("content_id")
+        }
 
     async def _available(self) -> list[dict[str, Any]]:
         entries = await self._call("available", self._client().available(category=UPLOADED_CATEGORY))
@@ -452,7 +456,7 @@ class SamsungTv(TvClient):
             raise TvUnavailable(f"the television listed its uploads as a {type(entries).__name__}, not a list")
         return [entry for entry in entries if isinstance(entry, dict)]
 
-    async def _send_upload(self, path: Path) -> str:
+    async def _send_upload(self, path: Path, marker: str) -> str:
         """Put an image on the television, and establish whether it landed.
 
         The library returns None when the acknowledgement does not arrive inside
@@ -468,12 +472,16 @@ class SamsungTv(TvClient):
         claiming an id this upload did not create would bind a work to somebody
         else's picture.
 
-        The marker is only unique because uploads here are sequential: one
-        reconciliation loop, one image at a time. A concurrent uploader would
-        need a finer marker than the second-resolution timestamp the protocol
-        carries.
+        The marker is the caller's (`TvClient.upload`), so a caller that
+        records it before sending can find this upload again by it whatever
+        happens here. It is only unique because uploads here are sequential:
+        one reconciliation loop, one image at a time, and the store that
+        records them never gives two the same.
+
+        **`TvUnavailable` only before the upload is sent** (the snapshot, or
+        no connection); once it is, a failure to establish the outcome is a
+        `TvUploadFailed`, because the image may be on the set.
         """
-        marker = datetime.now().strftime("%Y:%m:%d %H:%M:%S")  # noqa: DTZ005 -- the set stamps its list in its own local time
         before = await self.listed_content_ids()
 
         reported: Exception | None = None

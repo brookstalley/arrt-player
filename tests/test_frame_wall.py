@@ -20,6 +20,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from fake_tv import ours_on_the_set
 from fakes import FakeTv
 
 from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, frame_wall
@@ -702,15 +703,15 @@ async def test_art_mode_going_off_during_a_re_upload_stops_the_second_selection(
     assert state.last_selected_work_id == "w1"
 
 
-async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, tv: FakeTv, publish, settings):
+async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, tv: FakeTv, publish, settings, state):
     """Upload, removal, brightness and the slideshow switch were never tried with a
     programme on (`samsung-tv-state-findings.md` § What works in each state), so
     none is sent while the panel is lit and not showing art. Every one of them is
-    owed here: a fresh wall with three works to upload, a picture on the set
-    nothing accounts for, a brightness never written and a slideshow never
+    owed here: a fresh wall with three works to upload, a picture of the Player's
+    on the set no binding wants, a brightness never written and a slideshow never
     switched off."""
     publish(["w1", "w2", "w3"])
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     tv.power = "on"
 
@@ -724,13 +725,13 @@ async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, 
     assert tv.selected == []
 
 
-async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon: Wall, tv: FakeTv, publish, settings):
+async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon: Wall, tv: FakeTv, publish, settings, state):
     """The other half of the same rule: switched off at the remote (`PowerState`
     standby), the set serves uploads, removals, brightness and the slideshow
     switch, all measured. Holding them there would leave a wall that spends its
     nights dark with nothing uploaded by morning."""
     publish(["w1", "w2", "w3"])
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     tv.power = "standby"
 
@@ -744,10 +745,10 @@ async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon
     assert tv.selected == [], "a dark set was selected on, which it ignores"
 
 
-async def test_a_set_whose_power_cannot_be_read_is_sent_no_write_either(daemon: Wall, tv: FakeTv, publish, settings):
+async def test_a_set_whose_power_cannot_be_read_is_sent_no_write_either(daemon: Wall, tv: FakeTv, publish, settings, state):
     """Unreadable `PowerState` cannot tell a programme from a dark panel, so it is held as the programme is."""
     publish(["w1", "w2", "w3"])
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     tv.power_unreadable = True
 
@@ -764,7 +765,7 @@ async def test_held_writes_are_made_once_the_set_is_showing_art_again(
     evening, and the set returning to art mode gets every one of them, with none
     of the works recorded as a failed upload in between."""
     publish(["w1", "w2", "w3"], interval_seconds=3600)
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     for _ in range(3):
         await daemon.tick()
@@ -898,13 +899,14 @@ class _TracingTv(FakeTv):
         self.trace.append("identity")
         return await super().read_identity()
 
-    async def listed_content_ids(self) -> frozenset[str]:
+    async def listed_pictures(self) -> dict[str, str | None]:
+        # The one listing request on the wire, whichever of the seam's two reads asked it.
         self.trace.append("list")
-        return await super().listed_content_ids()
+        return await super().listed_pictures()
 
-    async def _send_upload(self, path):
+    async def _send_upload(self, path, marker):
         self.trace.append("upload")
-        return await super()._send_upload(path)
+        return await super()._send_upload(path, marker)
 
     async def _send_show(self, content_id: str) -> bool:
         self.trace.append("select")
@@ -1014,6 +1016,7 @@ def _a_life_on(*device_ids: str):
         met_before = sets.get(tv.device_id)
         if met_before is not None:
             tv.holding, tv._next_id, tv.displaying = dict(met_before.holding), met_before._next_id, met_before.displaying
+            tv.dates = dict(met_before.dates)
         else:
             tv.holding["MY-F0001"] = Path("/the-households/own-picture.jpg")
             tv._next_id = 1
@@ -1213,8 +1216,8 @@ _WHAT_REACHES_THE_SET = {
     ),
     # Another set: none of the first set's ids is selected, and the wall starts
     # as a fresh one does, slideshow switch included. The household's picture
-    # that has the id the first set gave w1 is unaccounted for on this set, and
-    # is removed, as a fresh install removes it.
+    # that has the id the first set gave w1 is one the Player has no record of
+    # putting on this set, and is left on it: no removal is sent.
     "another set at the address": (
         _passes(_feed("w1", "w2")),
         [
@@ -1225,8 +1228,6 @@ _WHAT_REACHES_THE_SET = {
                 "get_artmode",
                 "slideshow off",
                 "list",
-                "get_artmode",
-                "remove",
                 "get_artmode",
                 "brightness",
                 "get_artmode",

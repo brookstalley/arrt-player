@@ -276,6 +276,75 @@ class TestUploadIsConfirmedAgainstTheSet:
 
         assert await tv.upload(tmp_path / "a.jpg") == "MY-MINE"
 
+    async def test_the_marker_the_caller_chose_is_the_date_the_upload_carries(self, tv: SamsungTv, art: StubArt, tmp_path):
+        """The record written before sending names the upload by this marker, so it must be what the set is sent."""
+        sent: dict[str, object] = {}
+
+        async def upload(file: str, **kwargs: object) -> str:
+            sent.update(kwargs)
+            return "MY-F0007"
+
+        art.upload = upload  # type: ignore[method-assign]
+
+        assert await tv.upload(tmp_path / "a.jpg", marker="2026:11:20 09:00:00") == "MY-F0007"
+        assert sent["date"] == "2026:11:20 09:00:00"
+
+    async def test_an_upload_read_back_by_its_marker_is_found_by_the_callers_marker(self, tv: SamsungTv, art: StubArt, tmp_path):
+        art.upload_returns = None
+        art.upload_lands_as = "MY-MINE"
+
+        async def upload(file: str, **kwargs: object) -> None:
+            art.entries.append({"content_id": "MY-SOMEONE-ELSES", "image_date": "2026:11:20 08:59:59"})
+            art.entries.append({"content_id": "MY-MINE", "image_date": kwargs.get("date")})
+
+        art.upload = upload  # type: ignore[method-assign]
+
+        assert await tv.upload(tmp_path / "a.jpg", marker="2026:11:20 09:00:00") == "MY-MINE"
+        assert (await tv.listed_pictures())["MY-MINE"] == "2026:11:20 09:00:00"
+
+    async def test_a_failure_once_the_upload_was_sent_is_a_failed_upload_not_an_outage(
+        self, tv: SamsungTv, art: StubArt, tmp_path
+    ):
+        """`TvUnavailable` means nothing was sent: once it was, the image may be on the set, which its caller's record
+        finds by its marker. So a read-back that fails after the send is `TvUploadFailed`."""
+        art.upload_returns = None
+
+        async def upload(file: str, **kwargs: object) -> None:
+            art.listing_raises = ResponseError("the set stopped answering")
+
+        art.upload = upload  # type: ignore[method-assign]
+
+        with pytest.raises(TvUploadFailed):
+            await tv.upload(tmp_path / "a.jpg", marker="2026:11:20 09:00:00")
+
+
+class TestTheListCarriesEachPicturesDate:
+    async def test_each_listed_picture_comes_with_the_date_the_set_gives_it(self, tv: SamsungTv, art: StubArt):
+        art.entries = [
+            {"content_id": "MY-F0001", "image_date": "2026:01:01 00:00:00"},
+            {"content_id": "MY-F0002"},
+            {"content_id": "MY-F0003", "image_date": 20260101},
+            {"image_date": "2026:01:01 00:00:00"},
+        ]
+
+        assert await tv.listed_pictures() == {"MY-F0001": "2026:01:01 00:00:00", "MY-F0002": None, "MY-F0003": None}
+        assert await tv.listed_content_ids() == {"MY-F0001", "MY-F0002", "MY-F0003"}
+
+    async def test_both_reads_are_one_request(self, tv: SamsungTv, art: StubArt):
+        requests = 0
+        available = art.available
+
+        async def counting(category: str | None = None) -> list[dict]:
+            nonlocal requests
+            requests += 1
+            return await available(category)
+
+        art.available = counting  # type: ignore[method-assign]
+        await tv.listed_pictures()
+        await tv.listed_content_ids()
+
+        assert requests == 2
+
 
 class TestRemovalIsConfirmedAgainstTheSet:
     async def test_a_removal_reports_what_the_set_holds_afterwards(self, tv: SamsungTv, art: StubArt):
