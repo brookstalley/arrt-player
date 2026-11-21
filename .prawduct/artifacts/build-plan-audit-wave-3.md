@@ -232,24 +232,31 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   1.2.0 table's class sentence reads any 4xx no row names, on a POST, as the route's 400,
   and its 400 rows say to send the report again when it changes. On
   `POST /client/heartbeat` only, the Player agrees with that wherever the answer carries
-  the contract's error body: any such 4xx is held, named by a row or not, except 401 (the
-  table's own row: keep sending), 408 and 429 (not a verdict on the report). It departs in
-  two respects. First, a 4xx WITHOUT the error body (a proxy's page, a framework's own
+  the contract's error body: any such 4xx is held, named by a row or not, and a 401 is the
+  table's own row (keep sending). It departs in three respects. First, a 408 or a 429 is
+  never held, with the error body or without it, because neither is a verdict on the
+  report: the report is sent again next cycle, where the class sentence would read either
+  as the route's 400. Second, a 4xx WITHOUT the error body (a proxy's page, a framework's own
   body, an empty answer), a 400 or 413 included, is treated as unanswered and the report
   is sent again next cycle, every 30 seconds for as long as that lasts, where the table
-  would read it as a refusal and expect one request. Second, a held report is sent again
+  would read it as a refusal and expect one request. Third, a held report is sent again
   unchanged after 300 seconds (`REFUSED_REPORT_RESEND_SECONDS`), where the table says only
   when the report changes. A 2xx or 3xx other than 204, on which the table is silent, is
   unanswered. The wall heartbeat and every GET still follow the table. As first built
   (and first recorded here) the hold applied only to a 400 or 413 with the error body, so
   a 422 or 403 the server itself sent in its own error form was resent every cycle;
-  integration measured that and the rule was refined before anything shipped. What the
+  integration found that by reading the code and its tests (nothing was measured on a
+  running Player) and the rule was refined before anything shipped. "Every 30 seconds"
+  is the default cycle, which an operator can change. What the
   departure costs: a report the server will always refuse is sent once in five minutes and
   not once; something in the way that answers 4xx without the server's form is asked every
   cycle. What the old rule was giving: one request per unchanged refused report, at the
   price of a Player that one transient answer could silence for days. The tests that
-  assert the departure are in `tests/test_pull.py` (the cases without the error body, and
-  the lapse). The server's unreleased 1.3.0 is being reworded to say the same, with the
+  assert the departure are in `tests/test_pull.py` (the cases without the error body, the
+  408 and 429 cases with it, and the lapse). One case nothing holds: a refusal the server
+  sends under a framework's own body, as the wall heartbeat's `not_an_object` row already
+  is, would be resent every cycle on the client's route and no test would say so; Chunk
+  07 settles it with the rewording. The server's unreleased 1.3.0 is being reworded to say the same, with the
   300 seconds stated in the package; Chunk 07 quotes it from there and replays the
   reworded class sentence on both POST routes, and makes the wall heartbeat's older hold
   (any status under 500, bounded by one interval because its report changes each minute)
@@ -259,7 +266,8 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   Measured before (2026-10-08): that GET is answered from standby in 0.015 s with no key.
   Not measured: whether a GET each minute keeps a sleeping set's network awake or shows
   anything on screen. The read costs 60 GETs an hour for each Frame, waits at most 2 seconds
-  for a set that is asleep, and writes one journal line for an episode, not one a minute.
+  for a set that is asleep, and writes two journal lines for an episode (one when the read starts failing, one
+  when it answers again), not one a minute.
 
 ## Build Chunks
 
