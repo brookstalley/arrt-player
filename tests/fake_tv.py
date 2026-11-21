@@ -28,6 +28,7 @@ daemon's behaviour not at all.
 from pathlib import Path
 from typing import Final
 
+from arrt_player.state import DisplayState
 from arrt_player.tv import (
     IdentityUnreadable,
     PowerStateUnreadable,
@@ -38,6 +39,7 @@ from arrt_player.tv import (
     TvRemovalUnconfirmed,
     TvUnavailable,
     TvUploadFailed,
+    upload_marker,
 )
 
 #: A picture the set holds that this product did not put there — an art-store
@@ -57,6 +59,11 @@ class FakeTv(TvClient):
     def __init__(self) -> None:
         #: content id -> the file that was uploaded under it.
         self.holding: dict[str, Path] = {}
+        #: content id -> the `image_date` the set lists it under: the marker its
+        #: upload carried, as the real set echoes it. A picture a test puts in
+        #: `holding` itself (the household's, an older Player's) has the date
+        #: armed here, or none.
+        self.dates: dict[str, str] = {}
         self.selected: list[str] = []
         self.brightness: list[int] = []
         self.removed: list[tuple[str, ...]] = []
@@ -106,6 +113,11 @@ class FakeTv(TvClient):
         #: test is trying to reproduce rather than for the exception it raises.
         self.unavailable = False
         self.refuse_uploads = False
+        #: The upload lands, and the client cannot establish that it did: the
+        #: real client's `TvUploadFailed` when the library reported no id and
+        #: the read-back failed. The picture is on the set under the marker it
+        #: was sent with, and the caller is told it failed.
+        self.uploads_land_unconfirmed = False
         self.removal_unconfirmable = False
         #: Ids the set will not part with, so "removal reported, image survived"
         #: is reachable without making the whole call fail.
@@ -189,11 +201,11 @@ class FakeTv(TvClient):
         self._check_usable()
         self.slideshow_disabled += 1
 
-    async def listed_content_ids(self) -> frozenset[str]:
+    async def listed_pictures(self) -> dict[str, str | None]:
         self._check_usable()
-        return frozenset(self.holding)
+        return {content_id: self.dates.get(content_id) for content_id in self.holding}
 
-    async def _send_upload(self, path: Path) -> str:
+    async def _send_upload(self, path: Path, marker: str) -> str:
         self._check_usable()
         if self.refuse_uploads:
             raise TvUploadFailed(f"{path.name} is not on the television after an upload attempt")
@@ -201,7 +213,10 @@ class FakeTv(TvClient):
         self._next_id += 1
         content_id = f"MY-F{self._next_id:04d}"
         self.holding[content_id] = path
+        self.dates[content_id] = marker
         self.uploaded.append(path)
+        if self.uploads_land_unconfirmed:
+            raise self._dropping(TvUploadFailed(f"{path.name} may be on the television; its list could not be read back"))
         return content_id
 
     async def _send_show(self, content_id: str) -> bool:
@@ -282,7 +297,7 @@ class FakeTv(TvClient):
             for name, value in change.items():
                 setattr(self, name, value)
 
-    def _dropping(self, exc: TvUnavailable) -> TvUnavailable:
+    def _dropping[E: Exception](self, exc: E) -> E:
         """Mark the connection gone, the way the real client does on any failure.
 
         **This is not decoration, and a fake without it hides a whole dead
@@ -346,6 +361,7 @@ class FakeTv(TvClient):
         for content_id in requested:
             if content_id not in self.unremovable:
                 self.holding.pop(content_id, None)
+                self.dates.pop(content_id, None)
         return RemovalOutcome(requested=requested, surviving=tuple(c for c in requested if c in self.holding))
 
     async def _send_set_brightness(self, value: int) -> None:
@@ -388,3 +404,16 @@ class FakeTv(TvClient):
         was found accepting selections and displaying nothing.
         """
         return self.holding.get(self.displaying) if self.displaying else None
+
+
+def ours_on_the_set(tv: FakeTv, store: DisplayState, content_id: str, path: Path) -> None:
+    """Put on `tv` a picture `store` records this Player uploading there, which no binding names.
+
+    What a re-rendered work's previous image, or a copy whose binding could not
+    be written, is: the Player's to remove. Recorded through the store's own
+    verbs, with the marker the set lists it under, as an upload is.
+    """
+    sending = store.record_sending(tv.device_id, marker_for=upload_marker)
+    store.learned(sending.key, content_id)
+    tv.holding[content_id] = path
+    tv.dates[content_id] = sending.marker

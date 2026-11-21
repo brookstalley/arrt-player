@@ -52,8 +52,9 @@ a scene would otherwise cost the whole theme's uploads on the way back. The
 work on the wall, and every work the adopted feed names (its schedule's whole
 horizon, its scene and its staging), is never retired, and a removal is never
 asked for an image the set does not list. The orphan path is the other half: it
-removes what no binding accounts for, and a retirement removes what a binding
-accounts for and no feed wants, in the same removal.
+removes what this Player recorded putting on the set and no binding accounts
+for, and a retirement removes what a binding accounts for and no feed wants, in
+the same removal.
 
 **A binding is used only on the set it was made on.** A set's content ids are
 its own, so the wall reads which set it reaches (`TvClient.read_identity`, one
@@ -69,12 +70,22 @@ opens its art channel and has not said for `IDENTITY_PATIENCE_SECONDS` gets the
 wall's art anyway, from a store held in memory that starts empty, as a first
 run would; **nothing is removed from the set** until it says, because removal is
 sent only from a store whose recorded identity is the set's (`_may_remove`).
+
+**What the Player removes from a set is only what it recorded putting there.**
+Every upload is recorded on the device's store before it is sent, with the set
+it goes to and the marker it carries (`DisplayState.record_sending`), and a
+reconciliation removes, of what the set lists, only the pictures those records
+name there (`DisplayState.uploads_on`) that no binding in use wants, or that are
+due to retire. Everything else the set lists is the household's, or an older
+Player's that it never recorded, and is left where it is. An upload made while
+the set would not say is recorded with no set, and is removed from whichever
+set later lists it with its marker.
 """
 
 import functools
 import hashlib
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -87,7 +98,7 @@ from arrt_player.logs import work_context
 from arrt_player.manifest import Watcher
 from arrt_player.programmes.schedule import Schedule
 from arrt_player.state import Binding, DisplayState, UploadStatus
-from arrt_player.state.store import SetChange, SetMet, StoreFault
+from arrt_player.state.store import Sending, SetChange, SetMet, StoreFault
 from arrt_player.tv import (
     IdentityUnreadable,
     PowerStateUnreadable,
@@ -98,6 +109,7 @@ from arrt_player.tv import (
     TvRemovalUnconfirmed,
     TvUnavailable,
     TvUploadFailed,
+    upload_marker,
 )
 from arrt_player.wall import Capabilities, Clock, DisplayRecord, Picture, Shown, Wall
 
@@ -151,7 +163,13 @@ class Identified:
 
 @dataclass(frozen=True)
 class Withheld:
-    """The set on this connection has not said which it is since `since`, on the elapsed clock, and is waited for."""
+    """The set on this connection has not said which it is since `since`, on the elapsed clock, and is waited for.
+
+    **An outage is not met here as one**: a pass in this phase ends at the
+    identity read and sends nothing on the art channel, so nothing reports the
+    connection gone, and a set that goes away meanwhile reads as a set that
+    still will not say. The patience runs on from the first unanswered read.
+    """
 
     since: float
 
@@ -161,7 +179,10 @@ class GoingOn:
     """The set on this connection did not say within the patience, and the wall shows art on it from `scratch`.
 
     `scratch` is an empty store held in memory, which removes nothing from the
-    set (`FrameDisplay._may_remove`).
+    set (`FrameDisplay._may_remove`). Its uploads are recorded on the device's
+    store with no set, and found later on whichever set lists them with their
+    markers: **never placed on the set that says next**, because the address
+    may reach another set before this connection is seen to have gone.
     """
 
     scratch: DisplayState
@@ -394,6 +415,15 @@ class FrameDisplay:
         #: (`_remove_orphans`). Their removal is owed again once the wall shows
         #: another picture (`prepare`).
         self._left_on_the_wall: frozenset[str] = frozenset()
+        #: The sets whose listing this process has matched against the uploads
+        #: recorded with no set, since the last such upload. A set that says
+        #: which it is owes a reconciliation while there are such uploads and it
+        #: is not among these, so a set they are not on is asked once per
+        #: process, not once per connection.
+        self._unplaced_checked: set[str] = set()
+        #: The sets the journal has said, in this process, how many listed
+        #: pictures the Player leaves alone on (`tv.others_left_alone`).
+        self._left_alone_said: set[str] = set()
 
         #: The set could not be reached at all. Its own ladder, separate from the
         #: wall's: a television that is asleep and one that is awake and ignoring
@@ -635,9 +665,11 @@ class FrameDisplay:
         then, so a later pass would hear "the same set" and neither the line
         nor the reconciliation a change of set owes would come again.
         **Leaving the store in memory owes a reconciliation too**, whatever the
-        set turned out to be: what that store uploaded is on this set and
-        accounted for by nothing on disk. The picture on the wall is among it,
-        and stays until another has been selected (`_remove_orphans`).
+        set turned out to be: what that store uploaded is on this set, if the
+        connection did not reach another meanwhile, and no binding on disk
+        wants it. The picture on the wall is among it, and stays until another has
+        been selected (`_remove_orphans`). **So does a set this process has not
+        matched against the uploads recorded with no set**: they may be on it.
         """
         phase = self._phase
         if isinstance(phase, Identified):
@@ -668,6 +700,8 @@ class FrameDisplay:
             # The picture on the wall is one the store in memory holds: the
             # programme must put this store's up, rather than believe it is.
             self._store.forget_the_wall()
+        if identity not in self._unplaced_checked and self._store.has_unplaced_uploads():
+            self._reconciliation_owed = True
         self._become(Identified(identity))
         self._identity_reads.answered()
 
@@ -676,8 +710,8 @@ class FrameDisplay:
 
         **Leaving `GoingOn` lets go of the store in memory**, however it is left:
         for the set saying which it is (`_know_the_set` owes the cleanup), for an
-        outage (what that store put up is on a set nobody can name, and nothing
-        removes it), or for the wall closing. **Entering it** forgets what was
+        outage (what that store put up is on a set nobody can name, recorded
+        with no set until one lists it), or for the wall closing. **Entering it** forgets what was
         known of the set's wall and says once that the wall goes on, so the line
         is said again at the next entry, after any way out.
         """
@@ -744,8 +778,9 @@ class FrameDisplay:
         unanswered read, so a set that will not say and keeps dropping its
         connection is given a store in memory, and a theme's uploads, at most
         once per outage and its `IDENTITY_PATIENCE_SECONDS`, never once per
-        flap. Those uploads are on a set nobody can name, and nothing removes
-        them (`architecture.md`, beside the patience).
+        flap. Those uploads are on a set nobody can name, recorded with no set,
+        and removed from the first set whose listing shows them with their
+        markers.
         """
         self._become(NotYetKnown())
 
@@ -1148,11 +1183,17 @@ class FrameDisplay:
         differs (the theme waits; a selection ends).
         """
         fingerprint = _fingerprint(picture.path)
+        sending = self._record_sending()
         try:
-            content_id = await self._tv.upload(picture.path)
+            content_id = await self._tv.upload(picture.path, marker=sending.marker)
+        except (TvNotOurs, TvUnavailable):
+            # Nothing was sent, so there is nothing of this upload's on the set.
+            self._store.forget_sending(sending.key)
+            raise
         except TvUploadFailed as exc:
             # A set that went away while the upload was read back is reported
-            # this way, and its connection with it.
+            # this way, and its connection with it. The image may be on the
+            # set: its record stays, and the next listing finds it by marker.
             self._the_connection_may_have_gone()
             self._state.record_upload_failure(picture.work_id)
             log.warning(
@@ -1163,6 +1204,7 @@ class FrameDisplay:
             )
             return None
 
+        self._store.learned(sending.key, content_id)
         self._state.record_upload(picture.work_id, content_id, render_fingerprint=fingerprint)
         self._write_went_through()
         log.info(
@@ -1172,6 +1214,22 @@ class FrameDisplay:
             extra={"event": "binding.uploaded", "tv_content_id": content_id},
         )
         return content_id
+
+    def _record_sending(self) -> Sending:
+        """Record on the device's store the upload about to be sent, to the set this connection reaches if it said.
+
+        **A fault here ends the pass with nothing sent** (`StoreFault`): an
+        upload the Player could not record is one it could never remove. One
+        sent while the set has not said is recorded with no set, and the work on
+        the wall the device's store remembers is forgotten with it, since the
+        store in memory now changes the wall.
+        """
+        phase = self._phase
+        identity = phase.identity if isinstance(phase, Identified) else None
+        sending = self._store.record_sending(identity, marker_for=upload_marker, forgetting_the_wall=identity is None)
+        if identity is None:
+            self._unplaced_checked.clear()
+        return sending
 
     async def _upload_one_pending(self, pictures: Sequence[Picture]) -> None:
         """Carry one not-yet-uploaded work per pass, so the theme fills in behind us.
@@ -1210,7 +1268,8 @@ class FrameDisplay:
         that would be a call per second forever — traffic that buys nothing,
         since nothing changes what the television holds except this process.
         """
-        listed = await self._tv.listed_content_ids()
+        pictures_listed = await self._tv.listed_pictures()
+        listed = frozenset(pictures_listed)
 
         for picture in pictures:
             binding = self._state.binding_for(picture.work_id)
@@ -1230,21 +1289,20 @@ class FrameDisplay:
                 extra={"event": "binding.orphaned", "tv_content_id": binding.tv_content_id, "work_id": picture.work_id},
             )
 
-        return await self._remove_orphans(listed, pictures)
+        return await self._remove_orphans(pictures_listed, pictures)
 
-    async def _remove_orphans(self, listed: frozenset[str], pictures: Sequence[Picture]) -> bool:
-        """Take off the television everything this device cannot account for, and every work due to retire.
+    async def _remove_orphans(self, listed: Mapping[str, str | None], pictures: Sequence[Picture]) -> bool:
+        """Take off the television what this Player put there and no binding wants, and every work due to retire.
 
-        **The binding table is the whole authority**, which is why a fresh install
-        clears the set: images uploaded by a previous generation of this product
-        are not assets to adopt, because nothing joins them to a work — the 2024
-        tree addressed images by source URL and by a resized filename, and a
-        manifest entry names an artwork id and a UUID render. Adopting one would
-        bind a work to a picture that is not the render its entry names, and the
-        wall would show one composition while the catalogue recorded another.
-
-        The television has exactly one user-upload category, so the alternative to
-        removing them is two generations of the same corpus accumulating in it.
+        **Only what the upload records name on this set** (`uploads_on`): the
+        set's one upload category also holds the household's pictures, and an
+        older Player's that it never recorded, and nothing in a listing says
+        who sent a picture. Those are left alone, and the journal says once per
+        set in this process how many (`tv.others_left_alone`). What the records
+        name and no binding wants is a re-rendered work's previous image, a
+        copy whose upload was reported failed and landed, an orphaned
+        binding's id the set lists again, and the uploads of the store in
+        memory: each is removed.
 
         **One removal for both**, so the gate reads the set once. A retiring
         work's image is asked for only while the set lists it and no other
@@ -1266,7 +1324,9 @@ class FrameDisplay:
         upload of the household's that is up is removed like any other the set
         lists.
         """
-        if not self._may_remove():
+        # `Identified` records the set on the device's store, so its identity is the phase's.
+        identity = self._store.tv_identity
+        if not self._may_remove() or identity is None:
             # A store that does not know it is this set's accounts for nothing
             # here: its ids may name another set's pictures, and an id it does
             # not hold may be one of this set's the Player put there. Met only
@@ -1274,8 +1334,11 @@ class FrameDisplay:
             # the set first; settled for now, because leaving that store owes
             # the work again (`_know_the_set`).
             return True
+        ours = self._store.uploads_on(identity, listed)
+        self._unplaced_checked.add(identity)
+        self._say_what_is_left_alone(identity, len(listed) - len(ours))
         accounted = self._state.accounted_content_ids()
-        unaccounted = listed - accounted
+        unaccounted = ours - accounted
         on_the_wall = self._on_the_wall()
         self._left_on_the_wall = frozenset(unaccounted & on_the_wall)
         orphans = sorted(unaccounted - on_the_wall)
@@ -1283,7 +1346,7 @@ class FrameDisplay:
         on_the_set = {
             binding.tv_content_id: binding
             for binding in retiring
-            if binding.tv_content_id is not None and binding.tv_content_id in listed and binding.tv_content_id not in claimed
+            if binding.tv_content_id is not None and binding.tv_content_id in ours and binding.tv_content_id not in claimed
         }
         retiring_ids = sorted(on_the_set)
         if not orphans and not retiring_ids:
@@ -1318,7 +1381,7 @@ class FrameDisplay:
         surviving = set(outcome.surviving)
         if orphans:
             log.info(
-                "removed %d image(s) the binding table does not account for",
+                "removed %d image(s) this Player put on the television that no binding accounts for",
                 len([content_id for content_id in orphans if content_id not in surviving]),
                 extra={
                     "event": "tv.orphans_removed",
@@ -1331,12 +1394,25 @@ class FrameDisplay:
             removed=tuple(content_id for content_id in retiring_ids if content_id not in surviving),
             kept=tuple(on_the_set[content_id] for content_id in retiring_ids if content_id in surviving),
         )
+        self._store.forget_uploads(identity, outcome.removed)
         # **Settled even when some survived.** An incomplete removal is a *known*
         # outcome — the set was asked, answered, and is keeping them — and it is
         # already reported at WARNING by the client. Asking again immediately
         # learns nothing; the next manifest re-arms the work. Only an outcome
         # nobody could establish stays owed.
         return True
+
+    def _say_what_is_left_alone(self, identity: str, left_alone: int) -> None:
+        """Say once per set in this process how many pictures it lists that the Player did not record putting there."""
+        if left_alone <= 0 or identity in self._left_alone_said:
+            return
+        self._left_alone_said.add(identity)
+        log.info(
+            "the television lists %d uploaded picture(s) this Player has no record of putting there; "
+            "they are the household's, or an older Player's, and are left where they are",
+            left_alone,
+            extra={"event": "tv.others_left_alone", "left_alone": left_alone, "set_now": _known_as(identity)},
+        )
 
     def _retirements(self, pictures: Sequence[Picture]) -> tuple[tuple[Binding, ...], frozenset[str]]:
         """The bindings due to retire now, and the content ids every other binding names.

@@ -7,7 +7,9 @@ reachable — so "curation stopped" has to be indistinguishable, from here, from
 """
 
 import logging
+from pathlib import Path
 
+from fake_tv import ours_on_the_set
 from fakes import FakeTv
 
 from arrt_player.state import DisplayState
@@ -132,10 +134,10 @@ async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns
     never attempted again, so on a fresh install the legacy uploads the chunk
     exists to clear would have stayed on the television for ever. Owing the work
     until it is done, rather than attempting it when the news arrives, is the fix.
+    The picture is one the Player recorded putting there that no binding wants,
+    which is all it removes.
     """
-    from pathlib import Path
-
-    tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+    ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
     tv.unavailable = True
     publish(["w1"])
 
@@ -148,7 +150,9 @@ async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns
     assert "MY-LEGACY-1" not in tv.holding, "orphan removal was dropped rather than deferred"
 
 
-async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, tv: FakeTv, publish, clock, settings):
+async def test_a_reconciliation_interrupted_halfway_is_still_owed(
+    daemon: Wall, tv: FakeTv, publish, clock, settings, state: DisplayState
+):
     """Cleared on the far side of the call, so a set that goes away during it does
     not leave the work recorded as done — and retried on a wait, not on every poll.
 
@@ -156,9 +160,7 @@ async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, 
     ungated would ask the set again every second, which is the unbounded cadence
     this loop guards against twice elsewhere.
     """
-    from pathlib import Path
-
-    tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+    ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
     tv.removal_unconfirmable = True
     publish(["w1"])
     await daemon.tick()
@@ -180,7 +182,7 @@ async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, 
 
 
 async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever(
-    daemon: Wall, tv: FakeTv, publish, clock, settings
+    daemon: Wall, tv: FakeTv, publish, clock, settings, state: DisplayState
 ):
     """A *known* refusal is an answer, and asking again learns nothing.
 
@@ -194,9 +196,7 @@ async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever
     to `True` with nothing exercising it: the whole suite passed with the old value
     restored, because no test had ever produced a removal the set survived.
     """
-    from pathlib import Path
-
-    tv.holding["MY-STUBBORN"] = Path("/gone/stubborn.jpg")
+    ours_on_the_set(tv, state, "MY-STUBBORN", Path("/gone/stubborn.jpg"))
     tv.unremovable = {"MY-STUBBORN"}
     publish(["w1"])
 
@@ -213,6 +213,109 @@ async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever
         await daemon.tick()
 
     assert len(tv.removed) == asked, "an answered refusal was re-asked; that outcome was already established"
+
+
+# -- what the Player did not put on the set (the owner's ruling) --------------------
+#
+# The three cases above, each with a picture the Player has no record of putting
+# on the set: the household's own, or an older Player's. It is never asked for,
+# so there is nothing to owe through an outage, nothing to retry, and no line
+# saying the Player meant to remove it.
+
+#: Every line the wall writes about removing a picture, or failing to.
+_REMOVAL_LINES = ("tv.orphans_removed", "tv.orphan_removal_unconfirmed", "binding.retirement_unconfirmed", "binding.retired")
+
+
+class _CountingListings(FakeTv):
+    """The double, counting the requests for the set's list of its pictures: what a reconciliation owed costs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listings = 0
+
+    async def listed_pictures(self) -> dict[str, str | None]:
+        self.listings += 1
+        return await super().listed_pictures()
+
+
+def _a_frame_on(tv: FakeTv, settings, state: DisplayState, clock) -> Wall:
+    from arrt_player.displays.frame import frame_wall
+    from arrt_player.manifest import Watcher
+
+    return frame_wall(settings=settings, tv=tv, state=state, watcher=Watcher(settings.manifest_path), clock=clock.as_clock())
+
+
+def _removal_lines(caplog) -> list[str]:
+    return [record.event for record in caplog.records if getattr(record, "event", None) in _REMOVAL_LINES]
+
+
+async def test_a_picture_the_player_did_not_put_there_is_not_owed_through_an_outage(
+    settings, state: DisplayState, publish, clock, caplog
+):
+    tv = _CountingListings()
+    tv.holding["MY-HOUSEHOLD-1"] = Path("/the-households/own-picture.jpg")
+    daemon = _a_frame_on(tv, settings, state, clock)
+    tv.unavailable = True
+    publish(["w1"])
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+        tv.unavailable = False
+        await daemon.tick()
+        listed = tv.listings
+        for _ in range(3):
+            clock.advance(settings.tv_retry_max_seconds + 1)
+            await daemon.tick()
+
+    assert "MY-HOUSEHOLD-1" in tv.holding, "the household's picture was removed when the set returned"
+    assert tv.removed == []
+    assert tv.listings == listed, "a reconciliation stayed owed on account of a picture the Player did not put there"
+    assert _removal_lines(caplog) == []
+
+
+async def test_a_picture_the_player_did_not_put_there_is_not_retried_after_an_interruption(
+    settings, state: DisplayState, publish, clock, caplog
+):
+    tv = _CountingListings()
+    tv.holding["MY-HOUSEHOLD-1"] = Path("/the-households/own-picture.jpg")
+    tv.removal_unconfirmable = True
+    daemon = _a_frame_on(tv, settings, state, clock)
+    publish(["w1"])
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+        tv.unavailable = True
+        await daemon.tick()
+        tv.unavailable = False
+        listed = tv.listings
+        clock.advance(settings.tv_retry_max_seconds)
+        await daemon.tick()
+        await daemon.tick()
+
+    assert "MY-HOUSEHOLD-1" in tv.holding
+    assert tv.removed == [], "a removal was asked for a picture the Player did not put there"
+    assert tv.listings == listed, "the reconciliation was retried on account of a picture the Player did not put there"
+    assert _removal_lines(caplog) == []
+
+
+async def test_a_picture_the_player_did_not_put_there_is_never_asked_for_though_the_set_would_keep_it(
+    settings, state: DisplayState, publish, clock, caplog
+):
+    tv = FakeTv()
+    tv.holding["MY-HOUSEHOLD-1"] = Path("/the-households/own-picture.jpg")
+    tv.unremovable = {"MY-HOUSEHOLD-1"}
+    daemon = _a_frame_on(tv, settings, state, clock)
+    publish(["w1"])
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+        clock.advance(settings.tv_retry_max_seconds + 1)
+        for _ in range(3):
+            await daemon.tick()
+
+    assert "MY-HOUSEHOLD-1" in tv.holding
+    assert tv.removed == [], "the set was asked to part with a picture the Player did not put there"
+    assert _removal_lines(caplog) == []
 
 
 async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(

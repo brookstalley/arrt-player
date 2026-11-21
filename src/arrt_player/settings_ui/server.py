@@ -1434,17 +1434,17 @@ _PAIRING_NOTE: Final[str] = (
     "new address is asked to pair: expect a prompt on that set, even over a programme, to be accepted there. "
     "The Player knows each television by its own id, not its address. The same television at a new address keeps "
     "the pictures this Player put on it, and nothing is uploaded again. On another television the Player starts "
-    "afresh: it uploads every work to it and removes the uploaded pictures there that it did not put there, and the "
-    "old television keeps this Player's pictures until the Player is pointed at it again or they are removed there."
+    "afresh: it uploads every work to it and leaves that television's own pictures alone, and the old television "
+    "keeps this Player's pictures until the Player is pointed at it again or they are removed there."
 )
 
 #: Said by a save that gives the Frame a new address: what happens to the pictures, on each television.
 #: The Player tells the sets apart by their own ids (`displays/frame.py`), never by the address.
 _PICTURES_AT_A_NEW_ADDRESS: Final[str] = (
     "If the set at {new} is the same television, the pictures this Player put on it are kept and nothing is "
-    "uploaded again. If it is another, the Player uploads every work to it and removes the uploaded pictures there "
-    "that it did not put there, and {old} keeps the pictures this Player put on it until the Player is pointed at it "
-    "again or they are removed there."
+    "uploaded again. If it is another, the Player uploads every work to it and leaves that television's own pictures "
+    "alone, and {old} keeps the pictures this Player put on it until the Player is pointed at it again or they are "
+    "removed there."
 )
 
 #: How a save names the television an address held before the page knew one.
