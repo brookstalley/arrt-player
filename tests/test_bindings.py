@@ -2238,6 +2238,24 @@ class TestThePlayerRemovesOnlyWhatItRecordedUploading:
         assert bound in tv.holding
         assert publish.work_of(tv.on_the_wall) == "w1"
 
+    async def test_a_re_rendered_works_previous_image_leaves_the_set_at_the_next_reconciliation(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """Its upload was recorded, and no binding names it once the work is sent again: the Player's to remove."""
+        publish(["w1", "w2"], interval_seconds=10)
+        await daemon.tick()  # w1 up, w2 uploaded behind it
+        previous = state.binding_for("w2").tv_content_id
+        Image.new("RGB", (8, 8), (255, 0, 0)).save(publish.picture("w2"), format="JPEG")
+        clock.advance(10)
+        await daemon.tick()  # w2's slot: sent again, and shown
+        assert state.binding_for("w2").tv_content_id != previous
+        assert publish.work_of(tv.on_the_wall) == "w2"
+        publish(["w1", "w2"], interval_seconds=10)
+        await daemon.tick()
+
+        assert previous not in tv.holding, "the re-rendered work's previous image stayed on the set"
+        assert state.binding_for("w2").tv_content_id in tv.holding
+
     async def test_a_store_that_refuses_writes_puts_no_picture_on_the_set(self, settings, clock, publish, caplog):
         """An upload whose record cannot be written is not sent, so a store that cannot write costs the wall its new
         works, never the set a copy per pass that nothing records."""
