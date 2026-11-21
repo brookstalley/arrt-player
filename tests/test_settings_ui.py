@@ -1837,6 +1837,12 @@ class TestTheFramesAddress:
         # What happens to the pictures, on each television: the Player tells them apart by their own ids.
         assert "The same television at a new address keeps the pictures this Player put on it" in said(document)
         assert "old television keeps this Player's pictures until the Player is pointed at it again" in said(document)
+        # The Player removes from a set only the pictures it recorded putting there.
+        assert (
+            "On another television the Player starts afresh: it uploads every work to it and leaves that "
+            "television's own pictures alone" in said(document)
+        )
+        assert "removes the uploaded pictures" not in said(document), "the note says another set's pictures are removed"
 
     async def test_a_new_address_forgets_the_old_sets_pairing_and_says_so(self, signed_in, state, cache_dir, restarts):
         give_location(state)
@@ -1851,6 +1857,8 @@ class TestTheFramesAddress:
         assert f"The pairing with the television at {OLD_SET} is forgotten." in text
         assert f"If the set at {NEW_SET} is the same television, the pictures this Player put on it are kept" in text
         assert f"the television at {OLD_SET} keeps the pictures this Player put on it until" in text
+        assert "If it is another, the Player uploads every work to it and leaves that television's own pictures alone" in text
+        assert "removes the uploaded pictures" not in text, "the save says another set's pictures are removed"
 
     async def test_clearing_the_address_forgets_the_pairing_and_says_there_is_no_frame(
         self, signed_in, state, cache_dir, restarts
