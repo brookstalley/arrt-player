@@ -111,6 +111,7 @@ from arrt_player.config import (
 from arrt_player.episodes import Backoff, ReportOnce
 from arrt_player.logs import label_context, wall_context
 from arrt_player.manifest import MEDIA_DIRNAME
+from arrt_player.safe_write import write_whole
 
 log = logging.getLogger(__name__)
 
@@ -782,19 +783,10 @@ class WallCaches:
         path = entry / LEFT_STAMP_FILENAME
         temporary = entry / f".{LEFT_STAMP_FILENAME}.tmp"
         data = json.dumps({"left_at": stamp.left_at.isoformat(), "absent_seconds": stamp.absent_seconds}).encode("utf-8")
-        # Forced to the card before the rename, as the pull's files are
-        # (`pull._write_atomically`): the stamp is the only record of when the
-        # wall left, and a power cut must leave the old one or the new, whole.
-        try:
-            with temporary.open("wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(path)
-        except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
-            with contextlib.suppress(OSError):
-                temporary.unlink(missing_ok=True)
-            raise
+        # Forced to the card before the rename: the stamp is the only record of
+        # when the wall left, and a power cut must leave the old one or the new,
+        # whole.
+        write_whole(path, data, temporary=temporary)
         stamp.written_seconds = stamp.absent_seconds
 
     def _say_unknown(self, entry: Path) -> None:

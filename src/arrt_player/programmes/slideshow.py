@@ -36,7 +36,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
@@ -48,6 +47,7 @@ from arrt_player.label_rule import Drawing
 from arrt_player.label_rule import Outcome as LabelOutcome
 from arrt_player.mpv import Loaded, NotShown
 from arrt_player.programmes.slideshow_status import SlideshowStatus
+from arrt_player.safe_write import write_whole
 from arrt_player.sources import Caption, Item, Kind, Listing, Outcome, Source
 from arrt_player.sources.cache import FillReport, MediaCache
 
@@ -149,12 +149,7 @@ def save_listing(path: Path, items: Sequence[Item]) -> None:
             for item in items
         ],
     }
-    temporary = path.with_name(f"{path.name}.tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(document, handle)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+    write_whole(path, json.dumps(document).encode("utf-8"), temporary=path.with_name(f"{path.name}.tmp"))
 
 
 def load_listing(path: Path) -> tuple[Item, ...]:
