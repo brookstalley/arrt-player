@@ -1562,8 +1562,9 @@ class TestASetThatWillNotSayWhichItIs:
     async def test_a_schema_2_store_opens_through_both_migrations_and_sends_no_removal_until_the_set_says(
         self, settings, clock, publish
     ):
-        """Two releases back, one file: 2 to 3 names every row at the upgrade, 3 to 4 records no set. So the rows are kept and none is due, the store knows no set, and on a set that will not say,
-        through its patience and twenty days beyond, nothing is removed."""
+        """Two releases back, one file: 2 to 3 names every row at the upgrade, 3 to 4 records no set. So the rows are
+        kept and none is due, the store knows no set, and on a set that will not say, through its patience and twenty
+        days beyond, nothing is removed."""
         from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
         from arrt_player.state.store import SCHEMA_VERSION
 
