@@ -816,7 +816,8 @@ class DisplayState:
                 unplaced = self._connection.execute("SELECT 1 FROM tv_upload WHERE tv_identity IS NULL LIMIT 1").fetchone()
             else:
                 unplaced = self._connection.execute(
-                    f"SELECT 1 FROM tv_upload WHERE {_MAY_BE_ON} LIMIT 1", (address, toward, toward)  # noqa: S608
+                    f"SELECT 1 FROM tv_upload WHERE {_MAY_BE_ON} LIMIT 1",  # noqa: S608 -- a module constant; values bound
+                    (address, toward, toward),
                 ).fetchone()
         return unplaced is not None
 
@@ -856,8 +857,9 @@ class DisplayState:
                 if row["tv_content_id"] is None:
                     self._match_by_marker(row, carrying, ours, placing)
             # Asked first, so a listing that changes no record writes nothing.
-            if execute(f"SELECT 1 FROM tv_upload WHERE {_ON_NO_SET} LIMIT 1").fetchone() is not None:  # noqa: S608
-                execute(f"DELETE FROM tv_upload WHERE {_ON_NO_SET}")  # noqa: S608
+            # `_ON_NO_SET` is a module constant with no placeholders, so neither statement takes a value.
+            if execute(f"SELECT 1 FROM tv_upload WHERE {_ON_NO_SET} LIMIT 1").fetchone() is not None:  # noqa: S608 -- a constant
+                execute(f"DELETE FROM tv_upload WHERE {_ON_NO_SET}")  # noqa: S608 -- a module constant, no values
             self._connection.commit()
         return frozenset(ours)
 
