@@ -2627,3 +2627,32 @@ class TestARecordThatLeft:
         assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == {"MY-F0001"}
         assert state.uploads_on(THIS_SET, {}) == frozenset()
         assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == frozenset(), "a record outlived its picture"
+
+
+def _statements_that_write(store: DisplayState) -> list[str]:
+    """Trace `store`'s connection: the head of every statement it sends that writes, a commit included."""
+    sent: list[str] = []
+
+    def trace(statement: str) -> None:
+        head = statement.split(None, 1)[0].upper() if statement.strip() else ""
+        if head in {"INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN", "COMMIT"}:
+            sent.append(statement.strip().splitlines()[0])
+
+    store._connection.set_trace_callback(trace)
+    return sent
+
+
+class TestAMatchWithNothingToChangeWritesNothing:
+    def test_a_listing_that_changes_no_record_sends_no_write(self, state: DisplayState):
+        """A reconciliation follows every feed adopted: when the listing changes no record, the card is not written."""
+        from arrt_player.tv import upload_marker
+
+        state.belongs_to(THIS_SET)
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker, address="192.0.2.20")
+        state.learned(sent.key, "MY-F0011")
+        listed = {"MY-F0011": sent.marker, "MY-F0099": None}
+        assert state.uploads_on(THIS_SET, listed, address="192.0.2.20") == {"MY-F0011"}
+        writes = _statements_that_write(state)
+
+        assert state.uploads_on(THIS_SET, listed, address="192.0.2.20") == {"MY-F0011"}
+        assert writes == [], f"a listing that changed nothing wrote {writes}"

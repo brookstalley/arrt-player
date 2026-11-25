@@ -333,6 +333,10 @@ CREATE TABLE IF NOT EXISTS tv_upload (
 #: the set's identity twice.
 _MAY_BE_ON: Final[str] = "tv_identity IS NULL AND address IS ? AND (sent_toward = ? OR heard_from = ?)"
 
+#: The records of no set's that may be on no set: sent toward none, and heard
+#: from by none (or no longer, each listed without them).
+_ON_NO_SET: Final[str] = "tv_identity IS NULL AND sent_toward IS NULL AND heard_from IS NULL"
+
 #: The columns `tv_binding` and `tv_binding_aside` share, in one order, for the
 #: two copies between them. Spelled once, so a column added to the one is not
 #: silently dropped by the other.
@@ -851,7 +855,9 @@ class DisplayState:
             for row, placing in matching:
                 if row["tv_content_id"] is None:
                     self._match_by_marker(row, carrying, ours, placing)
-            execute("DELETE FROM tv_upload WHERE tv_identity IS NULL AND sent_toward IS NULL AND heard_from IS NULL")
+            # Asked first, so a listing that changes no record writes nothing.
+            if execute(f"SELECT 1 FROM tv_upload WHERE {_ON_NO_SET} LIMIT 1").fetchone() is not None:  # noqa: S608
+                execute(f"DELETE FROM tv_upload WHERE {_ON_NO_SET}")  # noqa: S608
             self._connection.commit()
         return frozenset(ours)
 
