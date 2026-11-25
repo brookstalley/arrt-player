@@ -3,7 +3,7 @@
 `shapes.json` is one listing built from real `/…/top.json?raw_json=1` answers,
 fetched on 2026-11-10 with the owner's session cookie, one post for each shape the
 slideshow's parser reads. The fetch is described in `.prawduct/artifacts/build-plan-slideshow.md`
-(chunk 02's verify-api).
+(its check against the live API).
 
 Each post is trimmed to the keys the parser reads, plus a few for context. Because
 this repository is public:

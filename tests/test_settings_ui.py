@@ -1770,7 +1770,7 @@ class TestWhatTheSlideshowSays:
         assert 'value="arrt" checked' not in after
 
 
-# -- the Frame's address, the server's name, and what a save says (Chunk 09) ---------------
+# -- the Frame's address, the server's name, and what a save says ---------------
 
 #: The sun a Frame follows, without the Frame: what a Player with a Frame keeps in `.env`.
 LOCATION = {key: value for key, value in FRAME.items() if key != "TV_ADDRESS"}

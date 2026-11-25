@@ -119,6 +119,7 @@ class EpaperSurface(LabelSurface):
         geometry: Geometry,
         type_scale: TypeScale,
         rotate_degrees: int = DEFAULT_ROTATE_DEGREES,
+        output: str | None = None,
     ) -> None:
         if rotate_degrees not in SUPPORTED_ROTATIONS:
             raise SurfaceUnavailable(
@@ -127,6 +128,10 @@ class EpaperSurface(LabelSurface):
                 "height, so the label would have to be laid out against the swapped geometry"
             )
         self._epd = epd
+        #: The label output this panel is, named in the lines it logs so that a
+        #: Player with several panels says which one. None where nothing maps it
+        #: (the preview tool), and the line then carries no `output`.
+        self._output = output
         self._rasterizer = rasterizer
         self._geometry = geometry
         self._type_scale = type_scale
@@ -246,7 +251,11 @@ class EpaperSurface(LabelSurface):
         # This runs on the shutdown path, where anything raised would cost the
         # television its clean disconnect.
         except Exception as exc:  # noqa: BLE001  # prawduct:allow prawduct/broad-except -- see above
-            log.warning("the panel did not close cleanly (%s)", exc, extra={"event": "panel.close_failed"})
+            log.warning(
+                "the panel did not close cleanly (%s)",
+                exc,
+                extra={"event": "panel.close_failed", **({} if self._output is None else {"output": self._output})},
+            )
 
 
 def _as_image(raster: Raster, rotate_degrees: int) -> Image.Image:
