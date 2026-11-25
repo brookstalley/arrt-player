@@ -462,7 +462,9 @@ def _agree(output: FileScreenOutput) -> dict:
     """The record the output's directory holds, checked against the picture beside it; returns the record."""
     record = _read(output.directory / "shown.json")
     data = (output.directory / record["picture"]).read_bytes()
-    assert record["picture_sha256"] == hashlib.sha256(data).hexdigest(), "the record describes another picture than the one beside it"
+    assert (
+        record["picture_sha256"] == hashlib.sha256(data).hexdigest()
+    ), "the record describes another picture than the one beside it"
     return record
 
 
@@ -491,7 +493,7 @@ def test_a_picture_whose_write_failed_is_on_the_disk_after_the_next_refresh(draw
 def test_a_picture_written_beside_a_record_that_could_not_be_is_told_apart_by_its_hash_and_made_whole_by_the_next_refresh(
     drawn_on, tmp_path, monkeypatch
 ):
-    """The picture goes first, so a record never names a picture that is not there; the cost is a window with a new picture beside the old record."""
+    """The picture goes first, so a record never names a picture that is not there; the cost is this window."""
     with logs.work_context("w-1"):
         drawn_on.show(_a_render(tmp_path / "one.jpg"))
     old_record = (drawn_on.directory / "shown.json").read_bytes()

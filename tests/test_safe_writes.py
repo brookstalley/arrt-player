@@ -39,7 +39,7 @@ def _leftovers(directory: Path, *, besides: set[str]) -> list[str]:
 
 
 class _ModeAtWrite:
-    """What the staged file's permission bits were each time bytes were handed to it, so a mode set after the write cannot pass."""
+    """The staged file's permission bits each time bytes are handed to it, so a mode set after the write cannot pass."""
 
     def __init__(self, handle, seen: list[int]) -> None:
         self._handle = handle
@@ -90,7 +90,8 @@ class TestTheHelper:
         real_fsync, real_replace = os.fsync, Path.replace
 
         def fsync(fd: int) -> None:
-            events.append(("fsync", os.fstat(fd).st_ino == temporary.stat().st_ino and temporary.read_bytes() == b"whole"))
+            is_the_staged_file = os.fstat(fd).st_ino == temporary.stat().st_ino
+            events.append(("fsync", is_the_staged_file and temporary.read_bytes() == b"whole"))
             real_fsync(fd)
 
         def replace(self: Path, target):

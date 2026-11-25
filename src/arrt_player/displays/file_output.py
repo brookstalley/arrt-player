@@ -175,10 +175,8 @@ class FileScreenOutput:
         self._draw(render)
 
     def refresh(self) -> None:
-        """Draw what the output should be showing again if its last write failed or its picture is gone. One `stat` when neither."""
-        if self._owed:
-            self._redraw()
-        elif self._render is not None and not (self._directory / PICTURE_FILENAME).is_file():
+        """Draw what the output should be showing again if its last write failed or its picture is gone. One `stat` if not."""
+        if self._owed or (self._render is not None and not (self._directory / PICTURE_FILENAME).is_file()):
             self._redraw()
 
     def blank(self) -> None:
