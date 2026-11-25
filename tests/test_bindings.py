@@ -2500,6 +2500,7 @@ class TestTheUploadRecord:
     def test_an_upload_of_no_set_waits_for_the_set_it_is_on(self, state: DisplayState):
         from arrt_player.tv import upload_marker
 
+        state.belongs_to(THIS_SET)
         sent = state.record_sending(None, marker_for=upload_marker)
         state.learned(sent.key, "MY-F0001")
 
@@ -2533,3 +2534,125 @@ class TestTheUploadRecord:
             assert store.uploads_on(THIS_SET, {"MY-F0001": None}) == frozenset(), "a store that knew no set named a picture"
             store.belongs_to(THIS_SET)
             assert store.uploads_on(THIS_SET, {"MY-F0001": None}) == {"MY-F0001"}
+
+
+class TestARecordOfNoSet:
+    """An upload sent while the set would not say which it is: recorded with no set, toward the set the store last
+    recorded and the address it was sent to, and found only on that set at that address."""
+
+    ADDRESS = "192.0.2.20"
+
+    SPELL = "a-spell"
+
+    def _sent_toward(self, state: DisplayState, identity: str | None, *, learning: str | None = None) -> str:
+        from arrt_player.tv import upload_marker
+
+        if identity is not None:
+            state.belongs_to(identity)
+        sent = state.record_sending(None, marker_for=upload_marker, address=self.ADDRESS, spell=self.SPELL)
+        if learning is not None:
+            state.learned(sent.key, learning)
+        return sent.marker
+
+    def test_it_is_never_found_on_another_set_by_its_marker_and_waits_for_its_own(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0500": marker}, address=self.ADDRESS) == frozenset()
+        assert state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS), "another set's listing settled it"
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address=self.ADDRESS) == {"MY-F0011"}
+
+    def test_it_is_never_found_on_another_set_by_its_id_and_marker(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET, learning="MY-F0011")
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": marker}, address=self.ADDRESS) == frozenset()
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address=self.ADDRESS) == {"MY-F0011"}
+
+    def test_it_is_not_found_on_its_set_listed_at_another_address(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET, learning="MY-F0011")
+
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address="192.0.2.21") == frozenset()
+        assert not state.has_unplaced_uploads(THIS_SET, address="192.0.2.21")
+        assert state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS), "a listing at another address settled it"
+
+    def test_one_that_never_landed_leaves_once_its_set_is_listed_without_it(self, state: DisplayState):
+        self._sent_toward(state, THIS_SET)
+
+        assert state.uploads_on(THIS_SET, {"MY-F0001": "2026:01:01 00:00:00"}, address=self.ADDRESS) == frozenset()
+        assert not state.has_unplaced_uploads(), "an upload that never landed stayed recorded"
+
+    def test_one_sent_before_the_store_knew_any_set_is_found_nowhere_and_leaves_at_the_first_listing(self, state: DisplayState):
+        marker = self._sent_toward(state, None, learning="MY-F0011")
+
+        assert not state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS)
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address=self.ADDRESS) == frozenset()
+        assert not state.has_unplaced_uploads(), "a record no set can ever match stayed"
+
+    def test_it_is_found_on_the_set_heard_from_on_its_connection(self, state: DisplayState):
+        marker = self._sent_toward(state, None, learning="MY-F0011")
+        state.heard_from(self.SPELL, ANOTHER_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": marker}, address=self.ADDRESS) == {"MY-F0011"}
+
+    def test_listed_without_it_on_one_set_it_may_be_on_it_still_waits_for_the_other(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET, learning="MY-F0011")
+        state.heard_from(self.SPELL, ANOTHER_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0021": marker}, address=self.ADDRESS) == frozenset()
+        assert state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS)
+        assert not state.has_unplaced_uploads(ANOTHER_SET, address=self.ADDRESS), "it was still sent toward the set"
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": marker}, address=self.ADDRESS) == frozenset()
+        assert state.uploads_on(THIS_SET, {}, address=self.ADDRESS) == frozenset()
+        assert not state.has_unplaced_uploads(), "it stayed once each set it may be on was listed without it"
+
+    def test_a_spell_heard_from_reaches_only_its_own_uploads(self, state: DisplayState):
+        from arrt_player.tv import upload_marker
+
+        state.belongs_to(THIS_SET)
+        earlier = state.record_sending(None, marker_for=upload_marker, address=self.ADDRESS, spell="an-earlier-spell")
+        state.learned(earlier.key, "MY-F0011")
+        state.heard_from(self.SPELL, ANOTHER_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": earlier.marker}, address=self.ADDRESS) == frozenset()
+
+
+class TestARecordThatLeft:
+    def test_an_id_gone_from_the_listing_and_listed_again_is_left_alone(self, state: DisplayState):
+        """The set stopped listing the Player's picture (somebody deleted it there), and its record went; the id
+        listed again later, even with the same date, is not the Player's."""
+        from arrt_player.tv import upload_marker
+
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker)
+        state.learned(sent.key, "MY-F0001")
+
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == {"MY-F0001"}
+        assert state.uploads_on(THIS_SET, {}) == frozenset()
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == frozenset(), "a record outlived its picture"
+
+
+def _statements_that_write(store: DisplayState) -> list[str]:
+    """Trace `store`'s connection: the head of every statement it sends that writes, a commit included."""
+    sent: list[str] = []
+
+    def trace(statement: str) -> None:
+        head = statement.split(None, 1)[0].upper() if statement.strip() else ""
+        if head in {"INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN", "COMMIT"}:
+            sent.append(statement.strip().splitlines()[0])
+
+    store._connection.set_trace_callback(trace)
+    return sent
+
+
+class TestAMatchWithNothingToChangeWritesNothing:
+    def test_a_listing_that_changes_no_record_sends_no_write(self, state: DisplayState):
+        """A reconciliation follows every feed adopted: when the listing changes no record, the card is not written."""
+        from arrt_player.tv import upload_marker
+
+        state.belongs_to(THIS_SET)
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker, address="192.0.2.20")
+        state.learned(sent.key, "MY-F0011")
+        listed = {"MY-F0011": sent.marker, "MY-F0099": None}
+        assert state.uploads_on(THIS_SET, listed, address="192.0.2.20") == {"MY-F0011"}
+        writes = _statements_that_write(state)
+
+        assert state.uploads_on(THIS_SET, listed, address="192.0.2.20") == {"MY-F0011"}
+        assert writes == [], f"a listing that changed nothing wrote {writes}"

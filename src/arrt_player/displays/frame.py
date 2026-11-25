@@ -76,17 +76,21 @@ Every upload is recorded on the device's store before it is sent, with the set
 it goes to and the marker it carries (`DisplayState.record_sending`), and a
 reconciliation removes, of what the set lists, only the pictures those records
 name there (`DisplayState.uploads_on`) that no binding in use wants, or that are
-due to retire. Everything else the set lists is the household's, or an older
-Player's that it never recorded, and is left where it is. An upload made while
-the set would not say is recorded with no set, and is removed from whichever
-set later lists it with its marker.
+due to retire. Everything else the set lists is left where it is: the
+household's, an older Player's that it never recorded, and any of its own its
+records cannot match. An upload made while the set would not say is recorded
+with no set, and is found only on a set it was sent toward, listed at the
+address it was sent to: the set the store last recorded, or the set that said
+which it is on the connection the upload went on (`GoingOn`). A picture on any
+other set is never this Player's to remove, whatever date or id it carries.
 """
 
 import functools
 import hashlib
 import logging
+import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
@@ -180,12 +184,16 @@ class GoingOn:
 
     `scratch` is an empty store held in memory, which removes nothing from the
     set (`FrameDisplay._may_remove`). Its uploads are recorded on the device's
-    store with no set, and found later on whichever set lists them with their
-    markers: **never placed on the set that says next**, because the address
-    may reach another set before this connection is seen to have gone.
+    store with no set, in this `spell`, and may later be found only on two
+    sets listed at this address: the set the store last recorded, and the set
+    that says which it is on this connection, should one (`heard_from`).
+    **Never placed on the set that says next**, even then, because the
+    address may reach another set before this connection is seen to have
+    gone; **never found on a set met after it has gone**, which may be any.
     """
 
     scratch: DisplayState
+    spell: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 #: Where the wall stands with the set it reaches: one of four, and nothing else.
@@ -417,9 +425,10 @@ class FrameDisplay:
         self._left_on_the_wall: frozenset[str] = frozenset()
         #: The sets whose listing this process has matched against the uploads
         #: recorded with no set, since the last such upload. A set that says
-        #: which it is owes a reconciliation while there are such uploads and it
-        #: is not among these, so a set they are not on is asked once per
-        #: process, not once per connection.
+        #: which it is owes a reconciliation while there are such uploads that
+        #: may be on it and it is not among these, so a listing that cannot
+        #: settle them (one that shows their ids with no date) is asked once
+        #: per process, not once per connection.
         self._unplaced_checked: set[str] = set()
         #: The sets the journal has said, in this process, how many listed
         #: pictures the Player leaves alone on (`tv.others_left_alone`).
@@ -668,8 +677,9 @@ class FrameDisplay:
         set turned out to be: what that store uploaded is on this set, if the
         connection did not reach another meanwhile, and no binding on disk
         wants it. The picture on the wall is among it, and stays until another has
-        been selected (`_remove_orphans`). **So does a set this process has not
-        matched against the uploads recorded with no set**: they may be on it.
+        been selected (`_remove_orphans`). **So does a set that uploads
+        recorded with no set may be on**, at this address, until this process
+        has matched its listing against them (`DisplayState.uploads_on`).
         """
         phase = self._phase
         if isinstance(phase, Identified):
@@ -695,12 +705,17 @@ class FrameDisplay:
         # What this process learned of the wall while the store in memory was
         # in use was learned on this connection, so of this set: it is kept.
         self._met(met, identity, learned_on_this_set=from_memory)
-        if from_memory:
+        if isinstance(phase, GoingOn):
             self._reconciliation_owed = True
+            # What the store in memory uploaded went on this connection, which
+            # this set has now said it is: they may be on it.
+            self._store.heard_from(phase.spell, identity)
             # The picture on the wall is one the store in memory holds: the
             # programme must put this store's up, rather than believe it is.
             self._store.forget_the_wall()
-        if identity not in self._unplaced_checked and self._store.has_unplaced_uploads():
+        if identity not in self._unplaced_checked and self._store.has_unplaced_uploads(
+            identity, address=self._settings.tv_address
+        ):
             self._reconciliation_owed = True
         self._become(Identified(identity))
         self._identity_reads.answered()
@@ -711,9 +726,10 @@ class FrameDisplay:
         **Leaving `GoingOn` lets go of the store in memory**, however it is left:
         for the set saying which it is (`_know_the_set` owes the cleanup), for an
         outage (what that store put up is on a set nobody can name, recorded
-        with no set until one lists it), or for the wall closing. **Entering it** forgets what was
-        known of the set's wall and says once that the wall goes on, so the line
-        is said again at the next entry, after any way out.
+        with no set until a set it may be on is listed), or for the wall
+        closing. **Entering it** forgets what was known of the set's wall
+        and says once that the wall goes on, so the line is said again at the
+        next entry, after any way out.
         """
         was = self._phase
         self._phase = phase
@@ -1220,13 +1236,20 @@ class FrameDisplay:
 
         **A fault here ends the pass with nothing sent** (`StoreFault`): an
         upload the Player could not record is one it could never remove. One
-        sent while the set has not said is recorded with no set, and the work on
+        sent while the set has not said is recorded with no set, at this
+        address, in the spell of the store in memory (`GoingOn`); and the work on
         the wall the device's store remembers is forgotten with it, since the
         store in memory now changes the wall.
         """
         phase = self._phase
         identity = phase.identity if isinstance(phase, Identified) else None
-        sending = self._store.record_sending(identity, marker_for=upload_marker, forgetting_the_wall=identity is None)
+        sending = self._store.record_sending(
+            identity,
+            marker_for=upload_marker,
+            address=self._settings.tv_address,
+            spell=phase.spell if isinstance(phase, GoingOn) else None,
+            forgetting_the_wall=identity is None,
+        )
         if identity is None:
             self._unplaced_checked.clear()
         return sending
@@ -1297,8 +1320,9 @@ class FrameDisplay:
         **Only what the upload records name on this set** (`uploads_on`): the
         set's one upload category also holds the household's pictures, and an
         older Player's that it never recorded, and nothing in a listing says
-        who sent a picture. Those are left alone, and the journal says once per
-        set in this process how many (`tv.others_left_alone`). What the records
+        who sent a picture. Those are left alone, with any of the Player's own
+        its records cannot match, and the journal says once per set in this
+        process how many (`tv.others_left_alone`). What the records
         name and no binding wants is a re-rendered work's previous image, a
         copy whose upload was reported failed and landed, an orphaned
         binding's id the set lists again, and the uploads of the store in
@@ -1319,10 +1343,12 @@ class FrameDisplay:
         shows is deleted has never been measured. An unaccounted one is left
         (`_left_on_the_wall`) and its removal owed again once the wall has
         moved on. Only a picture this process knows is up is spared (its own
-        last selection, or the set's last announcement): on a first run, or on
-        a set met afresh, it knows nothing of the wall until then, and an
-        upload of the household's that is up is removed like any other the set
-        lists.
+        last selection, or the set's last announcement). A picture the records
+        do not name is never asked for, up or not, so a picture removed while
+        the set shows it is only ever one of the Player's own that this process
+        does not know is up: a copy the store in memory put on the wall before
+        the Player was started again is one, which the next process removes
+        from the screen and replaces with one of its own in the same pass.
         """
         # `Identified` records the set on the device's store, so its identity is the phase's.
         identity = self._store.tv_identity
@@ -1334,7 +1360,7 @@ class FrameDisplay:
             # the set first; settled for now, because leaving that store owes
             # the work again (`_know_the_set`).
             return True
-        ours = self._store.uploads_on(identity, listed)
+        ours = self._store.uploads_on(identity, listed, address=self._settings.tv_address)
         self._unplaced_checked.add(identity)
         self._say_what_is_left_alone(identity, len(listed) - len(ours))
         accounted = self._state.accounted_content_ids()
@@ -1403,13 +1429,14 @@ class FrameDisplay:
         return True
 
     def _say_what_is_left_alone(self, identity: str, left_alone: int) -> None:
-        """Say once per set in this process how many pictures it lists that the Player did not record putting there."""
+        """Say once per set in this process how many pictures it lists that the Player's records do not name."""
         if left_alone <= 0 or identity in self._left_alone_said:
             return
         self._left_alone_said.add(identity)
         log.info(
-            "the television lists %d uploaded picture(s) this Player has no record of putting there; "
-            "they are the household's, or an older Player's, and are left where they are",
+            "the television lists %d uploaded picture(s) this Player's upload records do not name; they are left "
+            "where they are, whoever put them there: the household, an older Player, or this Player where its "
+            "records cannot match the picture",
             left_alone,
             extra={"event": "tv.others_left_alone", "left_alone": left_alone, "set_now": _known_as(identity)},
         )

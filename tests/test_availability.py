@@ -7,6 +7,7 @@ reachable — so "curation stopped" has to be indistinguishable, from here, from
 """
 
 import logging
+import sqlite3
 from pathlib import Path
 
 from fake_tv import ours_on_the_set
@@ -337,3 +338,89 @@ async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(
     await daemon.tick()
 
     assert publish.work_of(tv.on_the_wall) == "w2"
+
+
+# -- an upload sent while the set would not say, which never landed ------------------------------------------
+
+
+def _uploads_of_no_set(path: Path) -> list[tuple]:
+    with sqlite3.connect(path) as connection:
+        return connection.execute("SELECT marker, tv_content_id FROM tv_upload WHERE tv_identity IS NULL").fetchall()
+
+
+async def _an_outage_and_the_set_back(wall: Wall, tv: FakeTv, clock) -> None:
+    """The set goes away for a pass, found gone by its news, and comes back saying which it is; no new feed."""
+    tv.unavailable = True
+    tv.art_mode_announced = True
+    clock.advance(30)
+    await wall.tick()
+    tv.unavailable = False
+    clock.advance(400)
+    await wall.tick()
+    await wall.tick()
+
+
+async def test_an_upload_of_no_set_that_never_landed_leaves_once_its_set_is_listed_and_costs_no_listing_after(
+    settings, state: DisplayState, publish, clock
+):
+    """The set stops saying which it is, the wall goes on, and its uploads are refused: recorded with no set, never
+    on any. Once that set says and is listed without them, their records go, and the set coming back again after
+    each later outage costs no listing on their account."""
+    from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+    tv = _CountingListings()
+    this_set = tv.device_id
+    publish(["w1", "w2"], interval_seconds=3600)
+    await _a_frame_on(tv, settings, state, clock).tick()
+    tv.device_id, tv.refuse_uploads = None, True
+    wall = _a_frame_on(tv, settings, state, clock)
+    await wall.tick()
+    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+    await wall.tick()
+    refused = _uploads_of_no_set(settings.state_path)
+    assert refused, "no upload was sent while the set would not say"
+    assert all(content_id is None for _, content_id in refused)
+
+    tv.device_id, tv.refuse_uploads = this_set, False
+    listed = tv.listings
+    await _an_outage_and_the_set_back(wall, tv, clock)
+    assert tv.listings == listed + 1, "the set the uploads were sent toward was not listed once it said"
+    assert _uploads_of_no_set(settings.state_path) == [], "an upload that never landed stayed recorded"
+    assert not state.has_unplaced_uploads()
+
+    listed = tv.listings
+    for _ in range(3):
+        await _an_outage_and_the_set_back(wall, tv, clock)
+    assert tv.listings == listed, "the set coming back was listed again with nothing owed"
+
+
+async def test_uploads_of_no_set_a_listing_cannot_settle_cost_one_listing_a_process_not_one_a_connection(
+    settings, state: DisplayState, publish, clock
+):
+    """The uploads of a spell on a set that would not say landed, and the set, once it says, lists their ids with no
+    date: it cannot say whether they are the Player's, and they stay recorded with no set. Its coming back after each
+    later outage is not listed again on their account."""
+    from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+    tv = _CountingListings()
+    this_set = tv.device_id
+    publish(["w1", "w2"], interval_seconds=3600)
+    await _a_frame_on(tv, settings, state, clock).tick()
+    tv.device_id = None
+    wall = _a_frame_on(tv, settings, state, clock)
+    await wall.tick()
+    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+    await wall.tick()
+    landed = _uploads_of_no_set(settings.state_path)
+    assert landed, "nothing was uploaded while the set would not say"
+    assert all(content_id is not None for _, content_id in landed)
+
+    tv.device_id = this_set
+    tv.dates = {}
+    await _an_outage_and_the_set_back(wall, tv, clock)
+    assert sorted(_uploads_of_no_set(settings.state_path)) == sorted(landed), "a listing with no dates settled them"
+
+    listed = tv.listings
+    for _ in range(3):
+        await _an_outage_and_the_set_back(wall, tv, clock)
+    assert tv.listings == listed, "the set was listed again on each connection for uploads it cannot settle"
