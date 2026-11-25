@@ -445,6 +445,92 @@ def test_a_write_that_fails_leaves_the_last_record_whole_and_no_temporary_file(d
     assert sorted(path.name for path in drawn_on.directory.iterdir()) == ["picture.png", "shown.json"]
 
 
+def _a_disk_that_refuses(monkeypatch, *, naming: str):
+    """Refuse the open of each staged file whose name contains `naming`, as a full card does; returns the switch that heals it."""
+    real_open, refusing = os.open, {"on": True}
+
+    def open_(name, *rest, **kwargs):
+        if refusing["on"] and naming in Path(name).name:
+            raise OSError(28, "No space left on device")
+        return real_open(name, *rest, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_)
+    return lambda: refusing.update(on=False)
+
+
+def _agree(output: FileScreenOutput) -> dict:
+    """The record the output's directory holds, checked against the picture beside it; returns the record."""
+    record = _read(output.directory / "shown.json")
+    data = (output.directory / record["picture"]).read_bytes()
+    assert (
+        record["picture_sha256"] == hashlib.sha256(data).hexdigest()
+    ), "the record describes another picture than the one beside it"
+    return record
+
+
+def test_a_picture_whose_write_failed_is_on_the_disk_after_the_next_refresh(drawn_on, tmp_path, monkeypatch):
+    """What someone reading the directory sees: the picture that was meant to be shown, not the old one for good."""
+    with logs.work_context("w-1"):
+        drawn_on.show(_a_render(tmp_path / "one.jpg"))
+    heal = _a_disk_that_refuses(monkeypatch, naming="picture.png")
+
+    with logs.work_context("w-2"), pytest.raises(OSError, match="No space"):
+        drawn_on.show(_a_render(tmp_path / "two.jpg", colour=(0, 200, 0)))
+
+    assert _agree(drawn_on)["work_id"] == "w-1", "the record named a work whose picture was not written"
+    with pytest.raises(OSError, match="No space"):
+        drawn_on.refresh()
+    heal()
+    drawn_on.refresh()
+
+    record = _agree(drawn_on)
+    assert (record["work_id"], record["render"]) == ("w-2", str(tmp_path / "two.jpg"))
+    with Image.open(drawn_on.directory / "picture.png") as image:
+        assert image.convert("RGB").tobytes() == fitted(tmp_path / "two.jpg", SCREEN).tobytes()
+    assert sorted(path.name for path in drawn_on.directory.iterdir()) == ["picture.png", "shown.json"]
+
+
+def test_a_picture_written_beside_a_record_that_could_not_be_is_told_apart_by_its_hash_and_made_whole_by_the_next_refresh(
+    drawn_on, tmp_path, monkeypatch
+):
+    """The picture goes first, so a record never names a picture that is not there; the cost is this window."""
+    with logs.work_context("w-1"):
+        drawn_on.show(_a_render(tmp_path / "one.jpg"))
+    old_record = (drawn_on.directory / "shown.json").read_bytes()
+    heal = _a_disk_that_refuses(monkeypatch, naming="shown.json")
+
+    with logs.work_context("w-2"), pytest.raises(OSError, match="No space"):
+        drawn_on.show(_a_render(tmp_path / "two.jpg", colour=(0, 200, 0)))
+
+    # On the disk now: the record as it was, and a picture that is no longer the one it hashes.
+    assert (drawn_on.directory / "shown.json").read_bytes() == old_record
+    stale = _read(drawn_on.directory / "shown.json")
+    assert stale["picture_sha256"] != hashlib.sha256((drawn_on.directory / "picture.png").read_bytes()).hexdigest()
+    assert sorted(path.name for path in drawn_on.directory.iterdir()) == ["picture.png", "shown.json"]
+
+    heal()
+    drawn_on.refresh()
+
+    assert _agree(drawn_on)["work_id"] == "w-2"
+
+
+def test_a_blank_whose_write_failed_is_drawn_by_the_next_refresh(drawn_on, tmp_path, monkeypatch):
+    with logs.work_context("w-1"):
+        drawn_on.show(_a_render(tmp_path / "one.jpg"))
+    heal = _a_disk_that_refuses(monkeypatch, naming="picture.png")
+
+    with pytest.raises(OSError, match="No space"):
+        drawn_on.blank()
+    assert _agree(drawn_on)["outcome"] == "picture", "the record said blank for a screen still showing the picture"
+    heal()
+    drawn_on.refresh()
+
+    record = _agree(drawn_on)
+    assert (record["outcome"], record["work_id"]) == ("blank", None)
+    drawn_on.refresh()
+    assert _read(drawn_on.directory / "shown.json") == record, "a refresh after the blank was drawn rewrote it"
+
+
 async def test_a_file_screen_that_cannot_be_written_costs_the_picture_and_says_so(
     client_settings, wall_dir, files, publish, clock, caplog
 ):

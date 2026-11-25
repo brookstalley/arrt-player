@@ -38,6 +38,41 @@ def _leftovers(directory: Path, *, besides: set[str]) -> list[str]:
     return sorted(path.name for path in directory.iterdir() if path.name not in besides)
 
 
+class _ModeAtWrite:
+    """The staged file's permission bits each time bytes are handed to it, so a mode set after the write cannot pass."""
+
+    def __init__(self, handle, seen: list[int]) -> None:
+        self._handle = handle
+        self.seen = seen
+
+    def write(self, data):
+        self.seen.append(stat.S_IMODE(os.fstat(self._handle.fileno()).st_mode))
+        return self._handle.write(data)
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def __enter__(self):
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._handle.__exit__(*exc)
+
+
+@pytest.fixture
+def modes_at_write(monkeypatch) -> list[int]:
+    """The permission bits of each staged file at each write to it, whichever writer staged it."""
+    seen: list[int] = []
+    real = os.fdopen
+
+    def fdopen(descriptor, *args, **kwargs):
+        return _ModeAtWrite(real(descriptor, *args, **kwargs), seen)
+
+    monkeypatch.setattr(os, "fdopen", fdopen)
+    return seen
+
+
 class TestTheHelper:
     def test_the_file_holds_the_bytes_and_no_temporary_file_remains(self, tmp_path: Path):
         path = tmp_path / "out.json"
@@ -55,7 +90,8 @@ class TestTheHelper:
         real_fsync, real_replace = os.fsync, Path.replace
 
         def fsync(fd: int) -> None:
-            events.append(("fsync", os.fstat(fd).st_ino == temporary.stat().st_ino and temporary.read_bytes() == b"whole"))
+            is_the_staged_file = os.fstat(fd).st_ino == temporary.stat().st_ino
+            events.append(("fsync", is_the_staged_file and temporary.read_bytes() == b"whole"))
             real_fsync(fd)
 
         def replace(self: Path, target):
@@ -124,26 +160,19 @@ class TestTheHelper:
         assert _leftovers(tmp_path, besides=set()) == []
 
     @pytest.mark.parametrize("umask", [0o077, 0o022, 0o000])
-    def test_a_mode_is_exact_over_a_stale_temporary_file_and_whatever_the_umask(self, tmp_path: Path, monkeypatch, umask: int):
+    def test_a_mode_is_exact_when_the_bytes_are_written_over_a_stale_temporary_file_and_whatever_the_umask(
+        self, tmp_path: Path, modes_at_write: list[int], umask: int
+    ):
         path, temporary = tmp_path / "secret.json", tmp_path / "secret.json.tmp"
         temporary.write_bytes(b"left by a crash")
         temporary.chmod(0o644)
-        seen: list[int] = []
-        real_fsync = os.fsync
-
-        def fsync(fd: int) -> None:
-            # Whatever bits the staged file carries while it holds the secrets.
-            seen.append(stat.S_IMODE(os.fstat(fd).st_mode))
-            real_fsync(fd)
-
-        monkeypatch.setattr(os, "fsync", fsync)
         before = os.umask(umask)
         try:
             write_whole(path, b"token", temporary=temporary, mode=0o600)
         finally:
             os.umask(before)
 
-        assert seen == [0o600], "the data sat in the temporary file at a looser mode"
+        assert modes_at_write == [0o600], "the data was written into the temporary file at a looser mode"
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert path.read_bytes() == b"token"
 
@@ -330,7 +359,9 @@ class TestEveryWriterKeepsItsOwnTemporaryName:
 
 
 class TestWhatTheOldWritersGuaranteedWithoutSayingSo:
-    def test_the_settings_file_is_0600_over_a_stale_temporary_file_and_under_any_umask(self, tmp_path: Path):
+    def test_the_settings_file_is_0600_when_its_bytes_are_written_over_a_stale_temporary_file_and_under_any_umask(
+        self, tmp_path: Path, modes_at_write: list[int]
+    ):
         stale = tmp_path / f"{settings_store.SETTINGS_FILENAME}.tmp"
         stale.write_text("a crash left this world-readable")
         stale.chmod(0o666)
@@ -341,6 +372,7 @@ class TestWhatTheOldWritersGuaranteedWithoutSayingSo:
             os.umask(before)
 
         written = tmp_path / settings_store.SETTINGS_FILENAME
+        assert modes_at_write == [0o600], "the password was written into the temporary file at a looser mode"
         assert stat.S_IMODE(written.stat().st_mode) == 0o600
         assert not stale.exists()
         assert settings_store.read(tmp_path).password == "hunter2"

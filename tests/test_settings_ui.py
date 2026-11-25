@@ -90,6 +90,21 @@ class TestTheFile:
 
         assert sorted(path.name for path in cache_dir.iterdir()) == [store.SETTINGS_FILENAME]
 
+    def test_a_write_that_fails_leaves_the_last_file_whole_and_no_temporary_file(self, cache_dir: Path, monkeypatch):
+        """A full card at the moment the settings page saves: the page says so, and the wall's settings are as they were."""
+        store.write(cache_dir, store.Stored(values={"PLAYER_NAME": "hall"}, password="scrypt$x"))
+        before = store.path_in(cache_dir).read_bytes()
+
+        def no_disk(_descriptor):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "fsync", no_disk)
+        with pytest.raises(OSError, match="No space"):
+            store.write(cache_dir, store.Stored(values={"PLAYER_NAME": "kitchen"}, password="scrypt$y"))
+
+        assert store.path_in(cache_dir).read_bytes() == before
+        assert sorted(path.name for path in cache_dir.iterdir()) == [store.SETTINGS_FILENAME]
+
     @pytest.mark.parametrize(
         ("content", "named"),
         [

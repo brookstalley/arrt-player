@@ -46,6 +46,12 @@ nothing is written.
 before the record, so a record never names a picture that is not there yet.
 Under the unit's `UMask=0077` both are the service account's alone.
 
+**A write that fails is made again by `refresh`**, on every poll until it lands,
+whichever of the two files it stopped at: a new picture beside the old record is
+the one window this order leaves, which a reader tells by `picture_sha256` not
+matching the picture, and which the next `refresh` closes. The record is written
+last, so it never names a picture that is not there.
+
 **Whether a wall has shown a work** is `shown.json` reading that `wall_id`, that
 `work_id` and `outcome` `picture`. A reader waits for it with a deadline: a wall
 shows its first work once its feed is pulled and composed, which is seconds.
@@ -135,9 +141,14 @@ class FileScreenOutput:
         self._size = settings.screen
         self._wall_id = wall_id
         self._now = now
-        #: The render this output should be showing, and the work it is of.
+        #: The render this output should be showing, and the work it is of; None
+        #: for a screen that is meant to be black, or has shown nothing yet.
         self._render: Path | None = None
         self._work_id: str | None = None
+        #: Whether the last `show` or `blank` is not on the disk yet: set when it is
+        #: asked for, cleared when both the picture and its record are written, so a
+        #: write that failed is made again by `refresh` however much of it landed.
+        self._owed = False
 
     @property
     def directory(self) -> Path:
@@ -160,18 +171,25 @@ class FileScreenOutput:
         # key, not a work: the schedule binds the work around every `show`, and a
         # worker thread inherits it.
         self._render, self._work_id = render, logs.current_work_id()
+        self._owed = True
         self._draw(render)
 
     def refresh(self) -> None:
-        """Draw the current render again if its picture is gone from the directory. One `stat` when it is not."""
-        if self._render is None or (self._directory / PICTURE_FILENAME).is_file():
-            return
-        self._draw(self._render)
+        """Draw what the output should be showing again if its last write failed or its picture is gone. One `stat` if not."""
+        if self._owed or (self._render is not None and not (self._directory / PICTURE_FILENAME).is_file()):
+            self._redraw()
 
     def blank(self) -> None:
         """Draw the screen black and forget the render: a black picture, and a record saying `blank`."""
         self._render, self._work_id = None, None
-        self._write(Image.new("RGB", self._size), render=None, outcome=BLANK)
+        self._owed = True
+        self._redraw()
+
+    def _redraw(self) -> None:
+        if self._render is None:
+            self._write(Image.new("RGB", self._size), render=None, outcome=BLANK)
+        else:
+            self._draw(self._render)
 
     def _draw(self, render: Path) -> None:
         self._write(fitted(render, self._size), render=render, outcome=PICTURE)
@@ -196,6 +214,7 @@ class FileScreenOutput:
                 "shown_at": self._now().isoformat(),
             },
         )
+        self._owed = False
 
 
 # -- the label ------------------------------------------------------------------------

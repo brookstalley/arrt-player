@@ -1964,3 +1964,19 @@ async def test_the_link_knows_the_address_it_reached_the_server_from(held_link, 
 
     assert link.local_address == "127.0.0.1"
     assert stub.seen == [("GET", CLIENT_ROUTE)], "learning the address cost a request of its own"
+
+
+def test_a_cache_file_whose_write_fails_leaves_the_last_one_whole_and_no_temporary_file(tmp_path, monkeypatch):
+    """A full card under the pull's writer: the feed cached before is still the feed, and no half-file waits for a tidy."""
+    manifest = tmp_path / "manifest.json"
+    pull_module._write_atomically(manifest, b'{"cached": "before"}')
+
+    def no_disk(_descriptor):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "fsync", no_disk)
+    with pytest.raises(OSError, match="No space"):
+        pull_module._write_atomically(manifest, b'{"cached": "after"}')
+
+    assert manifest.read_bytes() == b'{"cached": "before"}'
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["manifest.json"]
