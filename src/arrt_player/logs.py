@@ -90,6 +90,16 @@ def work_context(work_id: str) -> Iterator[None]:
         _WORK_ID.reset(token)
 
 
+def current_work_id() -> str | None:
+    """The work bound by `work_context` where this is called, or None outside any.
+
+    The same binding `WorkCorrelationFilter` stamps on every journal line, read
+    directly: a caller handed only a path, such as a screen output, learns which
+    work the call is about from here, which is the Player's one account of it.
+    """
+    return _WORK_ID.get()
+
+
 @contextmanager
 def wall_context(wall_id: str) -> Iterator[None]:
     """Bind a wall's id to everything logged inside this block: its worker, and every task and thread it starts."""

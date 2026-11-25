@@ -43,7 +43,6 @@ from arrt_player import __main__ as entry
 from arrt_player import logs
 from arrt_player.client import LabelAssignment, WorkerStop
 from arrt_player.config import FileOutputSettings
-from arrt_player.displays import file_output
 from arrt_player.displays.file_output import FileScreenOutput, captioning, file_label_panel
 from arrt_player.displays.screen import screen_wall
 from arrt_player.kms import fitted
@@ -438,7 +437,7 @@ def test_a_write_that_fails_leaves_the_last_record_whole_and_no_temporary_file(d
     def no_disk(_descriptor):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(file_output.os, "fsync", no_disk)
+    monkeypatch.setattr(os, "fsync", no_disk)
     with pytest.raises(OSError, match="No space"):
         drawn_on.show(_a_render(tmp_path / "other.jpg", colour=(0, 200, 0)))
 

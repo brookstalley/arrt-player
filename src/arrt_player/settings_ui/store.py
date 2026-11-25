@@ -35,16 +35,17 @@ the slideshow keys and setting `version` to 1 (`deploy/README.md`).
 
 **It holds `CLIENT_TOKEN` and `REDDIT_SESSION` in the clear**, as `.env` does: the
 Player has to send them. The file is created 0600, and written by temp-and-rename with an `fsync`
-between, the same discipline as `heartbeat.write`, because a Pi on an SD card with
-no UPS can otherwise keep a file that exists and holds nothing.
+between (`safe_write.write_whole`), because a Pi on an SD card with no UPS can
+otherwise keep a file that exists and holds nothing.
 """
 
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
+
+from arrt_player.safe_write import write_whole
 
 #: The file, directly under `CACHE_DIR`.
 SETTINGS_FILENAME: Final[str] = ".settings.json"
@@ -164,13 +165,11 @@ def write(cache_dir: Path, stored: Stored) -> None:
     # nothing has pulled yet, so nothing has made it.
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = path_in(cache_dir)
-    temporary = path.with_name(f"{path.name}.tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, indent=2, sort_keys=True)
-        handle.flush()
-        os.fsync(handle.fileno())
-    # O_CREAT's mode applies only to a file it creates; a temp file left by a
-    # crash keeps whatever mode it had.
-    temporary.chmod(FILE_MODE)
-    temporary.replace(path)
+    # The mode is set on the staged file before a byte is written: a temp file
+    # left by a crash keeps whatever mode it had, and this one holds secrets.
+    write_whole(
+        path,
+        json.dumps(document, indent=2, sort_keys=True).encode("utf-8"),
+        temporary=path.with_name(f"{path.name}.tmp"),
+        mode=FILE_MODE,
+    )

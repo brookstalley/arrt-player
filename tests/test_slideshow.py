@@ -15,6 +15,7 @@ import base64
 import itertools
 import json
 import logging
+import os
 import shutil
 import tempfile
 import threading
@@ -404,6 +405,40 @@ def test_a_saved_listing_reads_back_as_it_was(tmp_path):
     save_listing(tmp_path / "l.json", items)
 
     assert load_listing(tmp_path / "l.json") == items
+
+
+def test_a_listing_that_cannot_be_written_leaves_the_last_one_whole_and_no_temporary_file(tmp_path, monkeypatch):
+    path = tmp_path / "l.json"
+    save_listing(path, (item("a"),))
+    before = path.read_bytes()
+
+    def no_disk(_descriptor):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "fsync", no_disk)
+    with pytest.raises(OSError, match="No space"):
+        save_listing(path, (item("b"),))
+
+    assert path.read_bytes() == before
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["l.json"]
+
+
+async def test_a_refresh_whose_listing_cannot_be_saved_plays_on_says_so_and_leaves_no_temporary_file(
+    tmp_path, monkeypatch, caplog
+):
+    def no_disk(_descriptor):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "fsync", no_disk)
+    rig = Rig(tmp_path, Source(listed(item("a"), item("b"))))
+
+    with caplog.at_level(logging.WARNING):
+        await rig.run_for(3)
+
+    assert rig.screen.ids()[:2] == ["t3_a", "t3_b"]
+    assert [r for r in caplog.records if getattr(r, "event", None) == "slideshow.save_failed"]
+    assert not rig.listing_path.exists()
+    assert sorted(entry.name for entry in tmp_path.iterdir() if entry.name.startswith("listing")) == []
 
 
 @pytest.mark.parametrize("content", ["not json", '{"version": 2, "items": []}', '{"version": 1, "items": [{"id": "x"}]}'])

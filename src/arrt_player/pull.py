@@ -72,6 +72,7 @@ from arrt_player.heartbeat import REPORTED_AT_KEY
 from arrt_player.heartbeat import path_in as heartbeat_path_in
 from arrt_player.label_rule import LabelDocument, LabelDocumentUnreadable, parse_label_document
 from arrt_player.manifest import MEDIA_DIRNAME, REQUESTED_MAJORS, Feed, ManifestUnreadable, Work, media_name, parse
+from arrt_player.safe_write import write_whole
 
 log = logging.getLogger(__name__)
 
@@ -1443,13 +1444,4 @@ def _same_origin(address: str, server: str) -> bool:
 
 def _write_atomically(path: Path, data: bytes) -> None:
     """Replace a cache file in one step, so the watcher never reads half of one."""
-    temporary = path.with_name(f".{path.name}.tmp")
-    try:
-        with temporary.open("wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-    except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
-        _discard_quietly(temporary)
-        raise
+    write_whole(path, data, temporary=path.with_name(f".{path.name}.tmp"))
