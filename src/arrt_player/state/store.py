@@ -25,18 +25,29 @@ Four things live here:
 **The Player removes from a set only what it recorded putting there.** A set's
 uploaded category also holds the household's own pictures, and nothing about a
 picture in it says who sent it. So every upload is recorded before it is sent,
-with the set it goes to (or none, while the set will not say which it is) and
-the marker it carries as its `image_date`, which the set echoes in its listing;
-the content id is added once the set gives one. A listed picture is this
-Player's on set X only when a record on X names its id and, where the record
-holds a marker, the listing shows that marker beside it; an upload whose id was
-never learned is found by its marker alone, and only when exactly one listed
-picture carries it. The markers of live records are never two alike
-(`record_sending`). A record leaves once the listing of its set no longer
-shows it, so the table holds what may still be on a set and no more. A store
-from before the record existed takes every binding with a content id, current
-or set aside, as recorded under the set it was made on, with no marker; one
-that knew no set records them when it first adopts one.
+with the set it goes to and the marker it carries as its `image_date`, which
+the set echoes in its listing; the content id is added once the set gives one.
+A listed picture is this Player's on set X only when a record on X names its id
+and, where the record holds a marker, the listing shows that marker beside it;
+an upload whose id was never learned is found by its marker alone, and only
+when exactly one listed picture carries it. The markers of live records are
+never two alike (`record_sending`). A record leaves once the listing of its set
+no longer shows it, so the table holds what may still be on a set and no more.
+A store from before the record existed takes every binding with a content id,
+current or set aside, as recorded under the set it was made on, with no marker;
+one that knew no set records them when it first adopts one.
+
+**An upload sent while the set will not say which it is may be found only on
+a set it was sent toward**, and listed at the address it was sent to. It is
+recorded with no set, beside the address, the set this store last recorded
+(`sent_toward`), and the set that later said which it is on the connection the
+upload went on (`heard_from`): no other set, because the address
+may reach another by then, and a household picture there could carry the same
+date, or the same id and date. Found on one of the two, it becomes that set's
+record; listed on one without it, it is no longer sent toward that one; and it
+leaves once neither is left. A record sent toward no set (a store that had
+recorded none, on a connection no set said on) leaves at the first listing of
+any set.
 
 **A binding belongs to the set it was made on, and a different set starts with
 none.** A Samsung set's content ids are its own, small and sequential, so an id
@@ -298,16 +309,29 @@ CREATE TABLE IF NOT EXISTS tv_binding_aside (
 -- `image_date` it carried (null only on a record carried from a binding an
 -- older Player wrote), and the id the set gave it (null until learned). What
 -- the Player may remove from a set is what these name there, and nothing else.
+-- For a record of no set, the only sets it may be found on (`uploads_on`): the
+-- set this store last recorded when it was sent (`sent_toward`), and the set
+-- that said which it is on the connection it went on (`heard_from`), the
+-- connection being its `spell`; each listed at `address`, where it went.
 CREATE TABLE IF NOT EXISTS tv_upload (
     id             TEXT PRIMARY KEY,
     tv_identity    TEXT,
     marker         TEXT,
     tv_content_id  TEXT,
     sent_at        TEXT NOT NULL,
+    sent_toward    TEXT,
+    address        TEXT,
+    spell          TEXT,
+    heard_from     TEXT,
     -- A record names its picture by its marker, its id, or both: never neither.
     CHECK (marker IS NOT NULL OR tv_content_id IS NOT NULL)
 );
 """
+
+#: Which records of no set's may be on a set listed at an address: those sent
+#: there, toward that set or heard from it. Its parameters are the address, and
+#: the set's identity twice.
+_MAY_BE_ON: Final[str] = "tv_identity IS NULL AND address IS ? AND (sent_toward = ? OR heard_from = ?)"
 
 #: The columns `tv_binding` and `tv_binding_aside` share, in one order, for the
 #: two copies between them. Spelled once, so a column added to the one is not
@@ -711,15 +735,25 @@ class DisplayState:
     # -- what this Player sent to a set ------------------------------------
 
     def record_sending(
-        self, identity: str | None, *, marker_for: Callable[[datetime], str], forgetting_the_wall: bool = False
+        self,
+        identity: str | None,
+        *,
+        marker_for: Callable[[datetime], str],
+        address: str | None = None,
+        spell: str | None = None,
+        forgetting_the_wall: bool = False,
     ) -> Sending:
-        """Record an upload about to be sent to `identity` (None: a set that has not said), and return its marker.
+        """Record an upload about to be sent to `identity` (None: a set that has not said) at `address`, and return its marker.
 
         **Written before the upload is sent, and an upload whose record cannot
         be written is not sent**: a picture this Player put on a set with no
         record of it is one it can never take off again. The marker is
         `marker_for` the time now, moved on a second at a time past any marker a
         live record holds, so no two records are ever found by the same one.
+        An upload to a set that has not said is recorded as sent toward the set
+        this store last recorded, if any, and as sent in `spell`, the
+        connection it goes on, which a set may yet say it is (`heard_from`):
+        the only sets it may be found on (`uploads_on`).
 
         `forgetting_the_wall` also forgets, in the same transaction, which work
         this store last put on the wall: for an upload whose selection this
@@ -734,9 +768,11 @@ class DisplayState:
                 at += timedelta(seconds=1)
                 marker = marker_for(at)
             key = str(uuid.uuid4())
+            toward = identity if identity is not None else self._identity
             self._connection.execute(
-                "INSERT INTO tv_upload (id, tv_identity, marker, tv_content_id, sent_at) VALUES (?, ?, ?, NULL, ?)",
-                (key, identity, marker, self._now().isoformat()),
+                "INSERT INTO tv_upload (id, tv_identity, marker, tv_content_id, sent_at, sent_toward, address, spell) "
+                "VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+                (key, identity, marker, self._now().isoformat(), toward, address, spell),
             )
             if forgetting_the_wall:
                 self._connection.execute("DELETE FROM daemon_state WHERE key = ?", (_LAST_SELECTED_WORK_ID,))
@@ -757,68 +793,86 @@ class DisplayState:
             self._connection.execute("DELETE FROM tv_upload WHERE id = ? AND tv_content_id IS NULL", (key,))
             self._connection.commit()
 
-    def has_unplaced_uploads(self) -> bool:
-        """Whether any upload is recorded as sent to a set that had not said which it was."""
+    def heard_from(self, spell: str, identity: str) -> None:
+        """Record that the set `identity` said which it is on the connection the uploads of `spell` went on."""
+        with self._operation("heard_from", "record which television a spell's uploads went to"):
+            self._connection.execute(
+                "UPDATE tv_upload SET heard_from = ? WHERE spell = ? AND tv_identity IS NULL", (identity, spell)
+            )
+            self._connection.commit()
+
+    def has_unplaced_uploads(self, toward: str | None = None, *, address: str | None = None) -> bool:
+        """Whether any upload is recorded as sent to a set that had not said which it was.
+
+        Given `toward`, only those that may be on that set listed at `address`:
+        the ones a listing of it there would settle (`uploads_on`).
+        """
         with self._operation("has_unplaced_uploads", "read whether any upload's television is unknown"):
-            unplaced = self._connection.execute("SELECT 1 FROM tv_upload WHERE tv_identity IS NULL LIMIT 1").fetchone()
+            if toward is None:
+                unplaced = self._connection.execute("SELECT 1 FROM tv_upload WHERE tv_identity IS NULL LIMIT 1").fetchone()
+            else:
+                unplaced = self._connection.execute(
+                    f"SELECT 1 FROM tv_upload WHERE {_MAY_BE_ON} LIMIT 1", (address, toward, toward)  # noqa: S608
+                ).fetchone()
         return unplaced is not None
 
-    def uploads_on(self, identity: str, listed: Mapping[str, str | None]) -> frozenset[str]:
-        """Of the pictures the set `identity` lists (each id with its `image_date`), those this Player put there.
+    def uploads_on(self, identity: str, listed: Mapping[str, str | None], *, address: str | None = None) -> frozenset[str]:
+        """Of the pictures the set `identity` lists at `address` (each id with its `image_date`), those this Player put there.
 
         One transaction, which also keeps the records to what may still be on
         a set. **A record of `identity`'s**: kept, and its picture named, while
         the listing shows its id with its marker (a record with no marker, by
         its id, and the date the listing shows is then kept as its marker); its
-        id unknown, it takes the one listed picture carrying its marker. It
-        leaves when the listing shows its id with another marker, or shows no
-        id for it at all: the set no longer holds what it recorded. A listing
-        that shows the id with no date cannot say, and the record is kept,
-        naming nothing. **A record of no set's**: placed on `identity`, and its
-        picture named, only when the listing shows its id and marker together,
-        or, its id unknown, exactly one picture with its marker; otherwise it
-        stays, for the set it went to may be another.
+        id unknown, it takes the one listed picture carrying its marker, and
+        leaves if none or several do. It leaves when the listing shows its id
+        with another marker, or shows no id for it at all: the set no longer
+        holds what it recorded. A listing that shows the id with no date cannot
+        say, and the record is kept, naming nothing. **A record of no set's**
+        that may be on `identity` (`_MAY_BE_ON`) is matched the same way:
+        found, it becomes a record of `identity`'s; not found, it is no longer
+        sent toward `identity`, and it leaves once no set is left that it may
+        be on. Every other record of no set is not read, and one that may be on
+        no set leaves.
         """
         ours: set[str] = set()
         with self._operation("uploads_on", "match its uploads against the television's list"):
-            rows = self._connection.execute(
-                "SELECT id, tv_identity, marker, tv_content_id FROM tv_upload WHERE tv_identity = ? OR tv_identity IS NULL",
-                (identity,),
-            ).fetchall()
-            for row in rows:
+            execute = self._connection.execute
+            columns = "SELECT id, marker, tv_content_id FROM tv_upload"
+            own = execute(f"{columns} WHERE tv_identity = ?", (identity,)).fetchall()
+            unplaced = execute(f"{columns} WHERE {_MAY_BE_ON}", (address, identity, identity)).fetchall()
+            matching = [(row, None) for row in own] + [(row, identity) for row in unplaced]
+            for row, placing in matching:
                 if row["tv_content_id"] is not None:
-                    self._match_by_id(row, identity, listed, ours)
+                    self._match_by_id(row, listed, ours, placing)
             carrying: dict[str, list[str]] = {}
             for content_id, date in listed.items():
                 if date is not None and content_id not in ours:
                     carrying.setdefault(date, []).append(content_id)
-            for row in rows:
+            for row, placing in matching:
                 if row["tv_content_id"] is None:
-                    self._match_by_marker(row, identity, carrying, ours)
+                    self._match_by_marker(row, carrying, ours, placing)
+            execute("DELETE FROM tv_upload WHERE tv_identity IS NULL AND sent_toward IS NULL AND heard_from IS NULL")
             self._connection.commit()
         return frozenset(ours)
 
-    def _match_by_id(self, row: sqlite3.Row, identity: str, listed: Mapping[str, str | None], ours: set[str]) -> None:
-        """`uploads_on` for a record whose id is known. Inside its transaction."""
-        execute = self._connection.execute
-        content_id, marker, placed = row["tv_content_id"], row["marker"], row["tv_identity"] == identity
+    def _match_by_id(self, row: sqlite3.Row, listed: Mapping[str, str | None], ours: set[str], placing: str | None) -> None:
+        """`uploads_on` for a record whose id is known; `placing` the listed set, for a record of no set's. In its transaction."""
+        content_id, marker = row["tv_content_id"], row["marker"]
         date = listed.get(content_id)
         if content_id not in listed or (marker is not None and date is not None and date != marker):
             # Gone from the set, or its id names another picture now.
-            if placed:
-                execute("DELETE FROM tv_upload WHERE id = ?", (row["id"],))
+            self._not_on_it(row, placing)
         elif marker is None:
             # Carried from a binding, which names the picture by its id alone.
-            if placed:
-                ours.add(content_id)
-                if date is not None:
-                    execute("UPDATE tv_upload SET marker = ? WHERE id = ?", (date, row["id"]))
+            ours.add(content_id)
+            if date is not None:
+                self._connection.execute("UPDATE tv_upload SET marker = ? WHERE id = ?", (date, row["id"]))
         elif date == marker:
             ours.add(content_id)
-            if not placed:
-                execute("UPDATE tv_upload SET tv_identity = ? WHERE id = ?", (identity, row["id"]))
+            if placing is not None:
+                self._connection.execute("UPDATE tv_upload SET tv_identity = ? WHERE id = ?", (placing, row["id"]))
 
-    def _match_by_marker(self, row: sqlite3.Row, identity: str, carrying: dict[str, list[str]], ours: set[str]) -> None:
+    def _match_by_marker(self, row: sqlite3.Row, carrying: dict[str, list[str]], ours: set[str], placing: str | None) -> None:
         """`uploads_on` for a record whose id was never learned: the one listed picture with its marker. In its transaction."""
         found = carrying.get(row["marker"], [])
         if len(found) == 1:
@@ -826,12 +880,23 @@ class DisplayState:
             ours.add(content_id)
             del carrying[row["marker"]]
             self._connection.execute(
-                "UPDATE tv_upload SET tv_identity = ?, tv_content_id = ? WHERE id = ?", (identity, content_id, row["id"])
+                "UPDATE tv_upload SET tv_content_id = ?, tv_identity = coalesce(?, tv_identity) WHERE id = ?",
+                (content_id, placing, row["id"]),
             )
-        elif row["tv_identity"] == identity:
+        else:
             # Resolved by the first listing after it: it did not land, or it
             # cannot be told from a picture stamped in the same second.
+            self._not_on_it(row, placing)
+
+    def _not_on_it(self, row: sqlite3.Row, placing: str | None) -> None:
+        """Its picture is not on the listed set: drop the record, or, of no set's, that set from it. In its transaction."""
+        if placing is None:
             self._connection.execute("DELETE FROM tv_upload WHERE id = ?", (row["id"],))
+        else:
+            self._connection.execute(
+                "UPDATE tv_upload SET sent_toward = nullif(sent_toward, ?), heard_from = nullif(heard_from, ?) WHERE id = ?",
+                (placing, placing, row["id"]),
+            )
 
     def forget_uploads(self, identity: str, tv_content_ids: Iterable[str]) -> None:
         """Drop the records of pictures the set `identity` has confirmed are gone from it."""
