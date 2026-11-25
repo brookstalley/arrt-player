@@ -231,15 +231,27 @@ def _leaks(root: pathlib.Path, names: list[str]) -> list[tuple[str, str]]:
     return found
 
 
+_WHY_REFUSED = {
+    _CHUNK_NUMBER_KIND: "durable prose carries its reason, not a chunk number, which belongs in the commit message",
+    _DEPLOYMENT_PATH_KIND: "code does not name the deployment's published paths, which do not exist on a dev machine",
+}
+_WHY_REFUSED_DEFAULT = "a deployment value, which belongs in .env or nowhere"
+
+
+def _refusal(leaks: list[tuple[str, str]]) -> str:
+    """One line per hit, each with the reason for its own kind."""
+    return "\n".join(f"{where}: {kind}: {_WHY_REFUSED.get(kind, _WHY_REFUSED_DEFAULT)}" for where, kind in leaks)
+
+
 def test_no_file_in_the_working_tree_carries_a_deployment_value():
     """Documents, `deploy/`, `.prawduct/` and config as well as source; it names file, line and kind, never the value."""
     leaks = [
-        f"{where}: {kind}"
+        (where, kind)
         for where, kind in _leaks(PROJECT, _working_tree())
         if (where.rsplit(":", 1)[0], kind) not in _ACCEPTED_RESIDUE
     ]
 
-    assert leaks == [], "a deployment value, which belongs in .env or nowhere:\n" + "\n".join(leaks)
+    assert leaks == [], "the working tree carries what this repository refuses:\n" + _refusal(leaks)
 
 
 def test_every_accepted_residue_still_matches():
@@ -577,3 +589,24 @@ def test_a_lookalike_or_a_plan_that_names_its_chunks_is_not_refused(tmp_path, wh
     target.write_text(line + "\n", encoding="utf-8")
 
     assert _leaks(tmp_path, [where]) == []
+
+
+@pytest.mark.parametrize(
+    ("where", "line", "kind", "reason"),
+    [
+        ("src/a.py", "# Chunk " + "99", _CHUNK_NUMBER_KIND, "not a chunk number, which belongs in the commit message"),
+        ("src/a.py", 'ROOT = "' + _SRV + '"', _DEPLOYMENT_PATH_KIND, "do not exist on a dev machine"),
+        ("docs/a.md", "host 10.1.2.3", "private IPv4 address", "belongs in .env or nowhere"),
+    ],
+)
+def test_each_kind_the_scan_refuses_says_its_own_reason(tmp_path, where, line, kind, reason):
+    target = tmp_path / where
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(line + "\n", encoding="utf-8")
+
+    said = _refusal(_leaks(tmp_path, [where]))
+
+    assert kind in said
+    assert reason in said
+    if kind != "private IPv4 address":
+        assert ".env or nowhere" not in said, "a kind that is not a deployment value was told it belongs in .env"
