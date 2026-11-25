@@ -1320,8 +1320,9 @@ class FrameDisplay:
         **Only what the upload records name on this set** (`uploads_on`): the
         set's one upload category also holds the household's pictures, and an
         older Player's that it never recorded, and nothing in a listing says
-        who sent a picture. Those are left alone, and the journal says once per
-        set in this process how many (`tv.others_left_alone`). What the records
+        who sent a picture. Those are left alone, with any of the Player's own
+        its records cannot match, and the journal says once per set in this
+        process how many (`tv.others_left_alone`). What the records
         name and no binding wants is a re-rendered work's previous image, a
         copy whose upload was reported failed and landed, an orphaned
         binding's id the set lists again, and the uploads of the store in
@@ -1342,10 +1343,12 @@ class FrameDisplay:
         shows is deleted has never been measured. An unaccounted one is left
         (`_left_on_the_wall`) and its removal owed again once the wall has
         moved on. Only a picture this process knows is up is spared (its own
-        last selection, or the set's last announcement): on a first run, or on
-        a set met afresh, it knows nothing of the wall until then, and an
-        upload of the household's that is up is removed like any other the set
-        lists.
+        last selection, or the set's last announcement). A picture the records
+        do not name is never asked for, up or not, so a picture removed while
+        the set shows it is only ever one of the Player's own that this process
+        does not know is up: a copy the store in memory put on the wall before
+        the Player was started again is one, which the next process removes
+        from the screen and replaces with one of its own in the same pass.
         """
         # `Identified` records the set on the device's store, so its identity is the phase's.
         identity = self._store.tv_identity
@@ -1426,13 +1429,14 @@ class FrameDisplay:
         return True
 
     def _say_what_is_left_alone(self, identity: str, left_alone: int) -> None:
-        """Say once per set in this process how many pictures it lists that the Player did not record putting there."""
+        """Say once per set in this process how many pictures it lists that the Player's records do not name."""
         if left_alone <= 0 or identity in self._left_alone_said:
             return
         self._left_alone_said.add(identity)
         log.info(
-            "the television lists %d uploaded picture(s) this Player has no record of putting there; "
-            "they are the household's, or an older Player's, and are left where they are",
+            "the television lists %d uploaded picture(s) this Player's upload records do not name; they are left "
+            "where they are, whoever put them there: the household, an older Player, or this Player where its "
+            "records cannot match the picture",
             left_alone,
             extra={"event": "tv.others_left_alone", "left_alone": left_alone, "set_now": _known_as(identity)},
         )
