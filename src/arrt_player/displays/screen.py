@@ -31,6 +31,7 @@ from arrt_player.config import WallSettings
 from arrt_player.displays.screen_brightness import ScreenBrightness
 from arrt_player.episodes import ReportOnce
 from arrt_player.heartbeat import ScreenState
+from arrt_player.logs import work_context
 from arrt_player.manifest import Watcher
 from arrt_player.programmes.schedule import InMemory, Schedule
 from arrt_player.wall import Capabilities, Clock, DisplayRecord, Picture, Shown, Wall
@@ -158,6 +159,12 @@ class ScreenDisplay:
         self.record = DisplayRecord(clock, wall_id=wall.wall_id)
         #: The work on the screen, as this display last put it there.
         self._showing: str | None = None
+        #: The picture the output refused, until one is put up: the output goes
+        #: on trying to draw it, so this display asks again to learn that it did,
+        #: and does not report a dark screen over a picture that is on it.
+        self._refused: Picture | None = None
+        #: Whether a picture was refused in this pass, which is not asked again in it.
+        self._refused_now = False
         self._last_error: str | None = None
         self._refresh_failed = ReportOnce()
         self._draw_failed = ReportOnce()
@@ -183,10 +190,18 @@ class ScreenDisplay:
         return True
 
     async def show(self, picture: Picture) -> Shown:
+        if await self._put_up(picture):
+            return Shown.YES
+        self._refused_now = True
+        return Shown.SKIP
+
+    async def _put_up(self, picture: Picture) -> bool:
+        """Draw a picture and say what became of it. A screen that refuses costs the picture, never the wall."""
         try:
             await asyncio.to_thread(self._output.show, picture.path)
         except Exception as exc:  # noqa: BLE001  # prawduct:allow prawduct/broad-except -- costs this picture, never the wall
             self._last_error = f"the screen refused {picture.work_id} ({exc})"
+            self._refused = picture
             # Once per episode: a screen that refuses one work refuses the
             # next, and the schedule tries again at every slot.
             if self._draw_failed.begin():
@@ -196,7 +211,8 @@ class ScreenDisplay:
                     exc,
                     extra={"event": "screen.draw_failed"},
                 )
-            return Shown.SKIP
+            return False
+        self._refused = None
         if self._draw_failed.end():
             log.info("the screen draws again", extra={"event": "screen.draw_recovered"})
         self._showing = picture.work_id
@@ -205,7 +221,7 @@ class ScreenDisplay:
             picture.title,
             extra={"event": "rotation.selected", "picture_path": str(picture.path)},
         )
-        return Shown.YES
+        return True
 
     async def after(self, pictures: Sequence[Picture]) -> None:  # noqa: ARG002 -- the wall.Display protocol's signature
         await self._refresh()
@@ -244,7 +260,22 @@ class ScreenDisplay:
         await self._brightness.apply(present=present, showing=present and self._showing is not None)
 
     async def _refresh(self) -> None:
-        """Let the output draw again for a screen that came back. Its failure is said once, and costs the pass nothing."""
+        """Let the output draw again for a screen that came back. Its failure is said once, and costs the pass nothing.
+
+        **After a refused picture the output is asked to show it again instead**,
+        because an output keeps trying to draw what it was last given, and a
+        draw it completes on its own is one this display must see to report. A
+        picture refused in this very pass is left for the next one: asking
+        again would double what a refusing screen is asked to do.
+        """
+        if self._refused_now:
+            self._refused_now = False
+            return
+        if self._refused is not None:
+            # The work the schedule showed is what the screen's file records, so it is bound as it was.
+            with work_context(self._refused.work_id):
+                await self._put_up(self._refused)
+            return
         try:
             await asyncio.to_thread(self._output.refresh)
         # A screen that cannot be redrawn must not stop the wall.

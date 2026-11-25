@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from fakes import RecordingOutput
 from PIL import Image
 from server_double import TOKEN, ServerDouble
 
@@ -45,6 +46,7 @@ from arrt_player.client import LabelAssignment, WorkerStop
 from arrt_player.config import FileOutputSettings
 from arrt_player.displays.file_output import FileScreenOutput, captioning, file_label_panel
 from arrt_player.displays.screen import screen_wall
+from arrt_player.heartbeat import path_in
 from arrt_player.kms import fitted
 from arrt_player.label_rule import Drawing, Outcome
 from arrt_player.manifest import Watcher
@@ -529,6 +531,63 @@ def test_a_blank_whose_write_failed_is_drawn_by_the_next_refresh(drawn_on, tmp_p
     assert (record["outcome"], record["work_id"]) == ("blank", None)
     drawn_on.refresh()
     assert _read(drawn_on.directory / "shown.json") == record, "a refresh after the blank was drawn rewrote it"
+
+
+@pytest.mark.parametrize("passes_later", [7.3, 61.0], ids=["before the schedule's own retry", "after it"])
+@pytest.mark.parametrize("refused", ["picture.png", "shown.json"], ids=["the picture", "the record after the picture"])
+async def test_after_a_failed_write_and_its_heal_the_file_the_record_and_the_wall_report_agree(
+    client_settings, wall_dir, files, publish, clock, monkeypatch, caplog, passes_later, refused
+):
+    """What a person sees on the screen, in `shown.json`, and in what the wall tells the server, once the disk is back."""
+    wall = client_settings.wall("living-room")
+    publish.geometry = wall.geometry_for(SCREEN)
+    publish(["w1", "w2"], interval_seconds=3600)
+    output = FileScreenOutput(files, wall_id="living-room")
+    screen = screen_wall(wall=wall, output=output, watcher=Watcher(wall.manifest_path), clock=clock.as_clock())
+    heal = _a_disk_that_refuses(monkeypatch, naming=refused)
+
+    with caplog.at_level(logging.INFO):
+        await screen.tick()
+        reported = json.loads(path_in(wall_dir, "living-room").read_text())["display_state"]
+        assert (reported["state"], reported["work_id"]) == ("dark", None), "a work the screen refused was reported as shown"
+        heal()
+        clock.advance(passes_later)
+        await screen.tick()
+
+    reported = json.loads(path_in(wall_dir, "living-room").read_text())["display_state"]
+    record = _agree(output)
+    assert record["outcome"] == "picture"
+    assert (reported["state"], reported["work_id"]) == (
+        "showing_art",
+        record["work_id"],
+    ), "the wall reports what the screen does not show"
+    with Image.open(output.directory / "picture.png") as image:
+        assert image.convert("RGB").tobytes() == fitted(Path(record["render"]), SCREEN).tobytes()
+    events = [entry.__dict__.get("event") for entry in caplog.records]
+    assert events.count("screen.draw_failed") == 1
+    assert events.count("screen.draw_recovered") == 1, "the screen drew again and said nothing"
+
+
+async def test_a_screen_that_refuses_a_picture_is_asked_once_a_pass_and_not_twice(client_settings, publish, clock):
+    """A refusing screen is not made to do double work: the pass that refused leaves the retry to the next one."""
+    asked: list[Path] = []
+
+    class Refusing(RecordingOutput):
+        def show(self, render: Path) -> None:
+            asked.append(render)
+            raise OSError(5, "Input/output error")
+
+    wall = client_settings.wall("living-room")
+    publish.geometry = wall.geometry_for(SCREEN)
+    publish(["w1"], interval_seconds=3600)
+    screen = screen_wall(wall=wall, output=Refusing(screen=SCREEN), watcher=Watcher(wall.manifest_path), clock=clock.as_clock())
+
+    await screen.tick()
+    assert len(asked) == 1, "the pass that refused the picture asked again in the same pass"
+    for passes in (2, 3):
+        clock.advance(7.3)
+        await screen.tick()
+        assert len(asked) == passes, "the refused picture was not asked for again on each following pass"
 
 
 async def test_a_file_screen_that_cannot_be_written_costs_the_picture_and_says_so(
