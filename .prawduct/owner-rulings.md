@@ -4,6 +4,18 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-25, while wave 3 was being integrated.** Recorded in full in Arrt's `owner-rulings.md` under the same date ("five
+answers while wave 3 was being integrated"). The owner: "yes to all recommendations". The two that are the Player's:
+
+- **The costs of "remove only what it recorded uploading" are accepted before any deploy.**
+  Pictures an older Player uploaded without recording them stay on the television until a
+  person deletes them. Rolling back to the release before schema 5 brings back that
+  release's sweep, which clears the household's own pictures, so **a Player rollback across
+  that release needs the owner's say-so each time**; the runbook's rollback step is owed this sentence by the wave's records chunk.
+- **Contract 1.3.0's `staging-repeated` stays must-refuse.** When this Player pins
+  `contract-v1.3.0`, its reader must refuse a feed that lists the same staging entry twice,
+  which it accepts today; the 32-output cap was ratified the same day.
+
 **2026-11-19, during wave 2 of the audit fixes.** Recorded in full in Arrt's `owner-rulings.md` under the same date ("during wave
 2 of the audit fixes, two rulings"). The one that is the Player's:
 
