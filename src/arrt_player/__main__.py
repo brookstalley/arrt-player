@@ -213,6 +213,7 @@ def label_surface(settings: PanelSettings) -> LabelSurface | None:
         geometry=geometry,
         type_scale=scale,
         rotate_degrees=settings.epd_rotate_degrees,
+        output=PANEL_OUTPUT,
     )
 
 

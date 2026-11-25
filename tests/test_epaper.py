@@ -264,9 +264,21 @@ class TestTheSurfaceSaysWhatItKnowsAndNeverStopsTheWall:
                 raise OSError("the device is gone")
 
         with caplog.at_level(logging.WARNING):
+            a_surface(epd=Stuck(), output="epd-7").close()
+
+        [said] = [r for r in caplog.records if r.__dict__.get("event") == "panel.close_failed"]
+        assert said.__dict__["output"] == "epd-7", "the line did not say which panel would not close"
+
+    def test_a_panel_nothing_maps_says_no_output_rather_than_a_wrong_one(self, caplog):
+        class Stuck(FakeEpd):
+            def close(self) -> None:
+                raise OSError("the device is gone")
+
+        with caplog.at_level(logging.WARNING):
             a_surface(epd=Stuck()).close()
 
-        assert any(record.__dict__.get("event") == "panel.close_failed" for record in caplog.records)
+        [said] = [r for r in caplog.records if r.__dict__.get("event") == "panel.close_failed"]
+        assert "output" not in said.__dict__
 
     def test_closing_releases_the_device(self):
         epd = FakeEpd()
