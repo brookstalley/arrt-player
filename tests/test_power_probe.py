@@ -444,7 +444,7 @@ class TestItWillNotWriteTheWallsOwnToken:
 
 
 class TestItReadsTheThreeStatesApart:
-    """The mapping Chunk 25 will implement, checked here so the sitting can trust the report."""
+    """The mapping the Player will implement, checked here so the sitting can trust the report."""
 
     @pytest.mark.parametrize(
         ("power", "art", "expected"),
@@ -482,7 +482,7 @@ class TestItReadsTheThreeStatesApart:
         The art channel refuses for two different reasons — the set's state, which is
         what the sitting measures, and another client already holding the slot, which
         means somebody forgot to stop the daemon. They look identical in the output, and
-        *that output is what Chunk 25's fake gets built from*: a fake modelled on a
+        *that output is what the Player's fake television gets built from*: a fake modelled on a
         contention refusal would encode it as a fact about the television and make every
         test past it vacuous.
         """
@@ -563,7 +563,7 @@ class TestItReportsWhatATransitionDid:
     ):
         """The two failures the sitting is asked to record must not arrive as a traceback.
 
-        `UnauthorizedError` and `ConnectionFailure` are exactly what Chunk 24 sends the
+        `UnauthorizedError` and `ConnectionFailure` are exactly what the sitting sends the
         operator to look for, and they surface at press time because the library opens
         the channel inside `send_commands`. An unhandled one would take the readings
         above it down with it — and those readings are the run's evidence.
@@ -697,7 +697,7 @@ class TestItReportsWhatATransitionDid:
     def test_a_channel_the_press_killed_is_reported_even_though_the_library_reopened_it(
         self, probe_module, deployment, monkeypatch, capsys
     ):
-        """The review's sharpest finding, and it went to Chunk 24's actual deliverable.
+        """The review's sharpest finding, and it went to the sitting's actual deliverable.
 
         `get_artmode` reaches `start_listening()`, which reopens a dead channel without
         a word — so a post-hoc `is_alive()` reads `True` whether or not the press killed

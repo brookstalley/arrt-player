@@ -1,6 +1,6 @@
 """redgifs: a gif's HD mp4 through redgifs' own API, in place of Reddit's often lower copy.
 
-Measured on 2026-11-10 (the build plan's chunk 03 verify-api; the answers are
+Measured on 2026-11-10 (the slideshow build plan's check against the live API; the answers are
 in `tests/fixtures/redgifs/`):
 
 * `GET /v2/auth/temporary` gives a token with no account. It is a JWT that lasts

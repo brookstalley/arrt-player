@@ -1,6 +1,6 @@
 """Measure what a power key does to this set, one gesture at a time.
 
-**This is Chunk 24's instrument, and Chunk 24 is a measurement chunk.** Everything
+**This is the instrument of a measurement, not of a feature.** Everything
 downstream of it sends a power key to a television, and nobody has measured what
 the keys do: `platform-and-dependency-findings.md` records two presses from one
 starting state, never tested press-and-hold, and labels its own transitions *a
@@ -10,7 +10,7 @@ sent there is the interruption Arrt's `nonfunctional-requirements.md` § The tel
 belongs to whoever is using it exists to prevent, and it is the one state whose
 readings are identical to dark's on the art channel.
 
-**Why a tool and not a REPL.** The table Chunk 24 has to fill is three starting
+**Why a tool and not a REPL.** The table the sitting has to fill is three starting
 states × two gestures, and every cell wants the same four things: the readings
 before, the readings after, *how long they took to settle*, and whether the art
 channel survived. Settling time is the one a REPL cannot give you — by the time a
@@ -148,7 +148,7 @@ class Reading:
     def observed(self) -> str:
         """The product's own vocabulary for this pair of readings.
 
-        The mapping Chunk 25 will implement, stated here so the sitting can check
+        The mapping the Player will implement, stated here so the sitting can check
         it against the set rather than the other way round: `standby`/`off` is
         dark, `on`/`off` is television, `on`/`on` is art mode. **Anything this
         cannot read is `UNKNOWN`, never a guess** — and `UNKNOWN` is what the two
@@ -395,7 +395,7 @@ class Probe:
                 # `_send_art_request` → `start_listening()`, which reopens a dead
                 # channel without a word — so asking `is_alive()` afterwards reports
                 # `True` whether or not the press killed it, and the one question
-                # Chunk 24 most needs answered would be answered wrongly, confidently,
+                # the sitting most needs answered would be answered wrongly, confidently,
                 # from a green run.
                 channel_was_closed = not art.is_alive()
                 raw = await art.get_artmode()
@@ -464,7 +464,7 @@ class Probe:
         dead channel, so a post-hoc check reports survival unconditionally. The
         evidence is whether any sample *found* it closed on its way to read — that is
         observed before the repair, and it is the only thing here that answers the
-        question Chunk 24 asked.
+        question the sitting asked.
 
         Four outcomes, deliberately distinct: never opened, found closed at a named
         moment, alive throughout, and — the honest gap — opened but never re-read, so
@@ -547,7 +547,7 @@ def _name_the_likely_contention(before: Reading) -> None:
     The art channel refuses for two quite different causes — the state the set is in,
     which is what this sitting measures, and another client already holding the slot,
     which is an artefact of forgetting to stop the daemon. In the transcript they look
-    identical, and *that transcript is what Chunk 25's fake gets built from*: a fake
+    identical, and *that transcript is what the Player's fake television gets built from*: a fake
     modelled on a contention refusal would encode "the art channel cannot be opened
     in this state" as a fact about the television, and every test past it would be
     vacuous. Naming the ambiguity where it appears is much cheaper than discovering it

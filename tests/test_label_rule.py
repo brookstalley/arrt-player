@@ -117,7 +117,7 @@ class TestTheServerGoneAway:
 
     The server going away is the wall going silent as far as a label can tell,
     so a caption is held for 30 minutes from the last answer and then blanked
-    (Chunk 06 item 3), and nothing else is ever turned into a caption.
+    and nothing else is ever turned into a caption.
     """
 
     LAST_ANSWER = SINCE + timedelta(hours=3)

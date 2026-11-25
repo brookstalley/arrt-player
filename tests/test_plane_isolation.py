@@ -4,7 +4,7 @@
 server out of reach: everything this guard reads is the Player's, and the one
 thing it reads from the contract, the routes, comes through the package.
 
-**Narrowed 2026-09-30 (wave 2b Chunk 04), as the norm's own row scheduled.** The
+**Narrowed 2026-09-30 (wave 2b), as the norm's own row scheduled.** The
 channel from curation is now the per-wall manifest and content-addressed media,
 pulled into a Player-local cache (Arrt's `architecture.md` § Direction). So one module,
 `src/arrt_player/pull.py`, may open an HTTP client. The paths it spells are only

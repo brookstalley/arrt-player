@@ -345,7 +345,7 @@ def test_a_start_refused_by_configuration_says_nothing_to_systemd_and_exits_2(mo
 
 
 async def test_with_files_drawn_the_player_is_arrt_mode_to_systemd(monkeypatch, systemd, server, page, client_settings, tmp_path):
-    """Chunk 05's hardware-less Player: the same supervisor, so the same `READY=1` and the same pet."""
+    """The hardware-less Player: the same supervisor, so the same `READY=1` and the same pet."""
     files = FileOutputSettings(directory=tmp_path / "drawn", screen=(320, 180), label=False)
     client = replace(client_settings, server_url=server.url, frame=None, files=files, client_poll_seconds=0.05)
     monkeypatch.setattr(entry, "load", lambda: client)

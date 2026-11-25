@@ -1548,7 +1548,7 @@ WALL_EVENTS = frozenset(
         "binding.uploaded",
         "binding.upload_failed",
         "binding.orphaned",
-        # Chunk 06: the Frame's retirement, in the same pass as its orphan sweep,
+        # The Frame's retirement, in the same pass as its orphan sweep,
         # and the store's feed count, read by the store the wall's worker opens.
         "binding.retired",
         "binding.retirement_unconfirmed",
@@ -1646,7 +1646,7 @@ PROCESS_EVENTS = frozenset(
     {
         "daemon.misconfigured",
         "daemon.setup_mode",
-        # Chunk 05: said once at start, before the supervisor runs any wall.
+        # Said once at start, before the supervisor runs any wall.
         "files.drawing",
         "client.started",
         "client.stopped",
@@ -1684,10 +1684,10 @@ PROCESS_EVENTS = frozenset(
         "settings_page.host_refused",
         "settings_page.saved",
         "settings_page.write_failed",
-        # Chunk 09: the page forgetting the Frame's pairing when its address changes.
+        # The page forgetting the Frame's pairing when its address changes.
         "settings_page.pairing_forgotten",
         "settings_page.pairing_not_forgotten",
-        # Chunk 08: systemd's notification socket, from _run, the supervisor's
+        # systemd's notification socket, from _run, the supervisor's
         # own cycle (PettingSupervisor) and the slideshow's wait, never a worker.
         "notify.absent",
         "notify.unusable",
@@ -1971,7 +1971,7 @@ async def test_every_line_a_worker_logs_names_its_wall(monkeypatch, client, serv
 
 
 async def test_every_line_a_player_drawing_to_files_logs_names_its_wall(client, server, drm, tmp_path):
-    """**The file screen and the file label, the kinds of worker chunk 05 added, held to the same rule.**
+    """**The file screen and the file label, the kinds of worker a hardware-less Player adds, held to the same rule.**
 
     A Player with no hardware (`FILE_OUTPUT_DIR`): a wall (hall) on the file
     screen, and the file label captioning it. Each line is judged by `_faults`
