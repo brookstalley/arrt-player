@@ -329,6 +329,8 @@ class TestOrphans:
         tv.holding["MY-F0099"] = HOUSEHOLDS
 
         with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            # One the set lists with its own marker, as a set that echoes it does: not counted.
+            ours_on_the_set(tv, store, "MY-F0077", Path("/a-previous-render.jpg"))
             wall = _a_frame(settings, tv, store, clock)
             for order in (["w2", "w1"], ["w1", "w2"], ["w2", "w1"]):
                 publish(order, interval_seconds=3600)
@@ -341,6 +343,7 @@ class TestOrphans:
         ], "a set not echoing the upload's date was not said once, with the Player's own pictures it cannot confirm"
         assert said[0].levelno == logging.WARNING
         assert set(on_the_set.values()) | {"MY-F0099"} <= set(tv.holding)
+        assert "MY-F0077" not in tv.holding, "the picture listed with its marker was not taken for the Player's"
 
     async def test_an_upload_the_player_has_no_record_of_is_left_on_a_set_it_has_a_store_for(self, settings, clock, publish):
         """The same on a set the wall has lived on: the household adds a picture there, and it stays."""
