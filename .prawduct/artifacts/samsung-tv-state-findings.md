@@ -450,7 +450,10 @@ What the code does, none of it measured against a set:
   pass's first `get_artmode` read**: when the wall starts, after every outage, and
   after a selection or a failure that may have dropped the connection. It is sent
   **while somebody watches television too**, because it changes nothing and the
-  wall may not use a binding before it has answered.
+  wall may not use a binding before it has answered. The client sends the same
+  read once a minute for its heartbeat, so another set at the address is reported
+  within a minute (`client.FrameIdentity`); that is 60 GETs an hour for a Frame,
+  each waiting at most 2 s on a set that is asleep.
 - **A set that opens the art channel and will not answer it** leaves the wall
   using no binding for 15 minutes (`tv.unidentified`), after which it shows art
   from an empty store in memory and removes nothing
@@ -461,8 +464,8 @@ What the code does, none of it measured against a set:
 
 1. **Whether `device.duid` survives a reboot, and a factory reset.** If it changes
    on a reboot, every restart of the set reads as another set: the wall sets its
-   bindings aside, uploads the whole library again and clears the uploaded-pictures
-   category, each time. If it survives a reboot and not a reset, a reset set reads
+   bindings aside and uploads the whole library again, each time, and the earlier
+   copies stay on the set, which nothing removes now: a library more at every reboot. If it survives a reboot and not a reset, a reset set reads
    as new, which is right (its content ids are gone with it).
 2. **Whether the identity read answers while the set shows television, and in art
    mode.** Measured only in standby (0.14 s). If it does not, the wall waits 15
@@ -540,13 +543,29 @@ What the code does, none of it measured against a set:
    set does when asked to delete the image it is showing, or an id it no longer
    has. The Player never asks for an image the set does not list, and never for
    a picture it knows is on the wall (a retirement and an orphan's removal
-   alike, `FrameDisplay._remove_orphans`); but on a first run or a set met
-   afresh it does not know which picture is up until it has selected one or the
-   set has announced one, so an upload of the household's on the wall then is
-   removed with the rest; whether an announcement that
+   alike, `FrameDisplay._remove_orphans`); it asks only for a picture its upload
+   records name, so a household picture on the wall is never among them, but it may
+   ask for one of its own that it does not yet know is up, when a store held in
+   memory put it there before the Player was started again; whether an announcement that
    a picture "is shown" can arrive while the set is not showing art (the Frame
    acts on one it receives, `FrameDisplay._take_the_sets_news`); whether a missing
    token file brings up a pairing prompt on a different set when the settings page
    has forgotten the pairing for a new address; and whether every connection
    rewrites the token file, which decides whether the page's removing it can
    race a reconnecting Frame in the half-second before the restart.
+10. **Whether a REST GET each minute keeps a sleeping set's network awake, or shows
+    anything on screen.** The identity is read once a minute for the client
+    heartbeat. The one measurement of the read (2026-10-08) was from standby: answered in
+    0.14 s on the art client's port, which this read uses (0.015 s on 8001), with no key.
+11. **Whether the REST identity read reaches the same set as the art channel.** The
+    removal rule's "the set that spoke on the same connection" rests on the two
+    agreeing; only the address is shared, and nothing has measured that one device
+    answers both. Needs a Pi with the set and, for the answer to mean anything, a
+    second set at another address.
+12. **Whether every firmware echoes an upload's `image_date` in its listing, and what
+    a picture the household uploads from the set's phone app is stamped with.** The
+    removal rule finds the Player's pictures by that date. Measured once, on one
+    upload (`platform-and-dependency-findings.md` § `upload()` reports failure on
+    uploads that succeeded). A set that does not echo it leaves every picture the
+    Player uploads there for good; a household picture stamped with the second of an
+    upload of the Player's, on the same set, is the one residue the rule accepts.

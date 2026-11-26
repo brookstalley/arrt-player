@@ -119,9 +119,10 @@ and `tests/test_availability.py`.
 |---|---|---|---|
 | Wall manifest, wall heartbeat | 60 s total, 10 s connect, per request | Backoff from 2 s, doubling to 60 s, reset when the manifest route answers; the heartbeat is not held to it | `pull.Pull.run` (`aiohttp.ClientTimeout`), `BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS` |
 | A master | 10 s connect, 30 s without a byte, no total; stopped at the bytes its feed declares | The feed is held for at most 10 minutes (above), and the master asked for again on each poll | `pull._MEDIA_TIMEOUT`, `pull._stream_to`, `MEDIA_HOLD_SECONDS` |
+| A wall's feed | Read up to 16 MiB; one past it is refused and the cached feed stays | — | `pull.MANIFEST_MAX_BYTES` |
 | A client or label document | Read up to 1 MiB | — | `pull.DOCUMENT_MAX_BYTES` |
 | A higher manifest major | — | Asked again every 60 s while a lower one answers | `pull.HIGHER_MAJOR_SECONDS` |
-| Client document and client heartbeat | 30 s total, 10 s connect | None; asked again on the next 30 s client poll | `pull.ClientPull._client` |
+| Client document and client heartbeat | 30 s total, 10 s connect | None; asked again on the next 30 s client poll. A heartbeat the server refused in its error form is held until it changes or 300 s pass | `pull.ClientPull._client`, `ClientPull.report`, `REFUSED_REPORT_RESEND_SECONDS` |
 | Label document | 10 s total, 5 s connect | None; asked again on the next 1 s label poll | `pull.LabelPull._client` |
 
 While the server cannot be reached, a label holds its last caption for 30
@@ -134,7 +135,7 @@ server is down captions from it for what is left of that hold, never more than
 `tests/test_label_renderer.py`).
 
 **A cache failure is kept local to the cache.** A write that fails while adopting
-a wall's feed (`pull._write_atomically` inside `Pull._cache_feed`, `ENOSPC` or
+a wall's feed (`pull._write_atomically`, which writes through `safe_write`, inside `Pull._cache_feed`, `ENOSPC` or
 `EROFS`) is caught there: the previous manifest stays where the watcher reads it
 (the write is temp-and-rename), no ETag is stored for the feed that could not be
 written, so the next poll is answered whole and tries again, and the heartbeat
@@ -280,8 +281,10 @@ set that is not in art mode":
   recorded identity to be the connected set's, or it sends nothing
   (`FrameDisplay._may_remove`; `security-model.md` § What it does to the television).
   A binding retired after 14 days unnamed is removed through the same gated verb.
+  **What a removal names is only what the Player recorded uploading** on that set
+  (`DisplayState.uploads_on`): the household's own pictures are left where they are.
 - **Connecting is not gated.** It includes a REST read on every construction, the
-  read of the set's identity on every new connection (one GET, no key), and,
+  read of the set's identity on every new connection (one GET, no key; the client reads it once a minute too, for its heartbeat), and,
   **only when the token file is empty**, an open of the remote-control channel to
   mint a token, which raises a pairing prompt on the screen
   (`tv/samsung.SamsungTv._construct`; `samsung-tv-state-findings.md` § This
@@ -376,7 +379,7 @@ fixed here; each is a change on Arrt.
 3. **The heartbeat still writes to the card.** Arrt's `operational-spec.md`
    § Risks says that after wave 3 the heartbeat "becomes an HTTP POST and stops
    writing to the card at all". The Player still writes each wall's heartbeat
-   file into `CACHE_DIR/<wall id>/`, with an `fsync`, at least every 60 s, and the
+   file into `CACHE_DIR/<wall id>/`, with an `fsync` (`safe_write`), at least every 60 s, and the
    pull posts that file (`heartbeat.write`, `pull.Pull._heartbeats`). The
    card still takes that write.
 4. **Interpreter.** Arrt's `operational-spec.md` § Deployment Target gives the
