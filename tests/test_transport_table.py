@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
-from arrt_contract import transport
+from arrt_contract import released, transport
 from conftest import WALL_ID
 from server_double import BODY_LIMIT_BYTES, CLIENT_ID, CONTRACT, ServerDouble, contract_etag, row
 
@@ -390,7 +390,7 @@ async def heartbeat_not_a_heartbeat(world: World) -> None:
 
 
 async def heartbeat_not_an_object(world: World) -> None:
-    await _heartbeat_sent_once_then_on_change(world, "not json at all", "[1, 2]", 422)
+    await _heartbeat_sent_once_then_on_change(world, "not json at all", "[1, 2]", row("heartbeat", "not_an_object")["status"])
 
 
 async def heartbeat_too_large(world: World) -> None:
@@ -531,6 +531,36 @@ async def test_every_row_is_answered_by_the_double_and_met_by_the_player_as_the_
         await scenario(world)
 
     assert route_case in world.stub.answered, f"the double never answered {route_case}; it answered {world.stub.answered}"
+
+
+async def test_a_wall_heartbeat_that_is_not_an_object_is_answered_as_the_corrected_row_says(world):
+    """400 in the error shape, as the client heartbeat's route answers it, where 1.2.0's row was the framework's 422."""
+    answer = row("heartbeat", "not_an_object")
+    assert answer["corrected"]["was"] == {"status": 422, "body": "framework"}, "the row is not the one 1.3.0 corrected"
+
+    async with world.session.post(
+        world.client.server_url + f"/walls/{WALL_ID}/heartbeat",
+        data=b"[1, 2]",
+        headers={"Authorization": f"Bearer {world.client.client_token}", "Content-Type": "application/json"},
+    ) as response:
+        status, body = response.status, await response.json()
+
+    assert (status, answer["body"]) == (answer["status"], "error")
+    assert list(body) == ["error"], f"answered {body}, which is not the error shape"
+    assert world.stub.answered == [("heartbeat", "not_an_object")]
+
+
+async def test_a_wall_heartbeat_answered_as_1_2_0s_row_did_is_met_as_the_current_row_says(world):
+    """A server on 1.2.0 answers 422 here; both rows say a Player reacts as for 400, so nothing it does changes."""
+    old = next(
+        answer
+        for answer in json.loads((released()["1.2.0"] / "transport.json").read_text())["routes"]["heartbeat"]["answers"]
+        if answer["case"] == "not_an_object"
+    )
+    assert old["player"] == row("heartbeat", "not_an_object")["player"] == "As for 400."
+    world.stub.heartbeat_status = old["status"]
+
+    await _heartbeat_sent_once_then_on_change(world, "not json at all", "[1, 2]", old["status"])
 
 
 # -- the double holds a Player to the heartbeat schemas ------------------------------------------------

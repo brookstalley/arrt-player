@@ -111,6 +111,14 @@ class TestParsing:
         with pytest.raises(ManifestUnreadable):
             parse(document)
 
+    def test_a_feed_that_stages_one_work_twice_is_refused(self):
+        """The contract marks `staging-repeated` `player_must_refuse`; a feed naming each work once beside it is read."""
+        works = {**a_document()["works"], "w2": a_document()["works"]["w1"]}
+
+        assert parse(json.dumps(a_document(works=works, staging=["w1", "w2"]))).staging == ("w1", "w2")
+        with pytest.raises(ManifestUnreadable, match="staging lists a work more than once"):
+            parse(json.dumps(a_document(works=works, staging=["w1", "w2", "w1"])))
+
 
 class TestWatching:
     def test_it_reports_a_manifest_once_and_then_stays_quiet(self, wall_dir: Path):
@@ -163,6 +171,20 @@ class TestWatching:
             assert watcher.poll() is None
         assert watcher.current is good
         assert "manifest.version_refused" in {record.__dict__.get("event") for record in caplog.records}
+
+    def test_a_feed_that_stages_one_work_twice_leaves_the_last_good_one_in_place(self, wall_dir: Path, caplog):
+        """What the wall keeps showing: the feed it adopted before the repeated staging arrived."""
+        write_manifest(wall_dir, a_document())
+        watcher = a_watcher(wall_dir)
+        good = watcher.poll()
+        assert good is not None
+
+        write_manifest(wall_dir, a_document(staging=["w1", "w1"]))
+
+        with caplog.at_level(logging.ERROR):
+            assert watcher.poll() is None
+        assert watcher.current is good
+        assert "staging lists a work more than once" in " ".join(record.getMessage() for record in caplog.records)
 
     def test_a_refusal_is_logged_once_per_file_rather_than_once_per_poll(self, wall_dir: Path, caplog):
         """At one poll a second, a repeated refusal would write 86,400 identical

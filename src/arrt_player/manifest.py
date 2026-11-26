@@ -33,8 +33,8 @@ and a scene and staging when the wall has a control layer (`Feed`,
 composed renders and the pace to show them at — is refused as an unsupported
 version like any other, so a stale one keeps the wall on what it shows (§ The
 cutover). A major 2 document is refused for the
-rules a Player acts on — its shape where this reader reads it, the instants,
-and the five rules a schema cannot state — and **never for a presentation
+rules a Player acts on — its shape where this reader reads it (a work
+staged twice included), the instants, and the five rules a schema cannot state — and **never for a presentation
 setting**: a Player applies the settings its display can honour and ignores the
 rest (§ Presentation settings), so a mat mode this Player does not know costs a
 mat, never the wall.
@@ -226,6 +226,11 @@ def _feed(document: dict[str, Any]) -> Feed:  # noqa: C901 -- one refusal per ru
     staging_raw = document.get("staging", [])
     if not isinstance(staging_raw, list) or not all(isinstance(item, str) and item for item in staging_raw):
         raise ManifestUnreadable("the feed's staging is not a list of work ids")
+    if len(set(staging_raw)) != len(staging_raw):
+        # The contract's index marks a repeated staging entry `player_must_refuse`:
+        # the list is a set of works, so a feed that stages one twice is malformed
+        # and the wall keeps the feed it has.
+        raise ManifestUnreadable("the feed's staging lists a work more than once")
 
     playlist = document.get("playlist") if isinstance(document.get("playlist"), dict) else {}
     settings = document.get("settings")
