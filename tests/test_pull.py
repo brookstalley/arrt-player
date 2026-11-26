@@ -33,6 +33,7 @@ from server_double import CONTRACT, ROUTES, TOKEN
 from server_double import ServerDouble as Stub
 
 from arrt_player import pull as pull_module
+from arrt_player.client import ReportAnswer
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import screen_wall
 from arrt_player.manifest import REQUESTED_MAJORS, Feed, Watcher, media_name
@@ -1834,6 +1835,33 @@ async def test_a_report_the_server_refuses_is_held_until_it_changes(held_link, s
     clock.now += 1
     await link.report(_client_heartbeat(settings_url="http://192.0.2.10:8771/"))
     assert _client_heartbeat_posts(stub) == 2, "a changed report was held with the one refused before it"
+
+
+async def test_a_report_refused_as_unreadable_stays_the_servers_word_on_this_player_until_one_is_taken(held_link, stub):
+    """The server says "Report unreadable" of a Player from a refusal until it takes one of its reports: no answer,
+    a 5xx, a 408, a 429 or a 413 between leaves that so; a refused token is said while it lasts; a report taken ends it."""
+    link, _clock = held_link
+    tokens = dict(stub.tokens)
+    sent = iter(range(10, 99))
+
+    async def answered(status: int | None) -> ReportAnswer | None:
+        stub.client_heartbeat_status = status
+        # Each report says something new, so none is held back unsent.
+        await link.report(_client_heartbeat(settings_url=f"http://192.0.2.{next(sent)}:8771/"))
+        return link.last_answer
+
+    assert await answered(400) is ReportAnswer.UNREADABLE
+    for status in (503, 408, 429, 413):
+        assert await answered(status) is ReportAnswer.UNREADABLE, f"a {status} ended the server's word on the report"
+    stub.tokens = {}
+    assert await answered(None) is ReportAnswer.TOKEN_REFUSED
+    stub.tokens = tokens
+    assert await answered(503) is ReportAnswer.UNREADABLE, "a refused token ended the server's word on the report"
+    assert await answered(None) is ReportAnswer.ACCEPTED
+    assert await answered(503) is ReportAnswer.NOT_TAKEN, "a report taken did not end it"
+    assert await answered(400) is ReportAnswer.UNREADABLE
+    await stub.server.close()
+    assert await answered(None) is ReportAnswer.UNREADABLE, "a send nobody answered ended the server's word on the report"
 
 
 async def test_a_held_report_is_sent_again_once_per_lapse_with_nothing_changed(held_link, stub):

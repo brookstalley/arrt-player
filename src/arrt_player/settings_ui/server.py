@@ -1438,7 +1438,7 @@ NOTHING_TAKEN_WORDS: Final[str] = "No report taken since the Player started"
 
 
 def player_state(heard: HeardReport) -> str | None:
-    """This Player's state as the server would judge it from what it last answered, or None where it cannot be said.
+    """This Player's state as the server would judge it from what it has answered, or None where it cannot be said.
 
     The server's rule (`player_states`' meanings) on what the Player knows of
     itself: a report refused as unreadable is `report_unreadable`; a report

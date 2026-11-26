@@ -857,13 +857,24 @@ class ClientPull:
         self._held: tuple[dict[str, Any], float] | None = None
         #: The server's last answer to a client heartbeat, None before one.
         self._last_answer: ReportAnswer | None = None
+        #: Whether the server refused a report as unreadable after the last one it
+        #: took: it says so of this Player until it takes one, whatever it
+        #: answers between (no answer, a `5xx`, a `408`, a `429`, a `413`).
+        self._unreadable_since_taken = False
         #: This end's address on the last connection to the server, or None
         #: before the first one.
         self._local_address: str | None = None
 
     @property
     def last_answer(self) -> ReportAnswer | None:
-        """The server's last answer to `report`, or None before one; a report held back unsent changes nothing."""
+        """What the server's answers to `report` say of this Player now, or None before one.
+
+        The last answer, except that a report refused as unreadable stays the
+        server's word until a report is taken, as the server keeps saying it; a
+        refused token is said while it lasts. A report held back unsent changes nothing.
+        """
+        if self._unreadable_since_taken and self._last_answer is not ReportAnswer.TOKEN_REFUSED:
+            return ReportAnswer.UNREADABLE
         return self._last_answer
 
     @property
@@ -1006,6 +1017,10 @@ class ClientPull:
             self._last_answer = ReportAnswer.NOT_TAKEN
             return False
         self._last_answer = _answer_to_a_report(status, refused=refused)
+        if self._last_answer is ReportAnswer.UNREADABLE:
+            self._unreadable_since_taken = True
+        elif self._last_answer is ReportAnswer.ACCEPTED:
+            self._unreadable_since_taken = False
         if status == HTTPStatus.NO_CONTENT:
             self._held = None
             if self._heartbeat_failing.end():

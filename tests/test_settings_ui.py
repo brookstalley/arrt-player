@@ -42,7 +42,7 @@ from arrt_player import heartbeat as heartbeat_module
 from arrt_player.client import STALE_AFTER_SECONDS, HeardReport, OutputReport, ReportAnswer, Supervisor, player_name
 from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequired, UiSettings, load
 from arrt_player.programmes.slideshow_status import SlideshowStatus
-from arrt_player.pull import ClientPull
+from arrt_player.pull import CLIENT_HEARTBEAT_ROUTE, REFUSED_REPORT_RESEND_SECONDS, ClientPull
 from arrt_player.settings_ui import auth, store
 from arrt_player.settings_ui import server as server_module
 from arrt_player.settings_ui.server import SECURITY_HEADERS, PageState, build, own_names, screen_name
@@ -2401,6 +2401,38 @@ class TestThePlayersStateInTheServersWords:
 
         assert facts(document).startswith("\u25b2 Report unreadable · ")
         assert state_kind(document) == "warn"
+
+    @pytest.mark.parametrize("between", [503, 408, 429, 413])
+    async def test_report_unreadable_is_said_until_a_report_is_taken_as_the_server_says_it(
+        self, signed_in, reporting, double, elapsed, between
+    ):
+        """The server says it from a refusal until it takes a report, whatever answers come between."""
+        await reporting.cycle()
+        double.client_heartbeat_status = 400
+        elapsed.seconds += heartbeat_module.INTERVAL_SECONDS
+        await reporting.cycle()
+        double.client_heartbeat_status = between
+        elapsed.seconds += REFUSED_REPORT_RESEND_SECONDS
+        await reporting.cycle()
+
+        assert double.requests.count(("POST", CLIENT_HEARTBEAT_ROUTE)) == 3, "the report was not sent again after the 400"
+        assert facts(await (await signed_in.get("/")).text()).startswith("\u25b2 Report unreadable · ")
+
+        double.client_heartbeat_status = None
+        elapsed.seconds += REFUSED_REPORT_RESEND_SECONDS
+        await reporting.cycle()
+
+        assert double.client_heartbeats, "the double took no report, so nothing ended the refusal"
+        assert facts(await (await signed_in.get("/")).text()).startswith("\u25cf Reporting · ")
+
+    @pytest.mark.parametrize(("past", "said"), [(0, "\u25cf Reporting · "), (1, "\u25b2 Not heard from since ")])
+    async def test_the_page_turns_at_the_contracts_own_threshold(self, signed_in, reporting, elapsed, past, said):
+        """At the contract's figure, not the module's: a constant drifted from it misstates the Player here too."""
+        agreed = timing()
+        await reporting.cycle()
+        elapsed.seconds += agreed["heartbeat_interval_seconds"] * agreed["stale_after_intervals"] + past
+
+        assert facts(await (await signed_in.get("/")).text()).startswith(said)
 
     async def test_a_report_taken_longer_ago_than_the_threshold_reads_not_heard_from_since_its_date(
         self, signed_in, reporting, double, elapsed

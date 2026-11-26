@@ -838,8 +838,9 @@ class ReportAnswer(StrEnum):
     told apart: the server took the report, it refused it as one it cannot read,
     or it refused the token it came with. Everything else (no answer, a `5xx`, a
     `408` or `429`, an answer that is not the server's, a refusal for its size)
-    leaves the server judging the Player by the last report it took, so it is one
-    answer here.
+    leaves the server's view of the Player as it was, so it is one answer here:
+    judged by the last report it took, or still unreadable after a refusal, which
+    the server says until it takes a report (`ClientPull.last_answer`).
     """
 
     #: `204`: the server holds this report.
@@ -866,7 +867,8 @@ STALE_AFTER_SECONDS: Final[float] = heartbeat_module.INTERVAL_SECONDS * STALE_AF
 class HeardReport:
     """What this Player knows of how the server last heard it: its last answer, and the last report taken."""
 
-    #: The server's last answer to a client heartbeat, or None before any was answered.
+    #: What the server's answers to the client heartbeat say of this Player now
+    #: (`ClientPull.last_answer`), or None before any was answered.
     answer: ReportAnswer | None
     #: The instant the last report the server took was made (its `reported_at`),
     #: or None while none has been taken since this process started.
@@ -890,7 +892,7 @@ class ClientLink(Protocol):
 
     @property
     def last_answer(self) -> ReportAnswer | None:
-        """The server's last answer to `report`, or None before one; a report held back unsent changes nothing."""
+        """What the server's answers to `report` say of this Player now (`ClientPull.last_answer`), or None before one."""
 
     async def close(self) -> None: ...
 
