@@ -38,7 +38,7 @@ governed_by:
       - "Delegation / Delegate verification → unset; the methodology default holds: a delegate runs only the narrowest tests covering its own change."
 partition: "Four phases, then two serial chunks. Phase 1: 01 and 02 in parallel (disjoint files). Phase 2, once phase 1 is merged: 03 (after 01) and 04 (after 02) in parallel. Phase 3, once phase 2 is merged: 05 (after 03) and 06 (after 03 and 04) in parallel, on the disjoint lists each names. Phase 4 waits for `contract-v1.3.0` and for phase 3: 07, then 08 serial after it. If the tag is not cut when phase 3 is integrated, 07 and 08 move to the next plan (`dropped:` with the reason) and the plan proceeds. 09 (integration) and 10 (records, cumulative-final) are serial and last. Six delegates in phases 1–3, two in phase 4, each in its own worktree; the coordinator, or an integrator it names, merges each phase and runs the whole suite"
 dropped: []
-last_validated: 2026-11-20
+last_validated: 2026-11-25
 ---
 
 # Build plan: the Player's share of the 2026-11-19 audit, wave 3
@@ -104,15 +104,15 @@ never the whole suite. The integrated branch's suite runs and every Critic revie
 coordinator's. No chunk number in a shipped comment or docstring (Chunk 06 adds the check).
 
 **Decisions** (each vetoable, each stated where its chunk needs it):
-- [DECISION: on the first run of the new Player, the pictures it takes as its own are exactly those its store recorded: every binding with a content id, current or set aside, under the set it was made on. Everything else the set lists is left there, an older Player's unrecorded copies included, and the journal says once per set how many listed pictures it leaves alone and why | the ruling. The one way to remove an older Player's unrecorded copies is a last sweep by the old rule, which is the removal the ruling ends, and it would take the household's pictures added since the last sweep with them. **The cost, stated:** the old sweep ran at every feed adoption, so what it leaves behind is what an older Player put up and never recorded since its last sweep: a copy whose upload was misreported and whose read-back failed, a copy uploaded while the store could not write (O-7), the theme a set that would not say which it was received per outage (wave 2's recorded limit), and every picture under a store the operator deleted (runbook step 6a). **What a household sees:** some Arrt pictures in the set's own uploaded-pictures list that nothing removes, which they can delete there; the operator can remove them with `tools/tv_delete.py`. The owner is told before the deploy (§ Governance checkpoints) | user can veto/override]
-- [DECISION: the replacement for the orphan sweep's cleanup after a failed upload is an upload record written before the upload is sent: the set it is sent to (or "not yet known", while the set will not say), and the marker the Player stamps on it (`image_date`, already sent, `src/arrt_player/tv/samsung.py` `SamsungTv._send_upload`). A picture the set lists is the Player's when its id is one the Player recorded on that set and, where a marker was recorded, its `image_date` is that marker; an upload whose id was never learned is resolved by the first listing after it, by marker | the set echoes the marker in its listing (measured once, `platform-and-dependency-findings.md`, the upload whose library returned None "carried the exact `image_date` this request sent"); an id alone means nothing across sets (wave 2), and an id with its marker names one upload. A household picture stamped in the same second as an upload of the Player's on the same set is the residue | user can veto/override]
+- [DECISION: on the first run of the new Player, the pictures it takes as its own are exactly those its store recorded: every binding with a content id, current or set aside, under the set it was made on. Everything else the set lists is left there, an older Player's unrecorded copies included, and the journal says once per set how many listed pictures it leaves alone and why | the ruling. The one way to remove an older Player's unrecorded copies is a last sweep by the old rule, which is the removal the ruling ends, and it would take the household's pictures added since the last sweep with them. **The cost, stated:** the old sweep ran at every feed adoption, so what it leaves behind is what an older Player put up and never recorded since its last sweep: a copy whose upload was misreported and whose read-back failed, a copy uploaded while the store could not write (O-7), the theme a set that would not say which it was received per outage (wave 2's recorded limit), and every picture under a store the operator deleted (runbook step 6a). **What a household sees:** some Arrt pictures in the set's own uploaded-pictures list that nothing removes, which they can delete there; no tool of this repository removes a picture it did not upload (`tools/tv_delete.py` is the confirmed-deletion helper `tools/tv_api_check.py` imports, not a command). The owner is told before the deploy (§ Governance checkpoints) | user can veto/override] **Accepted by the owner, 2026-11-25** ("yes to all recommendations"; `.prawduct/owner-rulings.md`).
+- [DECISION: the replacement for the orphan sweep's cleanup after a failed upload is an upload record written before the upload is sent: the set it is sent to (or "not yet known", while the set will not say), and the marker the Player stamps on it (`image_date`, already sent, `src/arrt_player/tv/samsung.py` `SamsungTv._send_upload`). A picture the set lists is the Player's when its id is one the Player recorded on that set and, where a marker was recorded, its `image_date` is that marker; an upload whose id was never learned is resolved by the first listing after it, by marker | the set echoes the marker in its listing (measured once, `platform-and-dependency-findings.md`, the upload whose library returned None "carried the exact `image_date` this request sent"); an id alone means nothing across sets (wave 2), and an id with its marker names one upload. A household picture stamped in the same second as an upload of the Player's on the same set is the residue | user can veto/override] **As built, a set that does not echo the marker** (an `image_date` absent or rewritten in the listing) **matches none of the Player's records, and nothing it uploads there is ever removed**: the code does not fall back to content ids (a record with a marker and a listing with no date is kept and names nothing; one with another date is dropped), so the failure is in the safe direction (nothing is removed) and silent.
 - [DECISION: an upload whose record cannot be written is not sent | review O-7: today a store that cannot write sends one copy per pass that nothing records, which under the ruling nothing would ever remove. The wall shows the works it has already put on the set, and `store.failed` already says why the theme stops filling | user can veto/override]
-- [DECISION: uploads made while the set will not say which it is are recorded on disk with no set, and removed once a set says and its listing shows each one's id with its marker | wave 2's leaving-the-store-in-memory reconciliation (R-2/R-3) relied on those copies being unaccounted for; under the ruling they must be recorded to be removable at all, and recording them in the device's store is what lets an outage keep them. Wave 2's recorded limit (a set that never says gains one theme of copies per outage) becomes: removed once the set ever says | user can veto/override]
+- [DECISION: uploads made while the set will not say which it is are recorded on the device's store with no set, and each is found only on a set it may be on, listed at the address it went to: the set the store last recorded when it was sent, and the set that says which it is on the connection it went on. Found there, by its id with its marker (an upload whose id was never learned, by its marker alone, when exactly one listed picture carries it), it becomes that set's; listed without it, that set is struck off it; it leaves once no set is left. It is never found on any other set | wave 2's leaving-the-store-in-memory reconciliation (R-2/R-3) relied on those copies being unaccounted for; under the ruling they must be recorded to be removable at all, and recording them in the device's store is what lets an outage keep them. **As first built**, a record of no set was found on whichever set said next, which let a household picture stamped with the upload's second, on any set the address came to reach, be taken for the Player's (§ Decisions made mid-build). **The cost:** copies stay for good when the set turns out to be a third set, when the store knew no set and the spell was lost, when a restart lands on another set, and when the set does not echo the marker; a record of one set stays as a row after the Frame's address changes; and wave 2's recorded limit (a set that never says gains one theme of copies per outage) stands until a set they may be on says | user can veto/override]
 - [DECISION: the wall's running time with a feed, and when each work left the feed, are counted and saved on the device's store whichever store the wall's bindings come from | R-4 item 2: today `adopted` records a leaving at the store in memory's count, which starts at 0, and `_save_feed_time` writes it to the device's store and clears leavings that were the device store's. The running time is the wall's, not the set's, and a retirement reads it only from a store that records the set | user can veto/override]
 - [DECISION: the client heartbeat's Frame identity is read again once per heartbeat interval (one REST GET a minute, which opens no art channel and presses no key), the last value is kept through a failed read, and a changed value is sent at once and said once | the read-once defect wave 2's integration found (`client.py` `FrameIdentity.refresh`). Taking the identity from the Frame wall's worker instead saves that read only while a wall runs and couples the worker to the heartbeat; a Frame with no wall still needs the client's own read | user can veto/override]
 - [DECISION: carried from wave 2, unchanged: the settings page's address is reported in `settings_url` (the first name in `UI_ALLOWED_HOSTS` if one is listed, else the local address of the pull's own connection, with `UI_PORT`), absent when `UI_BIND` is loopback; no pairing code is built | `build-plan-audit-wave-2.md` Goals; `contract-v1.2.0` carries the field | user can veto/override]
 - [DECISION: the shared writer keeps every writer's present behaviour, its temp-file names included, and adds no directory `fsync` | R-5 asks for one helper so a durability change reaches every writer at once; making that change in the same chunk would turn a consolidation into a change of behaviour on the SD card. Whether ext4 on the Pi needs it is the operator's item 8 (wave 2's checklist) | user can veto/override]
-- [DECISION: of the 28 manifest fixtures 1.3.0 marks `player_must_refuse`, the Player asks the server, before the tag, to mark three `false`: `generated-at-malformed`, `generated-at-not-text` and `work-media-content-type-unknown`, and enforces `staging-repeated` itself | measured at `aeeec7e`: the reader adopts those four and refuses the other 24. The Player does not read `generated_at` or `content_type` (it decodes the bytes and checks their hash), and refusing a feed over a field it never acts on freezes a wall's programming on a writer's slip; an enum a later minor may widen must be tolerated by a reader, or that minor is not additive for it. A repeated staging id is a fault in a field the reader reads. If the tag keeps the split, Chunk 07 enforces all four, which costs only a feed the server's own schema check already refuses | user can veto/override]
+- [DECISION: of the 28 manifest fixtures 1.3.0 marks `player_must_refuse`, the Player asks the server, before the tag, to mark three `false`: `generated-at-malformed`, `generated-at-not-text` and `work-media-content-type-unknown`, and enforces `staging-repeated` itself | measured at `aeeec7e`: the reader adopts those four and refuses the other 24. The Player does not read `generated_at` or `content_type` (it decodes the bytes and checks their hash), and refusing a feed over a field it never acts on freezes a wall's programming on a writer's slip; an enum a later minor may widen must be tolerated by a reader, or that minor is not additive for it. A repeated staging id is a fault in a field the reader reads. If the tag keeps the split, Chunk 07 enforces all four, which costs only a feed the server's own schema check already refuses | user can veto/override] **Outcome, 2026-11-25:** the tag marks the three rows `false` and keeps `staging-repeated` must-refuse, which the owner ratified the same day with the cap of 32 outputs (25 must-refuse manifest rows, not 28); Chunk 07 enforces it.
 - [DECISION: carried from wave 2's Chunk 07, never entered as a decision there: a server outage still counts towards a departed wall's 7 days while the last read client document is held | it removes only walls that document does not place here; counting only while the server confirms would need `ClientPull.fetch` to tell a 304 from a failure. Recorded here so the boundary review can find it | user can veto/override]
 
 **Ruled out for now:** root-owned code and `ProtectSystem=strict` (the owner, "not now",
@@ -135,13 +135,14 @@ describes what the file label draws for.
 - `settings_url` names the address the pull reached the server from, which on a Pi with
   two interfaces may not be the one a person's phone reaches; `UI_ALLOWED_HOSTS` overrides it.
 
-**Decisions made mid-build:** (appended by the coordinator from the chunk reports)
+**Decisions made mid-build:** § Decisions made mid-build, below, which holds each one a
+chunk's report or an integration pass added to the ten above, with its cost.
 
 **Level:** Medium. Every chunk in phases 1–3 has a red test buildable against the doubles
 today. What stays unmeasured is the set's answer (§ Operator's checklist: whether every
 firmware echoes the marker; what the set's own phone uploads stamp), and 1.3.0's contents
-until the tag (Chunks 07, 08). What would raise it: the operator's items 14 and 15, and the
-server's answer to § Requests.
+until the tag (Chunks 07, 08). What would raise it: the operator's items 14 and 15 (the server's answer to § Requests
+has come, below).
 
 ## Commit subjects, and how a chunk is attributed
 
@@ -211,10 +212,13 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   `generated-at-not-text.json` and `work-media-content-type-unknown.json` (decision above;
   Arrt's `player-contract.md` § What a Player does at 1.3.0 asks the Player's coordinator to
   confirm the split). The other 25 the Player enforces, 24 of them already.
+  **Answered:** the tag marks all three `false` and keeps `staging-repeated`.
 - **Q2. A word for a refused token on a Player's own page**, if the server wants one: the
   five `player_states` are the server's judgement, and a Player whose token the server
   refuses (`401`) is a state the Player sees and the server cannot attribute to a Player.
   Chunk 08 keeps its own sentence for it if the tag carries none.
+  **Answered:** the tag carries none; the page says "The server does not accept this
+  Player's token" itself.
 - **Q3. The real-Player pin:** Arrt's `arrt/tests/system/player-ref.txt` moves to this
   branch's merged head once it merges, and `player_e2e` runs once on the pool against it
   (the coordinator's, in Arrt).
@@ -253,23 +257,111 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   cycle. What the old rule was giving: one request per unchanged refused report, at the
   price of a Player that one transient answer could silence for days. The tests that
   assert the departure are in `tests/test_pull.py` (the cases without the error body, the
-  408 and 429 cases with it, and the lapse). One case nothing holds: a refusal the server
-  sends under a framework's own body, as the wall heartbeat's `not_an_object` row already
-  is, would be resent every cycle on the client's route and no test would say so; Chunk
-  07 settles it with the rewording. The server's unreleased 1.3.0 is being reworded to say the same, with the
-  300 seconds stated in the package; Chunk 07 quotes it from there and replays the
-  reworded class sentence on both POST routes, and makes the wall heartbeat's older hold
-  (any status under 500, bounded by one interval because its report changes each minute)
-  agree with it.
+  408 and 429 cases with it, and the lapse). One case nothing held: a refusal the server
+  sent under a framework's own body, as the wall heartbeat's `not_an_object` row was,
+  would have been resent every cycle on the client's route and no test would say so. **As
+  tagged, 1.3.0 settles that case and no more:** the `not_an_object` row answers in the
+  error shape (`framework` bodies are answered by no row), and the two client-heartbeat
+  400 rows now say a report is the same when everything but `reported_at` is. It states no
+  lapse and leaves the class sentence as it was, so **all three departures stand** and
+  the 300 seconds is the Player's own. The wall heartbeat's older hold (any status under
+  500, bounded by one interval because its report changes each minute) still differs
+  from the client heartbeat's; it is left for the next plan.
 - **2026-11-20 (Chunk 03), a cost for the operator's checklist:** the Frame's identity is
   read once a minute where it was read once: one GET to the set's REST port each minute.
-  Measured before (2026-10-08): that GET is answered from standby in 0.015 s with no key.
+  Measured before (2026-10-08): that GET is answered from standby in 0.14 s on the art
+  client's port, which the read uses (0.015 s on port 8001), with no key.
   Not measured: whether a GET each minute keeps a sleeping set's network awake or shows
   anything on screen. The read costs 60 GETs an hour for each Frame, waits at most 2 seconds
   for a set that is asleep, and writes two journal lines for an episode (one when the read starts failing, one
   when it answers again), not one a minute.
+- **2026-11-20 (Chunk 04), [DECISION] an upload made while the set will not say which it
+  is, as first built:** recorded on the device's store with no set and its marker, and
+  matched on any set whose listing showed its id with that marker (or, its id never
+  learned, exactly one picture carrying the marker), never assigned to whichever set
+  said next. Four cases: the same set, the copies come off, the one on the wall last; a
+  different set, its pictures stay and the records wait; a restart mid-spell, the copies
+  come off once the set says (the new process may remove the copy on screen before
+  selecting another); an outage, off when the set next says. Cost: a record whose set is
+  never met again stays as one row, and each process asks each set about such rows once.
+  Given up: an older Player's unrecorded copies, earlier-generation images, an orphaned id
+  the set lists again after its record has gone. Store schema 5 (`tv_upload`); three store
+  writes per upload where there was one. | vetoable
+- **2026-11-25 (Chunk 04, follow-up), [DECISION] a record of no set is found on two sets
+  only:** integration found that a record of no set matched by marker alone reached a
+  household picture on any set the Player met. A record is now found only on the set the
+  store last recorded when it was sent, listed at the address it went to, and on the set
+  that says which it is on the connection it went on; struck off a set it is listed
+  without, and gone once no set is left. The cost: some copies stay for good (a third set;
+  a store that knew no set when the spell was lost; a restart onto another set; a set
+  that does not echo the marker), and a record kept as a row after the Frame's address
+  changes. The residue: a household picture stamped with the second of an upload, on one
+  of those two sets. **`tv_upload` gained four columns in place, with no migration,
+  because no release has written schema 5:** a store written by the earlier head of this
+  branch opens, and its Frame wall then fails every pass on `no such column: address`,
+  backing off to five minutes, with the set and the other walls untouched; the cure is to
+  delete that store. No deploy ever ran that head. | vetoable
+- **2026-11-25 (Chunk 05, follow-up), [DECISION] a screen that refused a picture is asked
+  again by its display:** a file output whose write failed drew nothing more, and, once
+  made to draw again, drew a work the schedule had abandoned. `FileScreenOutput` now owes
+  its last write until both the picture and its record have landed (the picture first, so
+  a record never names a picture that is not there, and a mismatch heals at the next
+  refresh), and `ScreenDisplay` asks for a refused picture again on each following pass,
+  so a draw an output completes on its own is seen and said (`screen.draw_recovered`,
+  `rotation.selected`). The schedule's own retry is 60 seconds (`RETRY_SECONDS`), so the
+  disagreement measured was at most that. The cost: one extra redraw at the schedule's
+  retry, and `rotation.selected` said twice about a minute apart after a heal. | vetoable
+- **2026-11-25 (Chunk 07):** the pin is `contract-v1.3.0`; the reader refuses a feed that
+  stages a work twice (the wall keeps its last good feed, and the pull refuses before it
+  caches); every invalid fixture at the tag has its reason; the client heartbeat is judged
+  by the schema and the contract's semantic rules together, and what the Player writes is
+  held to both over every configuration. Not done: the class sentence and the 300
+  seconds, which the tag does not state (the departure entry above).
+- **2026-11-25 (Chunk 08), accepted at merge:** one line of `pull.py` outside the chunk's
+  list (`ClientPull.last_answer`, which the page reads), and "Screen off" for a connector
+  with nothing on it, as the vocabulary says, where the plan wrote "No screen".
+- **2026-11-25 (Chunk 09, integration):** the page says "Report unreadable" until a
+  report is taken, as the server does (whatever answers come between), where it cleared at
+  the next answer that was not a `400`, and its turn to "Not heard from" is held by a test
+  at the contract's own figure (`timing()`), not the module's; and three tests the
+  interactions needed: a feed staging one work twice refused by the pull before it is cached, said once;
+  a client document the card will not force leaves the last one whole and nothing staged;
+  the transport table's client-heartbeat rows replayed over a report with the settings
+  address and the Frame's identity.
+- **2026-11-25, the owner's rulings** ("yes to all recommendations", `.prawduct/owner-rulings.md`):
+  the costs of removing only what was recorded are accepted before any deploy; a rollback
+  across schema 5 needs the owner's say-so each time; `staging-repeated` stays
+  must-refuse, and the cap of 32 outputs is ratified. **The rollback, as integration
+  measured it:** v0.8.0 (schema 2) refuses the newer store, journals `daemon.state_too_new`,
+  parks only the Frame wall and touches nothing on the set; only after the runbook's step
+  19b (version set to 2) or deleting the store does its sweep remove every uploaded picture
+  its records do not name, the household's, older leftovers, even the one on screen. So the
+  ruling's "brings back that release's sweep" holds from that step on, not from the
+  rollback.
+
+## Left for the next plan
+
+- **The server cannot learn that a Player refused its feed**: the wall keeps its last good
+  feed and never moves to the new theme, with nothing on Status. A wall-heartbeat field, a
+  change to the contract. Tell the owner.
+- The wall heartbeat's hold (any status under 500) differs from the client heartbeat's.
+- After a Player restarts, the page can say "Waiting for its first report" for up to one
+  cycle while the server says "Reporting".
+- A re-rendered work on the wall keeps its old image until its slot comes round.
+- `tv.close_failed` names no output; `client.identity_changed` names both full device ids,
+  where every other line names a set by a short hash (`displays/frame.py:_known_as`).
+- `hdmi_outputs` is not clamped to the contract's 32, which a Pi cannot reach.
+- Arrt's real-Player test reads the file output's record and then its picture, and the
+  picture is renamed before the record on every draw, so a redraw between the two reads
+  can make it flake (server side).
+- No tool in this repository prints a listing's `image_date`, which the operator's items
+  14 and 15 need, and none removes a picture the Player did not upload.
 
 ## Build Chunks
+
+**The chunk texts are the specs as dispatched**, with their "Found at HEAD" read at
+`aeeec7e`; what was built differently is in § Decisions made mid-build and in the dated
+outcomes in Goals, and the records follow the code.
 
 ### Chunk 01: The pin moves to `contract-v1.2.0`, and the double answers from the contract's table
 
@@ -679,7 +771,7 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
 - **Acceptance:** with a token whose report the double accepted, the page reads
   "Reporting"; with the double refusing the report as unreadable, "Report unreadable";
   before pairing, "No token yet", shown as a step, not a fault; a screen with nothing on
-  its connector reads "No screen". Each red at `aeeec7e`.
+  its connector reads "Screen off" (the vocabulary's word for a dark screen; "No screen" is a connector this machine does not list). Each red at `aeeec7e`.
 - **Visual change:** yes (§ Operator's checklist, item 17).
 - **Verification ceiling:** `tests/test_settings_ui.py tests/test_settings_ui_style.py tests/test_client.py tests/test_main.py tests/test_player_contract.py`, plus ruff and black.
 - **Model:** Opus-class, medium effort. Which state the Player can honestly claim of itself
@@ -746,13 +838,18 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
 has been run, because no revision has been deployed since. They are not copied here. New:
 
 14. **Whether the set echoes the marker in its listing** (Chunk 04 rests on it; measured
-    once, on one upload). With the Player stopped, upload one image with
-    `tools/tv_api_check.py` and read the set's listing: the new entry's `image_date` should
-    be the date the request sent. If it is absent or rewritten, the upload record falls back
-    to content ids alone and an upload whose read-back failed is never cleaned (a follow-up
-    decision).
+    once, on one upload). With the Player stopped, upload one image stamped with a date you
+    choose and read the set's listing: the new entry's `image_date` should be the date the
+    request sent. **No tool here does it**: `tools/tv_api_check.py` uploads with no date and
+    reports only that the id is listed, so this is a read of the library's `available` reply
+    for the uploaded category, by hand. If the date is absent or rewritten, the Player's
+    records never match the set's listing, and **nothing the Player uploads there is ever
+    removed**: the code does not fall back to content ids, so retired works and re-rendered
+    works leave their pictures on the set for good (it fails in the safe direction, and
+    silently; a follow-up decision). Its sign in the journal: `tv.others_left_alone` keeps
+    counting pictures the Player uploaded itself.
 15. **What the set stamps on a picture the household uploads from the phone.** Upload one
-    from the set's phone app and read its `image_date`. If it is a phone's photo date or the
+    from the set's phone app and read its `image_date` (by the same hand-read as item 14). If it is a phone's photo date or the
     set's clock to the second, a collision with the Player's marker is a same-second upload;
     if it is empty or fixed, nothing changes.
 16. **The settings page's sentences for a new Frame address** (Chunk 04), and wave 2's page
@@ -769,12 +866,40 @@ has been run, because no revision has been deployed since. They are not copied h
 17. **The page's state words** (Chunk 08): the status line beside the server's Players page
     for the same Player, in each state the Player can reach. The two should say the same.
 18. **The first run after the upgrade** (the first decision): before the deploy, count the
-    set's uploaded pictures (`tools/tv_api_check.py`); after the Player's first
-    reconciliation, count again and read the journal's count of pictures left alone. Remove
-    any Arrt leftovers by hand if the household wants them gone.
+    pictures in the set's own list of uploaded pictures; after the Player's first
+    reconciliation, count again and read the journal's count of pictures left alone
+    (`tv.others_left_alone`). Remove any Arrt leftovers on the set by hand if the household
+    wants them gone.
 19. **The settings link on the server's Players page** (Chunk 03): it opens this Player's
     page from a phone on the household network. If it names an address the phone cannot
     reach, list the page's name in `UI_ALLOWED_HOSTS`.
+20. **Whether the REST identity read reaches the same set as the open art channel**
+    (Chunk 04's follow-up rests on it: a record of an upload made while the set would not
+    say is found on "the set that says which it is on the connection it went on", and the
+    two connections share only the address; never measured). It needs two sets and a
+    router that can hand their addresses to each other. With the Player running, swap the
+    two addresses while the art channel is open and while it is opening, several times, and
+    read for any pass where the identity the Player took (`binding.set_changed`,
+    `client.identity_changed`) names a different set from the one the art channel then
+    shows the Player's selection on. If the two can disagree, a copy can be found on the
+    wrong set and the rule narrows further (a follow-up decision).
+21. **The KMS screen's refusal path, at a real screen** (Chunk 05's follow-up: a screen that
+    refuses a picture is asked for it again each pass; tested against doubles only, never
+    on a real connector). Make a real HDMI output refuse a draw (what causes it on the Pi is
+    part of the finding; a screen unplugged as a picture is put up is the likeliest) and read
+    the journal: `screen.draw_failed` once, then, when the output takes the picture,
+    `screen.draw_recovered` and `rotation.selected` once each, the wall back to showing
+    art, and no line repeated each pass. If the refused picture is drawn without being
+    reported, or a work the schedule has left is drawn, the retry's decision is revisited.
+22. **Whether a REST GET each minute keeps a sleeping set's network awake, or shows
+    anything on screen** (Chunk 03: the client reads the Frame's identity once a minute).
+    With the Player running and the set asleep for an hour, read whether the set stays
+    reachable when it would otherwise have dropped off the network, and whether anything
+    appears on its screen at the minute. If either, the interval or the read changes.
+23. **A set swapped at the Frame's address is reported as a changed id within about a
+    minute** (Chunk 03), and **a selection that fails, then a reconnect reaching a different
+    set, puts the work up there in the same pass with no `binding.orphaned` line** (Chunk 02).
+    Both need a second set; item 20's sitting serves.
 
 ## Governance checkpoints
 
@@ -791,7 +916,8 @@ has been run, because no revision has been deployed since. They are not copied h
   branch PR-ready.
 - **The heavy run:** the whole suite after each phase and after Chunk 10.
 - **Before any deploy:** the owner is told the first decision's cost (an older Player's
-  unrecorded copies stay on the set) and item 18's check.
+  unrecorded copies stay on the set) and item 18's check. **Done and accepted,
+  2026-11-25**; what the owner also ruled that day is in `.prawduct/owner-rulings.md`.
 - **Owner checks that are not tests:** § Operator's checklist.
 
 ## Dropped as already settled
@@ -816,7 +942,7 @@ Each was carried to this plan by a record; the code or the records at `aeeec7e` 
   in the tool).
 - **Branch protection** (wave 2's end-of-wave step): set on 2026-11-20, `develop` and `main`
   requiring "The suite", "The typesetting" and "Lint and format" (read from GitHub's
-  protection API). Only its record is owed, in Chunk 10.
+  protection API). Recorded in `operational-spec.md` § Continuous integration by Chunk 10.
 - **The 1.2.0 fixtures' reader changes:** none needed; both new must-refuse fixtures are
   already refused (Chunk 01's Found at HEAD). Only the stated reason is owed.
 - **audit-3 M1** (a refused wall heartbeat posted every poll): `Pull._heard` holds a `4xx`

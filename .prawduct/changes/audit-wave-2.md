@@ -15,7 +15,8 @@ the settings page's address told to the server, moved to the next plan).
 which set its bindings were made on; the same set at a new address keeps its
 pictures, and a different set starts afresh with every work uploaded, with the
 uploaded-pictures category cleared of what the Player cannot account for
-(**the household's own uploads included**), while the old set keeps the Player's
+(**the household's own uploads included**; audit wave 3 ended that, and the Player
+now removes only what it recorded uploading), while the old set keeps the Player's
 pictures until the Player is pointed at it again. While a set will not say which
 it is, the wall uses no stored picture for fifteen minutes and then shows art
 without removing anything. A work no feed has named for 14 days of the wall running
@@ -59,7 +60,9 @@ that a stopped Player is restarted. **The way back** across the store's schema:
 the previous revision refuses a schema-4 store and parks that wall, so stop the
 Player and set each Frame wall's `PRAGMA user_version` to what the previous
 revision writes, 2 (not 3, which it still refuses), at the cost of one re-upload
-per work (runbook step 19b); a settings file that holds `TV_ADDRESS` is layout 3
+per work (runbook step 19b; the store is schema 5 since wave 3, and going back
+across it needs the owner's say-so each time, because the previous revision then
+sweeps the set); a settings file that holds `TV_ADDRESS` is layout 3
 and must have it moved back into `.env` (step 19a). A Frame wall's loop lines are
 `frame.*`, not `daemon.*`. An `.env` whose `EPD_DEVICE` names more than one panel
 now stops the start (exit 2): name one. Every step these notes point at that is
