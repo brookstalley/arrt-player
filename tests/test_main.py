@@ -198,6 +198,30 @@ class TestWhetherThisDeviceHasALabelSurface:
         assert len(derived) == 1, "the derived type never reached the journal"
         assert named in derived[0].getMessage()
 
+    def test_the_panel_surface_is_built_for_the_output_the_client_reports_it_on(self, monkeypatch, panel_settings):
+        """A panel that will not power down names its output in `panel.close_failed`, as every label line does.
+
+        The driver and the text stack are stood in for by modules of the same
+        names, so the surface is built on any machine, with or without Pango, and
+        what is under test is the one call that builds it.
+        """
+        import sys
+        import types
+
+        built: list[dict] = []
+        epaper = types.ModuleType("arrt_player.panel.epaper")
+        epaper.open_panel = lambda device: ("panel", device)
+        epaper.EpaperSurface = lambda **kwargs: built.append(kwargs) or "surface"
+        pango = types.ModuleType("arrt_player.panel.pango")
+        pango.PangoRasterizer = lambda: "rasterizer"
+        monkeypatch.setitem(sys.modules, "arrt_player.panel.epaper", epaper)
+        monkeypatch.setitem(sys.modules, "arrt_player.panel.pango", pango)
+
+        surface = entry.label_surface(dataclasses.replace(panel_settings, epd_device="omni_epd.mock"))
+
+        assert surface == "surface"
+        assert [kwargs.get("output") for kwargs in built] == [entry.PANEL_OUTPUT]
+
     def test_the_border_derives_from_the_type_when_the_deployment_states_none(self, panel_settings):
         """**The shipped path**, and the one the old 40 px default occupied.
 
