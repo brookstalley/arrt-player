@@ -39,10 +39,18 @@ it in context variables, which a draw's worker thread inherits as it inherits
 the work id every journal line carries: `FileLabelPanel.draw` binds the drawing,
 and the entry point's label worker binds the mapping (`captioning`) around every
 renderer, on any surface.
+A layout handed over with either unbound is refused, `SurfaceUnavailable`, and
+nothing is written.
 
 **Each file is written whole or not at all** (`write_atomically`), the picture
 before the record, so a record never names a picture that is not there yet.
 Under the unit's `UMask=0077` both are the service account's alone.
+
+**A write that fails is made again by `refresh`**, on every poll until it lands,
+whichever of the two files it stopped at: a new picture beside the old record is
+the one window this order leaves, which a reader tells by `picture_sha256` not
+matching the picture, and which the next `refresh` closes. The record is written
+last, so it never names a picture that is not there.
 
 **Whether a wall has shown a work** is `shown.json` reading that `wall_id`, that
 `work_id` and `outcome` `picture`. A reader waits for it with a deadline: a wall
@@ -52,8 +60,6 @@ shows its first work once its feed is pulled and composed, which is seconds.
 import hashlib
 import io
 import json
-import logging
-import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -72,6 +78,7 @@ from arrt_player.label_renderer import LabelPanel
 from arrt_player.label_rule import Drawing
 from arrt_player.panel import Layout, SurfaceUnavailable, plain
 from arrt_player.panel.file_surface import FILE_LABEL_SIZE, FileLabelSurface
+from arrt_player.safe_write import write_whole
 
 #: The layout's version, in every record. A reader refuses one it does not know.
 FORMAT: Final[int] = 1
@@ -87,20 +94,10 @@ BLANK: Final[str] = "blank"
 def write_atomically(path: Path, data: bytes) -> None:
     """Replace `path` with `data` in one step, flushed to the disk first. Raises `OSError`.
 
-    Temp-and-rename in the same directory, as the pull writes its cache: a reader
-    polling the file never sees half of it, and power lost after the rename
-    cannot leave a file that exists and holds nothing.
+    A reader polling the file never sees half of it, and power lost after the
+    rename cannot leave a file that exists and holds nothing (`safe_write`).
     """
-    temporary = path.with_name(f".{path.name}.tmp")
-    try:
-        with temporary.open("wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-    except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
-        temporary.unlink(missing_ok=True)
-        raise
+    write_whole(path, data, temporary=path.with_name(f".{path.name}.tmp"))
 
 
 def write_record(directory: Path, record: dict[str, Any]) -> None:
@@ -108,20 +105,6 @@ def write_record(directory: Path, record: dict[str, Any]) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     document = {"format": FORMAT, **record}
     write_atomically(directory / RECORD_FILENAME, (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode())
-
-
-def bound_work_id() -> str | None:
-    """The work the caller is acting on, as `logs.work_context` binds it for every journal line.
-
-    **Read through the filter that stamps it**, because that binding is the
-    Player's one account of which work a call is about: the schedule binds it
-    around every `show`, and a worker thread inherits it. `ScreenOutput.show` is
-    handed only a path, and the composed file's name is a key, not a work.
-    """
-    record = logging.makeLogRecord({})
-    logs.WorkCorrelationFilter().filter(record)
-    work_id = getattr(record, "work_id", None)
-    return work_id if isinstance(work_id, str) else None
 
 
 def output_report(settings: FileOutputSettings) -> OutputReport:
@@ -158,9 +141,14 @@ class FileScreenOutput:
         self._size = settings.screen
         self._wall_id = wall_id
         self._now = now
-        #: The render this output should be showing, and the work it is of.
+        #: The render this output should be showing, and the work it is of; None
+        #: for a screen that is meant to be black, or has shown nothing yet.
         self._render: Path | None = None
         self._work_id: str | None = None
+        #: Whether the last `show` or `blank` is not on the disk yet: set when it is
+        #: asked for, cleared when both the picture and its record are written, so a
+        #: write that failed is made again by `refresh` however much of it landed.
+        self._owed = False
 
     @property
     def directory(self) -> Path:
@@ -179,19 +167,29 @@ class FileScreenOutput:
         return self._size
 
     def show(self, render: Path) -> None:
-        self._render, self._work_id = render, bound_work_id()
+        # `ScreenOutput.show` is handed only a path, and the composed file's name is a
+        # key, not a work: the schedule binds the work around every `show`, and a
+        # worker thread inherits it.
+        self._render, self._work_id = render, logs.current_work_id()
+        self._owed = True
         self._draw(render)
 
     def refresh(self) -> None:
-        """Draw the current render again if its picture is gone from the directory. One `stat` when it is not."""
-        if self._render is None or (self._directory / PICTURE_FILENAME).is_file():
-            return
-        self._draw(self._render)
+        """Draw what the output should be showing again if its last write failed or its picture is gone. One `stat` if not."""
+        if self._owed or (self._render is not None and not (self._directory / PICTURE_FILENAME).is_file()):
+            self._redraw()
 
     def blank(self) -> None:
         """Draw the screen black and forget the render: a black picture, and a record saying `blank`."""
         self._render, self._work_id = None, None
-        self._write(Image.new("RGB", self._size), render=None, outcome=BLANK)
+        self._owed = True
+        self._redraw()
+
+    def _redraw(self) -> None:
+        if self._render is None:
+            self._write(Image.new("RGB", self._size), render=None, outcome=BLANK)
+        else:
+            self._draw(self._render)
 
     def _draw(self, render: Path) -> None:
         self._write(fitted(render, self._size), render=render, outcome=PICTURE)
@@ -216,6 +214,7 @@ class FileScreenOutput:
                 "shown_at": self._now().isoformat(),
             },
         )
+        self._owed = False
 
 
 # -- the label ------------------------------------------------------------------------
@@ -279,13 +278,17 @@ class _LabelRecord:
             # record without its decision would be evidence of nothing.
             raise SurfaceUnavailable("a file label was handed a layout with no drawing bound to it")
         assignment = _CAPTIONING.get()
+        if assignment is None:
+            # The entry point's label worker binds the mapping around every
+            # renderer; a record naming no wall would be evidence of nothing.
+            raise SurfaceUnavailable("a file label was handed a layout with no mapping bound to it")
         drawing = drawn.drawing
         write_record(
             self.directory,
             {
                 "output": self._name,
                 "label_id": drawn.label_id,
-                "wall_id": assignment.wall_id if assignment is not None else None,
+                "wall_id": assignment.wall_id,
                 "outcome": drawing.outcome.value,
                 "state": drawing.state,
                 "work_id": drawing.work_id,

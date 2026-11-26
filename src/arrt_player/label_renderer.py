@@ -128,7 +128,7 @@ class LabelPanel:
             log.warning(
                 "the label panel was left open: a draw was still in the driver after the %gs label budget",
                 LABEL_DRAW_BUDGET_SECONDS,
-                extra={"event": "label.close_abandoned"},
+                extra={"event": "label.close_abandoned", "output": self.name},
             )
             return
         try:

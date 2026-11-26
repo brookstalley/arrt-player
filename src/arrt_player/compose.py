@@ -28,6 +28,8 @@ from typing import Final
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from arrt_player.safe_write import write_whole_with
+
 log = logging.getLogger(__name__)
 
 #: The mat modes `settings.mat.mode` may name.
@@ -224,20 +226,17 @@ def compose(
     canvas = _draw(master, geometry=geometry, mode=drawn_mode, rgb=rgb)
 
     directory.mkdir(parents=True, exist_ok=True)
-    staged = destination.with_name(f"{destination.name}.composing")
-    try:
-        canvas.save(staged, format="JPEG", quality=JPEG_QUALITY, optimize=True)
-        # Flushed to the disk before the rename, so power lost after it cannot
-        # leave an empty file under the final name, which `is_file` would take
-        # for a picture for ever (`is_intact` finds one that did anyway).
-        with staged.open("rb") as written:
-            os.fsync(written.fileno())
-        staged.replace(destination)
-    finally:
-        # Gone already when the write succeeded; on any failure, never left for
-        # a later pass to mistake for a picture. A killed process can still
-        # leave one, which the schedule's tidy removes.
-        staged.unlink(missing_ok=True)
+    # Flushed to the disk before the rename, so power lost after it cannot leave
+    # an empty file under the final name, which `is_file` would take for a
+    # picture for ever (`is_intact` finds one that did anyway). On any failure
+    # the staged file is gone, never left for a later pass to mistake for a
+    # picture; a killed process can still leave one, which the schedule's tidy
+    # removes.
+    write_whole_with(
+        destination,
+        lambda staged: canvas.save(staged, format="JPEG", quality=JPEG_QUALITY, optimize=True),
+        temporary=destination.with_name(f"{destination.name}.composing"),
+    )
     log.info(
         "composed %s for %sx%s in mode %s",
         master.name,

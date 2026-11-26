@@ -23,7 +23,9 @@ from pathlib import Path
 
 import aiohttp
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestServer
+from arrt_contract import transport
 from conftest import WALL_ID, tick_until
 from fakes import RecordingOutput
 from PIL import Image
@@ -31,6 +33,7 @@ from server_double import CONTRACT, ROUTES, TOKEN
 from server_double import ServerDouble as Stub
 
 from arrt_player import pull as pull_module
+from arrt_player.client import ReportAnswer
 from arrt_player.displays.frame import frame_wall
 from arrt_player.displays.screen import screen_wall
 from arrt_player.manifest import REQUESTED_MAJORS, Feed, Watcher, media_name
@@ -57,6 +60,8 @@ from arrt_player.pull import (
 HOLD_SECONDS = 10 * 60
 #: The most of a client or label document the Player reads: 1 MiB, likewise.
 DOCUMENT_CAP_BYTES = 1024 * 1024
+#: The most of a feed the Player reads: the contract's bound for the manifest route.
+MANIFEST_CAP_BYTES = transport()["routes"]["manifest_major"]["max_bytes"]
 #: How often a cached label document is stamped as answered while the server
 #: sends nothing new: a minute, likewise.
 LABEL_STAMP_SECONDS = 60
@@ -188,6 +193,24 @@ async def test_a_feed_is_cached_whole_with_every_works_media_verified(pull, stub
     adopted = _watcher(http_settings).poll()
     assert isinstance(adopted, Feed)
     assert sorted(adopted.works) == ["w1", "w7"]
+
+
+async def test_a_feed_that_stages_one_work_twice_is_refused_before_it_is_cached_and_said_once(
+    pull, stub, session, http_settings, caplog
+):
+    """The contract's `staging-repeated`, as the server sends it: the wall keeps the feed it had, and one line says why."""
+    good = stub.publish_feed([("w1", "2026-06-21T08:00:00+00:00", "2026-06-21T13:00:00+00:00")], staging=("w7",))
+    assert await pull.cycle(session) is True
+    stub.publish_feed([("w1", "2026-06-21T08:00:00+00:00", "2026-06-21T13:00:00+00:00")], staging=("w7", "w7"))
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+        for _ in range(2):
+            await pull.cycle(session)
+
+    assert _cached(http_settings) == good, "a feed that stages one work twice replaced the last good one"
+    refused = [record for record in caplog.records if getattr(record, "event", None) == "pull.manifest_refused"]
+    assert len(refused) == 1, "the refusal was said other than once over two polls"
+    assert "staging lists a work more than once" in refused[0].getMessage()
 
 
 async def test_a_feed_whose_one_master_is_bad_is_cached_whole_without_it(pull, stub, session, http_settings):
@@ -751,6 +774,31 @@ async def test_a_client_document_the_cache_cannot_take_is_followed_said_once_and
     assert _events(caplog).count("client.cache_writable") == 1, _events(caplog)
 
 
+async def test_a_client_document_the_card_will_not_force_leaves_the_last_one_whole_and_no_staged_file(
+    client_link, client_settings, stub, monkeypatch
+):
+    """The cache write as it really fails, through the one helper rather than a stand-in: the walls get the new
+    document, the cached one stays whole, no ETag is kept for either, and nothing is left beside them."""
+    link = client_link()
+    first = await link.fetch()
+    assert first is not None
+    assert link.cached() == first
+    stub.assign("hall", "hdmi-a-1")
+
+    def no_disk(_descriptor: int) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(os, "fsync", no_disk)
+    second = await link.fetch()
+    monkeypatch.undo()
+
+    assert second is not None, "the walls were not handed the document the cache refused"
+    assert second != first, "the server's change never reached the walls, so the refused write proves nothing"
+    assert link.cached() == first, "the cached document is not the last one written whole"
+    assert not (client_settings.cache_dir / CLIENT_ETAG_FILENAME).exists(), "an ETag was kept for a document not cached"
+    assert sorted(path.name for path in client_settings.cache_dir.iterdir() if path.name.endswith(".tmp")) == []
+
+
 @pytest.mark.parametrize("code", _UNWRITABLE)
 async def test_a_label_document_the_cache_cannot_take_is_followed_said_once_and_cached_when_it_can_be(
     stub, client_settings, clock, monkeypatch, caplog, code
@@ -1144,6 +1192,41 @@ async def test_a_client_document_larger_than_the_cap_is_refused_and_not_cached(c
     assert await client_link().fetch() is None
 
     assert not client_settings.client_document_path.exists()
+
+
+def _padded_to(document: dict, size: int) -> dict:
+    """`document` with a padding key that makes the double's body exactly `size` bytes."""
+    unpadded = len(json.dumps({**document, "padding": ""}).encode())
+    return {**document, "padding": "x" * (size - unpadded)}
+
+
+async def test_a_feed_past_the_contracts_bound_keeps_the_wall_on_its_feed_said_once_and_asked_for_again(
+    pull, stub, session, http_settings, caplog
+):
+    """A server sending a feed past the route's `max_bytes`: the wall shows what it holds, and is never sent past it."""
+    kept = stub.publish("w1")
+    await pull.cycle(session)
+    etag = (http_settings.wall_dir / ETAG_FILENAME).read_text()
+    stub.manifest = _padded_to(stub.publish("w2"), MANIFEST_CAP_BYTES + 1)
+
+    with caplog.at_level(logging.ERROR, logger="arrt_player.pull"):
+        assert await pull.cycle(session) is True
+        assert await pull.cycle(session) is True
+
+    assert _cached(http_settings) == kept, "a feed past the bound replaced the one the wall shows"
+    assert (http_settings.wall_dir / ETAG_FILENAME).read_text() == etag, "the ETag no longer describes the cached feed"
+    assert stub.majors_requested == [2, 2, 2], "the poll after a feed past the bound did not ask again"
+    (refused,) = [record for record in caplog.records if record.__dict__.get("event") == "pull.manifest_refused"]
+    assert f"runs past {MANIFEST_CAP_BYTES} bytes" in refused.getMessage()
+
+
+async def test_a_feed_of_exactly_the_contracts_bound_is_adopted(pull, stub, session, http_settings):
+    published = _padded_to(stub.publish("w1"), MANIFEST_CAP_BYTES)
+    stub.manifest = published
+
+    assert await pull.cycle(session) is True
+
+    assert _cached(http_settings) == published
 
 
 async def test_a_label_document_larger_than_the_cap_is_refused(stub, client_settings):
@@ -1721,3 +1804,250 @@ async def test_a_feed_pulled_from_the_server_reaches_a_screen_composed(pull, stu
     with Image.open(shown) as picture:
         assert picture.size == (1280, 720)
     assert stub.majors_requested == [2]
+
+
+# -- the client heartbeat the server refuses ------------------------------------------------------
+
+#: How long a refused client heartbeat is held before it is sent again unchanged:
+#: five minutes. Stated here, once, and compared with the module below; when this
+#: Player pins a contract that states it, this is where it is quoted from the package.
+REFUSED_RESEND_SECONDS = 300.0
+
+#: The client heartbeat's rows that refuse the report for what it says: every row
+#: that answers with the table's error body, but the token's (`no_valid_token`),
+#: which a report cannot fix by changing.
+REPORT_REFUSALS = [
+    answer
+    for answer in transport()["routes"]["client_heartbeat"]["answers"]
+    if answer["body"] == "error" and answer["case"] != "no_valid_token"
+]
+
+
+def _client_heartbeat(**changes: object) -> dict:
+    return {
+        "reported_at": "2026-10-02T14:00:05+00:00",
+        "outputs": [{"name": "frame", "kind": "frame", "connected": True, "screen": None}],
+        **changes,
+    }
+
+
+def _client_heartbeat_posts(stub) -> int:
+    return stub.requests.count(("POST", CLIENT_HEARTBEAT_ROUTE))
+
+
+@pytest.fixture
+async def held_link(client_settings, stub):
+    """A `ClientPull` against the double on a clock only the test moves, and the clock."""
+    clock = _Ticking()
+    link = ClientPull(replace(client_settings, server_url=stub.url), monotonic=clock)
+    yield link, clock
+    await link.close()
+
+
+def test_the_hold_lapses_after_the_stated_interval():
+    assert pull_module.REFUSED_REPORT_RESEND_SECONDS == REFUSED_RESEND_SECONDS
+
+
+def test_the_tables_token_refusal_is_no_verdict_on_the_report_and_its_refusals_of_the_report_are():
+    """The rows the table names: the token's is never held, and every refusal of the report is a 4xx that can be."""
+    token = row_of("no_valid_token")
+    assert token["body"] == "error"
+    assert token["status"] in pull_module.NOT_A_VERDICT_ON_THE_REPORT
+    assert REPORT_REFUSALS, "the table names no refusal of the report, so the held cases below prove nothing"
+    for answer in REPORT_REFUSALS:
+        assert 400 <= answer["status"] < 500
+        assert answer["status"] not in pull_module.NOT_A_VERDICT_ON_THE_REPORT, answer["case"]
+
+
+def row_of(case: str) -> dict:
+    (answer,) = [answer for answer in transport()["routes"]["client_heartbeat"]["answers"] if answer["case"] == case]
+    return answer
+
+
+@pytest.mark.parametrize("refusal", REPORT_REFUSALS, ids=[answer["case"] for answer in REPORT_REFUSALS])
+async def test_a_report_the_server_refuses_is_held_until_it_changes(held_link, stub, refusal):
+    """The same report gets the same answer: sent once, and again at once when it says something new."""
+    link, clock = held_link
+    stub.client_heartbeat_status = refusal["status"]
+
+    assert await link.report(_client_heartbeat()) is False
+    clock.now += 60
+    assert await link.report(_client_heartbeat(reported_at="2026-10-02T14:01:05+00:00")) is False
+    assert _client_heartbeat_posts(stub) == 1, "a refused, unchanged report was sent again within the hold"
+
+    clock.now += 1
+    await link.report(_client_heartbeat(settings_url="http://192.0.2.10:8771/"))
+    assert _client_heartbeat_posts(stub) == 2, "a changed report was held with the one refused before it"
+
+
+async def test_a_report_refused_as_unreadable_stays_the_servers_word_on_this_player_until_one_is_taken(held_link, stub):
+    """The server says "Report unreadable" of a Player from a refusal until it takes one of its reports: no answer,
+    a 5xx, a 408, a 429 or a 413 between leaves that so; a refused token is said while it lasts; a report taken ends it."""
+    link, _clock = held_link
+    tokens = dict(stub.tokens)
+    sent = iter(range(10, 99))
+
+    async def answered(status: int | None) -> ReportAnswer | None:
+        stub.client_heartbeat_status = status
+        # Each report says something new, so none is held back unsent.
+        await link.report(_client_heartbeat(settings_url=f"http://192.0.2.{next(sent)}:8771/"))
+        return link.last_answer
+
+    assert await answered(400) is ReportAnswer.UNREADABLE
+    for status in (503, 408, 429, 413):
+        assert await answered(status) is ReportAnswer.UNREADABLE, f"a {status} ended the server's word on the report"
+    stub.tokens = {}
+    assert await answered(None) is ReportAnswer.TOKEN_REFUSED
+    stub.tokens = tokens
+    assert await answered(503) is ReportAnswer.UNREADABLE, "a refused token ended the server's word on the report"
+    assert await answered(None) is ReportAnswer.ACCEPTED
+    assert await answered(503) is ReportAnswer.NOT_TAKEN, "a report taken did not end it"
+    assert await answered(400) is ReportAnswer.UNREADABLE
+    await stub.server.close()
+    assert await answered(None) is ReportAnswer.UNREADABLE, "a send nobody answered ended the server's word on the report"
+
+
+async def test_a_held_report_is_sent_again_once_per_lapse_with_nothing_changed(held_link, stub):
+    """A server that refuses it for ever hears it once in five minutes; one that comes to accept it hears it within five."""
+    link, clock = held_link
+    stub.client_heartbeat_status = 400
+    refused_at = clock.now
+
+    async def at(elapsed: float) -> bool:
+        clock.now = refused_at + elapsed
+        return await link.report(_client_heartbeat())
+
+    await at(0)
+    for elapsed in (30, REFUSED_RESEND_SECONDS - 1):
+        await at(elapsed)
+    assert _client_heartbeat_posts(stub) == 1, "the held report was sent again before its hold lapsed"
+    await at(REFUSED_RESEND_SECONDS)
+    for elapsed in (REFUSED_RESEND_SECONDS + 30, 2 * REFUSED_RESEND_SECONDS - 1):
+        await at(elapsed)
+    assert _client_heartbeat_posts(stub) == 2, "the lapse sent the held report other than once"
+
+    stub.client_heartbeat_status = None
+    assert await at(2 * REFUSED_RESEND_SECONDS) is True, "the server that came to accept it did not hear it"
+    assert len(stub.client_heartbeats) == 1
+    assert await at(2 * REFUSED_RESEND_SECONDS + 30) is True, "an accepted report was held"
+
+
+async def _answering(status: int, body: bytes):
+    """A server that answers every client heartbeat with `status` and `body`: a proxy, a portal, a server starting."""
+    posts: list[bytes] = []
+
+    async def answer(request: web.Request) -> web.Response:
+        posts.append(await request.read())
+        return web.Response(status=status, body=body)
+
+    app = web.Application()
+    app.router.add_post(CLIENT_HEARTBEAT_ROUTE, answer)
+    server = TestServer(app)
+    await server.start_server()
+    return server, posts
+
+
+#: The server's error body, as the transport table's `error_body` shapes it.
+ERROR_BODY = json.dumps({"error": "The server cannot take this report."}).encode()
+#: Held: the server's refusal of the report. Sent again: no verdict on it.
+HELD, SENT_AGAIN = 1, 2
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "posts_expected"),
+    [
+        # The server's error body under a status no row names: its refusal all the same.
+        (422, ERROR_BODY, HELD),
+        (403, ERROR_BODY, HELD),
+        (409, ERROR_BODY, HELD),
+        # The same statuses, and the table's own, without it: something in the way answered.
+        (422, b"", SENT_AGAIN),
+        (403, b"Forbidden", SENT_AGAIN),
+        (400, b'{"detail": [{"msg": "bad request"}]}', SENT_AGAIN),
+        (413, b"<html><head><title>413 Request Entity Too Large</title></head></html>", SENT_AGAIN),
+        (404, b"<html><body>404 Not Found</body></html>", SENT_AGAIN),
+        (405, b"", SENT_AGAIN),
+        # Try again later, whoever says it.
+        (429, ERROR_BODY, SENT_AGAIN),
+        (429, b"", SENT_AGAIN),
+        (408, ERROR_BODY, SENT_AGAIN),
+        (408, b"", SENT_AGAIN),
+        # Not a 4xx, whatever it carries: a captive portal's page, or its error-shaped JSON.
+        (200, b"<html><body>Sign in to this network</body></html>", SENT_AGAIN),
+        (200, ERROR_BODY, SENT_AGAIN),
+    ],
+    ids=[
+        "422-error-body",
+        "403-error-body",
+        "409-error-body",
+        "422-bare",
+        "403-proxy",
+        "400-framework",
+        "413-proxy",
+        "404-proxy",
+        "405-bare",
+        "429-error-body",
+        "429-bare",
+        "408-error-body",
+        "408-bare",
+        "200-portal",
+        "200-error-body",
+    ],
+)
+async def test_a_refusal_is_known_by_the_servers_error_body_whatever_status_it_came_under(
+    client_settings, status, body, posts_expected
+):
+    """Held, a report is not sent again on the next cycle; read as the table's `unanswered` case, it is."""
+    server, posts = await _answering(status, body)
+    clock = _Ticking()
+    link = ClientPull(replace(client_settings, server_url=str(server.make_url("")).rstrip("/")), monotonic=clock)
+    try:
+        assert await link.report(_client_heartbeat()) is False
+        clock.now += 30
+        assert await link.report(_client_heartbeat()) is False
+    finally:
+        await link.close()
+        await server.close()
+
+    assert len(posts) == posts_expected, (
+        f"a {status} {'with' if body == ERROR_BODY else 'without'} the server's error body was "
+        f"{'sent again' if len(posts) == SENT_AGAIN else 'held'}"
+    )
+
+
+async def test_a_report_refused_for_its_token_goes_on_being_sent(held_link, stub):
+    link, clock = held_link
+    stub.tokens = {}
+
+    for _ in range(3):
+        assert await link.report(_client_heartbeat()) is False
+        clock.now += 30
+
+    assert _client_heartbeat_posts(stub) == 3, "a report refused for its token was held"
+
+
+async def test_the_link_knows_the_address_it_reached_the_server_from(held_link, stub):
+    """Read off its own connection, as the connection is handed out: nothing else is opened to learn it."""
+    link, _clock = held_link
+    assert link.local_address is None
+
+    await link.fetch()
+
+    assert link.local_address == "127.0.0.1"
+    assert stub.seen == [("GET", CLIENT_ROUTE)], "learning the address cost a request of its own"
+
+
+def test_a_cache_file_whose_write_fails_leaves_the_last_one_whole_and_no_temporary_file(tmp_path, monkeypatch):
+    """A full card under the pull's writer: the feed cached before is still the feed, and no half-file waits for a tidy."""
+    manifest = tmp_path / "manifest.json"
+    pull_module._write_atomically(manifest, b'{"cached": "before"}')
+
+    def no_disk(_descriptor):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(os, "fsync", no_disk)
+    with pytest.raises(OSError, match="No space"):
+        pull_module._write_atomically(manifest, b'{"cached": "after"}')
+
+    assert manifest.read_bytes() == b'{"cached": "before"}'
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["manifest.json"]

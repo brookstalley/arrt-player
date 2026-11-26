@@ -9,6 +9,7 @@ composition together, as the process runs them. `clients.md` § The Player and
 
 import ast
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -25,7 +26,7 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 from fakes import FakeTv, RecordingOutput, drm_tree
-from server_double import CLIENT_ID, ServerDouble
+from server_double import CLIENT_HEARTBEAT, CLIENT_ID, ServerDouble
 
 from arrt_player import __main__ as entry
 from arrt_player import client as client_module
@@ -38,8 +39,10 @@ from arrt_player.client import (
     LabelOutputReport,
     OutputReport,
     Supervisor,
+    client_heartbeat,
     client_outputs,
     hdmi_outputs,
+    settings_url,
 )
 from arrt_player.compose import Geometry, composed_path, mat_mode
 from arrt_player.config import COMPOSED_DIRNAME, ClientSettings, UiSettings
@@ -114,7 +117,7 @@ def television(monkeypatch, tv: FakeTv) -> FakeTv:
     return tv
 
 
-def supervisor_for(client, drm: Path, *, worker=None, link=None, outputs=None, **overrides) -> Supervisor:
+def supervisor_for(client, drm: Path, *, worker=None, link=None, outputs=None, monotonic=None, **overrides) -> Supervisor:
     clock = Clock.system()
     return Supervisor(
         settings=client,
@@ -122,7 +125,7 @@ def supervisor_for(client, drm: Path, *, worker=None, link=None, outputs=None, *
         worker=worker if worker is not None else partial(entry.run_wall, client),
         outputs=outputs if outputs is not None else partial(client_outputs, client, drm_root=drm),
         now=clock.now,
-        monotonic=clock.monotonic,
+        monotonic=monotonic if monotonic is not None else clock.monotonic,
         **overrides,
     )
 
@@ -746,6 +749,164 @@ async def test_a_screen_plugged_in_is_reported_at_once_and_an_unchanged_one_is_n
     }
 
 
+def _client_heartbeat_posts(server) -> int:
+    return server.requests.count(("POST", "/client/heartbeat"))
+
+
+@pytest.mark.parametrize("status", [400, 413])
+async def test_a_client_heartbeat_the_server_refuses_is_sent_once_and_again_only_when_an_output_changes(
+    client, server, drm, caplog, status
+):
+    """The same report gets the same answer: the server's log takes it once, and a screen plugged in is news."""
+    server.client_heartbeat_status = status
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+        async with Running(supervisor_for(client, drm)):
+            await eventually(lambda: _client_heartbeat_posts(server) == 1, what="the first report")
+            await asyncio.sleep(0.3)
+            assert _client_heartbeat_posts(server) == 1, "a refused, unchanged report was sent again"
+
+            (drm / "card1-HDMI-A-2" / "status").write_text("connected\n")
+            (drm / "card1-HDMI-A-2" / "modes").write_text("3840x2160\n")
+            await eventually(lambda: _client_heartbeat_posts(server) == 2, what="the changed report")
+            await asyncio.sleep(0.3)
+            assert _client_heartbeat_posts(server) == 2, "a refused, changed report was sent again unchanged"
+
+    refused = [record for record in caplog.records if record.__dict__.get("event") == "client.heartbeat_refused"]
+    assert [record.status for record in refused] == [status], "the refusal was not said once"
+
+
+async def test_a_client_heartbeat_whose_token_is_refused_is_sent_again_while_the_token_stays_refused(client, server, drm, caplog):
+    """A 401 is the token, not the report: the client keeps reporting, and says so once."""
+    server.tokens = {}
+    with caplog.at_level(logging.WARNING, logger="arrt_player.pull"):
+        async with Running(supervisor_for(client, drm)):
+            await eventually(lambda: _client_heartbeat_posts(server) >= 3, what="the report to go on being sent")
+
+    refused = [record for record in caplog.records if record.__dict__.get("event") == "client.heartbeat_refused"]
+    assert [record.status for record in refused] == [401]
+
+
+# -- where the settings page is ------------------------------------------------------------------
+
+
+#: `UI_BIND` for a page on every IPv4 interface: a setting's value under test; nothing here binds it.
+EVERY_INTERFACE = "0.0.0.0"  # noqa: S104 -- a value under test, never bound
+
+
+def _page(cache_dir: Path, bind: str, *, allowed: str | None = None) -> UiSettings:
+    environment = {"UI_ALLOWED_HOSTS": allowed} if allowed is not None else {}
+    return UiSettings(cache_dir=cache_dir, bind=bind, port=8771, pinned=frozenset(), environment=environment)
+
+
+@pytest.mark.parametrize(
+    ("bind", "allowed", "local", "expected"),
+    [
+        (EVERY_INTERFACE, None, "192.0.2.10", "http://192.0.2.10:8771/"),
+        (EVERY_INTERFACE, "Wall.LAN., other.example", "192.0.2.10", "http://wall.lan:8771/"),
+        (EVERY_INTERFACE, " , wall.lan", None, "http://wall.lan:8771/"),
+        (EVERY_INTERFACE, "2001:db8::7", "192.0.2.10", "http://[2001:db8::7]:8771/"),
+        ("::", None, "2001:db8::5", "http://[2001:db8::5]:8771/"),
+        ("::", None, "::ffff:192.0.2.10", "http://192.0.2.10:8771/"),
+        ("192.0.2.20", None, "192.0.2.10", "http://192.0.2.20:8771/"),
+        ("127.0.0.1", "wall.lan", "192.0.2.10", None),
+        ("::1", None, "192.0.2.10", None),
+        ("localhost", None, "192.0.2.10", None),
+        (EVERY_INTERFACE, None, None, None),
+        (EVERY_INTERFACE, None, "2001:db8::5", None),
+        ("::", None, "fe80::1%eth0", None),
+        ("::", None, "fe80::1", None),
+        ("wall.lan", None, "192.0.2.10", None),
+    ],
+    ids=[
+        "every-interface",
+        "first-allowed-name",
+        "first-non-empty-name",
+        "allowed-ipv6-literal",
+        "ipv6",
+        "ipv4-mapped",
+        "bound-address",
+        "loopback-beats-a-name",
+        "ipv6-loopback",
+        "localhost",
+        "no-connection-yet",
+        "ipv6-to-an-ipv4-page",
+        "link-local-scoped",
+        "link-local",
+        "bound-to-a-name",
+    ],
+)
+def test_the_settings_address_is_the_operators_name_the_bound_address_or_the_pulls(cache_dir, bind, allowed, local, expected):
+    address = settings_url(_page(cache_dir, bind, allowed=allowed), local)
+
+    assert address == expected
+    if address is not None:
+        heartbeat = client_heartbeat([], reported_at=datetime.now(UTC), settings_url=address)
+        assert [error.message for error in CLIENT_HEARTBEAT.iter_errors(heartbeat)] == []
+
+
+def test_an_unknown_settings_address_leaves_the_key_out():
+    """The schema allows it absent and never null."""
+    assert "settings_url" not in client_heartbeat([], reported_at=datetime.now(UTC), settings_url=None)
+
+
+@pytest.mark.parametrize(
+    ("bind", "allowed", "expected"),
+    [
+        (EVERY_INTERFACE, None, "http://127.0.0.1:8771/"),
+        (EVERY_INTERFACE, "wall.lan", "http://wall.lan:8771/"),
+        ("127.0.0.1", None, None),
+    ],
+    ids=["the-pulls-address", "the-first-allowed-name", "loopback"],
+)
+async def test_the_server_hears_where_the_settings_page_is(client, server, drm, cache_dir, bind, allowed, expected):
+    """Through the real link, against the double, which keeps only a report the schema calls valid."""
+    elapsed = Elapsed()
+    link = ClientPull(client, monotonic=elapsed)
+    page = _page(cache_dir, bind, allowed=allowed)
+    supervisor = supervisor_for(
+        client, drm, link=link, worker=_idle, monotonic=elapsed, settings_url=lambda: settings_url(page, link.local_address)
+    )
+
+    for _ in range(3):
+        await supervisor.cycle()
+        elapsed.now += 10
+    await supervisor.stop_all()
+    await link.close()
+
+    assert server.client_heartbeats, "no report was taken"
+    assert server.client_heartbeats[-1].get("settings_url") == expected
+    # The pull's own address is learned on its first request, so the first report
+    # goes without it and the next, at once, with it; a name or loopback needs none.
+    assert len(server.client_heartbeats) == (2 if allowed is None and expected is not None else 1)
+
+
+async def test_a_new_local_address_alone_is_reported_at_once(client, server, drm, cache_dir):
+    """The Player's address changes and nothing else: the server hears a new report, without waiting for the interval."""
+    elapsed = Elapsed()
+    address = ["192.0.2.10"]
+    page = _page(cache_dir, EVERY_INTERFACE)
+    supervisor = supervisor_for(
+        client,
+        drm,
+        link=ClientPull(client, monotonic=elapsed),
+        worker=_idle,
+        monotonic=elapsed,
+        settings_url=lambda: settings_url(page, address[0]),
+    )
+
+    await supervisor.cycle()
+    elapsed.now += 10
+    await supervisor.cycle()
+    assert len(server.client_heartbeats) == 1, "an unchanged report was sent before its interval"
+    address[0] = "192.0.2.77"
+    elapsed.now += 10
+    await supervisor.cycle()
+    await supervisor.stop_all()
+
+    assert [beat["settings_url"] for beat in server.client_heartbeats] == ["http://192.0.2.10:8771/", "http://192.0.2.77:8771/"]
+    assert server.client_heartbeats[0]["outputs"] == server.client_heartbeats[1]["outputs"]
+
+
 def test_a_machine_with_no_drm_directory_has_no_hdmi_outputs(tmp_path):
     assert hdmi_outputs(tmp_path / "absent") == []
 
@@ -900,22 +1061,90 @@ async def test_a_frame_whose_id_cannot_be_read_is_reported_without_one_and_said_
     assert len(unreadable) == 1, "an unreadable identity was said on every report"
 
 
-async def test_an_identity_read_late_is_reported_at_once_and_then_never_read_again(client, server, drm, tv):
+class Elapsed:
+    """Elapsed time that moves only when the test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def supervisor_on(client, drm: Path, identity: FrameIdentity, elapsed: Elapsed, **overrides) -> Supervisor:
+    """A supervisor reporting the Frame's identity, on a clock only the test moves."""
+    return Supervisor(
+        settings=client,
+        link=overrides.pop("link", None) or ClientPull(client, monotonic=elapsed),
+        worker=_idle,
+        outputs=lambda: client_outputs(client, drm_root=drm, frame_identity=identity.value),
+        now=lambda: datetime.now(UTC),
+        monotonic=elapsed,
+        frame_identity=identity,
+        **overrides,
+    )
+
+
+def identified_on(tv: FakeTv, elapsed: Elapsed) -> FrameIdentity:
+    return FrameIdentity(tv.read_identity, budget_seconds=1.0, monotonic=elapsed)
+
+
+def _identities(server) -> list[str | None]:
+    return [beat["outputs"][0].get("identity") for beat in server.client_heartbeats]
+
+
+async def test_an_identity_read_late_is_reported_at_once_and_kept_through_a_failed_read(client, server, drm, tv):
     """A set asleep at boot is identified once it answers; once read, the
-    identity is kept, so a later failed read cannot make it flap away."""
+    identity is kept through a later failed read, so it does not flap away
+    while the set sleeps."""
+    elapsed = Elapsed()
     tv.unavailable = True
-    identity = identified(client, tv)
-    supervisor = supervisor_with_identity(client, drm, identity, worker=_idle)
+    identity = identified_on(tv, elapsed)
+    supervisor = supervisor_on(client, drm, identity, elapsed)
 
     await supervisor.cycle()
     tv.unavailable = False
+    elapsed.now += 30
     await supervisor.cycle()
     tv.unavailable = True
+    elapsed.now += 60
     await supervisor.cycle()
     await supervisor.stop_all()
 
-    assert [beat["outputs"][0].get("identity") for beat in server.client_heartbeats] == [None, tv.device_id]
-    assert tv.identity_reads == 2
+    assert _identities(server) == [None, tv.device_id, tv.device_id], "a failed read cost the report its identity"
+    assert tv.identity_reads == 3, "the identity was not asked again once its interval came round"
+
+
+async def test_another_set_at_the_frames_address_is_reported_within_one_interval_and_said_once(client, server, drm, tv, caplog):
+    """One REST read a minute: a set swapped at the Frame's address, without a restart, is the next report."""
+    elapsed = Elapsed()
+    identity = identified_on(tv, elapsed)
+    supervisor = supervisor_on(client, drm, identity, elapsed)
+    first = tv.device_id
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.client"):
+        await supervisor.cycle()
+        tv.device_id = "uuid:the-set-that-replaced-it"
+        elapsed.now += 30
+        await supervisor.cycle()
+        assert _identities(server) == [first], "the identity was read again before its interval"
+        elapsed.now += 30
+        await supervisor.cycle()
+        elapsed.now += 60
+        await supervisor.cycle()
+    await supervisor.stop_all()
+
+    assert _identities(server) == [first, tv.device_id, tv.device_id]
+    assert tv.identity_reads == 3, "the identity was read other than once a minute"
+    changed = [record for record in caplog.records if record.__dict__.get("event") == "client.identity_changed"]
+    assert len(changed) == 1, "the new set was not said, or said on every read"
+    line = logs.JsonFormatter().format(changed[0])
+    for device_id in (first, tv.device_id):
+        assert device_id not in line, "the journal named a set by its own id, where every other line names it by a hash"
+        assert f"set-{hashlib.sha256(device_id.encode()).hexdigest()[:8]}" in line, "the line does not say which set"
+    said = json.loads(line)
+    assert said["set_now"] == f"set-{hashlib.sha256(tv.device_id.encode()).hexdigest()[:8]}"
+    assert said["set_was"] == f"set-{hashlib.sha256(first.encode()).hexdigest()[:8]}"
 
 
 async def test_an_identity_read_that_hangs_costs_the_report_its_identity_and_nothing_else(client, server, drm):
@@ -948,6 +1177,32 @@ async def test_the_entry_point_reads_the_identity_from_the_frames_rest_descripti
         await asyncio.wait_for(running, timeout=5)
 
     assert server.client_heartbeats[0]["outputs"][0]["identity"] == tv.device_id
+
+
+async def test_the_entry_point_reports_the_settings_page_at_the_address_its_pull_reached_the_server_from(
+    monkeypatch, client, server, drm, tv, cache_dir
+):
+    """The composition root's wiring: the page's settings and the client link's own address, into the report."""
+    monkeypatch.setattr(entry, "SamsungTv", lambda **kwargs: tv)
+    monkeypatch.setattr(entry, "load", lambda: client)
+    monkeypatch.setattr(entry, "client_outputs", partial(_outputs_beside, drm))
+    monkeypatch.setattr(entry, "load_ui", lambda: _page(cache_dir, EVERY_INTERFACE))
+
+    async def no_page(state, stop) -> bool:
+        # The page on every interface is not this test's to open.
+        await stop.wait()
+        return True
+
+    monkeypatch.setattr(entry, "run_settings_page", no_page)
+
+    running = asyncio.create_task(entry._run())
+    try:
+        await eventually(lambda: any("settings_url" in beat for beat in server.client_heartbeats), what="the settings address")
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(running, timeout=5)
+
+    assert next(beat["settings_url"] for beat in server.client_heartbeats if "settings_url" in beat) == "http://127.0.0.1:8771/"
 
 
 def _outputs_beside(drm: Path, settings, *, frame_identity=None):
@@ -1301,7 +1556,7 @@ WALL_EVENTS = frozenset(
         "binding.uploaded",
         "binding.upload_failed",
         "binding.orphaned",
-        # Chunk 06: the Frame's retirement, in the same pass as its orphan sweep,
+        # The Frame's retirement, in the same pass as its orphan sweep,
         # and the store's feed count, read by the store the wall's worker opens.
         "binding.retired",
         "binding.retirement_unconfirmed",
@@ -1316,6 +1571,8 @@ WALL_EVENTS = frozenset(
         "tv.orphans_removed",
         "tv.orphan_removal_unconfirmed",
         "tv.removal_incomplete",
+        "tv.others_left_alone",
+        "tv.markers_unconfirmed",
         "tv.upload_misreported",
         "tv.selection_unreadable",
         "tv.selection_observer_failed",
@@ -1398,12 +1655,13 @@ PROCESS_EVENTS = frozenset(
     {
         "daemon.misconfigured",
         "daemon.setup_mode",
-        # Chunk 05: said once at start, before the supervisor runs any wall.
+        # Said once at start, before the supervisor runs any wall.
         "files.drawing",
         "client.started",
         "client.stopped",
         "client.identity_unreadable",
         "client.identity_read",
+        "client.identity_changed",
         "client.unreachable",
         "client.reachable",
         "client.refused",
@@ -1435,10 +1693,10 @@ PROCESS_EVENTS = frozenset(
         "settings_page.host_refused",
         "settings_page.saved",
         "settings_page.write_failed",
-        # Chunk 09: the page forgetting the Frame's pairing when its address changes.
+        # The page forgetting the Frame's pairing when its address changes.
         "settings_page.pairing_forgotten",
         "settings_page.pairing_not_forgotten",
-        # Chunk 08: systemd's notification socket, from _run, the supervisor's
+        # systemd's notification socket, from _run, the supervisor's
         # own cycle (PettingSupervisor) and the slideshow's wait, never a worker.
         "notify.absent",
         "notify.unusable",
@@ -1722,7 +1980,7 @@ async def test_every_line_a_worker_logs_names_its_wall(monkeypatch, client, serv
 
 
 async def test_every_line_a_player_drawing_to_files_logs_names_its_wall(client, server, drm, tmp_path):
-    """**The file screen and the file label, the kinds of worker chunk 05 added, held to the same rule.**
+    """**The file screen and the file label, the kinds of worker a hardware-less Player adds, held to the same rule.**
 
     A Player with no hardware (`FILE_OUTPUT_DIR`): a wall (hall) on the file
     screen, and the file label captioning it. Each line is judged by `_faults`

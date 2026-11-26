@@ -1,7 +1,7 @@
 """Reddit as a slideshow source: one listing, read with the owner's session cookie, turned into items.
 
 **What Reddit answers was measured on 2026-11-10 with the owner's cookie** (the
-build plan's chunk 02 verify-api):
+slideshow build plan's check against the live API):
 
 * A listing it serves is `200` JSON. **Every failure is `403` with an HTML page**:
   a listing it refuses even to a logged-in session (`/new`, `/hot`, `/rising`),

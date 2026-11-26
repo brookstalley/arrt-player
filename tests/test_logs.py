@@ -15,8 +15,16 @@ import pathlib
 from collections.abc import Iterator
 
 import pytest
+from PIL import Image
 
 from arrt_player import logs
+from arrt_player.client import LabelAssignment
+from arrt_player.config import FileOutputSettings
+from arrt_player.displays import file_output
+from arrt_player.displays.file_output import FileScreenOutput, captioning, file_label_panel
+from arrt_player.label_rule import Drawing, Outcome
+from arrt_player.panel import SurfaceUnavailable
+from arrt_player.panel.layout import Layout
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +134,24 @@ class TestTheLineShape:
         inside, outside = (json.loads(line) for line in capsys.readouterr().err.strip().splitlines())
         assert inside["work_id"] == "w-42"
         assert "work_id" not in outside
+
+    def test_the_current_work_is_the_bound_one_inside_the_block_and_none_outside(self):
+        assert logs.current_work_id() is None
+
+        with logs.work_context("w-42"):
+            assert logs.current_work_id() == "w-42"
+            with logs.work_context("w-43"):
+                assert logs.current_work_id() == "w-43"
+            assert logs.current_work_id() == "w-42"
+
+        assert logs.current_work_id() is None
+
+    def test_a_worker_thread_reads_the_work_its_caller_bound(self):
+        async def read_in_a_thread() -> str | None:
+            with logs.work_context("w-42"):
+                return await asyncio.to_thread(logs.current_work_id)
+
+        assert asyncio.run(read_in_a_thread()) == "w-42"
 
     def test_a_nested_block_leaves_the_outer_id_in_place(self, capsys):
         logs.configure()
@@ -307,3 +333,72 @@ class TestEveryLineIsFindableByItsEvent:
         )
 
         assert logged_through == []
+
+
+class TestTheFileOutputsReadWhatTheJournalBinds:
+    """The file screen and label record the work and mapping the journal's own binding names, and refuse a drawing without it."""
+
+    @pytest.fixture
+    def files(self, tmp_path: pathlib.Path) -> FileOutputSettings:
+        return FileOutputSettings(directory=tmp_path / "drawn", screen=(160, 90), label=True)
+
+    def _render(self, tmp_path: pathlib.Path) -> pathlib.Path:
+        path = tmp_path / "render.jpg"
+        Image.new("RGB", (160, 90), (200, 30, 30)).save(path, format="JPEG")
+        return path
+
+    def test_a_picture_drawn_outside_any_work_records_no_work_id(self, files, tmp_path):
+        screen = FileScreenOutput(files, wall_id="living-room")
+
+        screen.show(self._render(tmp_path))
+
+        assert json.loads((screen.directory / "shown.json").read_text())["work_id"] is None
+
+    def test_a_picture_drawn_inside_a_works_context_records_that_work(self, files, tmp_path):
+        screen = FileScreenOutput(files, wall_id="living-room")
+
+        with logs.work_context("w-42"):
+            screen.show(self._render(tmp_path))
+        record = json.loads((screen.directory / "shown.json").read_text())
+
+        assert record["work_id"] == "w-42"
+
+    def test_a_refresh_after_the_work_context_has_ended_still_names_the_work_that_was_drawn(self, files, tmp_path):
+        screen = FileScreenOutput(files, wall_id="living-room")
+        with logs.work_context("w-42"):
+            screen.show(self._render(tmp_path))
+        (screen.directory / "picture.png").unlink()
+
+        screen.refresh()
+
+        assert json.loads((screen.directory / "shown.json").read_text())["work_id"] == "w-42"
+
+    def test_a_file_label_handed_a_layout_with_no_mapping_bound_is_refused_by_name_and_writes_nothing(self, files):
+        surface = file_label_panel(files).surface
+        token = file_output._DRAWING.set(file_output._Drawn(drawing=Drawing(Outcome.BLANK, state="dark"), label_id="lab-1"))
+        try:
+            with pytest.raises(SurfaceUnavailable, match="no mapping"):
+                surface.show(Layout(surface=surface.geometry, blocks=(), dropped=()))
+        finally:
+            file_output._DRAWING.reset(token)
+
+        assert not (files.directory / "file-label-0").exists()
+
+    def test_a_draw_outside_a_mapping_is_said_and_leaves_the_panel_not_connected(self, files, caplog):
+        panel = file_label_panel(files)
+
+        with caplog.at_level(logging.WARNING):
+            asyncio.run(panel.draw(Drawing(Outcome.BLANK, state="dark"), label_id="lab-1"))
+
+        assert not panel.report().connected
+        assert [r for r in caplog.records if getattr(r, "event", None) == "label.failed" and "no mapping" in r.getMessage()]
+        assert not (files.directory / "file-label-0").exists()
+
+    def test_a_draw_inside_a_mapping_is_unchanged(self, files):
+        panel = file_label_panel(files)
+
+        with captioning(LabelAssignment(label_id="lab-1", output="file-label-0", wall_id="living-room")):
+            asyncio.run(panel.draw(Drawing(Outcome.BLANK, state="dark"), label_id="lab-1"))
+
+        record = json.loads((files.directory / "file-label-0" / "shown.json").read_text())
+        assert (record["wall_id"], record["outcome"]) == ("living-room", "blank")

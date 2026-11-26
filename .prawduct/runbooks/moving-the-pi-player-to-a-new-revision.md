@@ -152,10 +152,16 @@ F9. **Going back:** stop the Player, reinstall the old unit, reload, start:
 
     **Expected:** `find` names one store per Frame wall, with its `-wal` and
     `-shm` files if the Player stopped with them; the `rm` removes the three of
-    the wall whose set changed. The cost is a re-upload of that wall's works. **If the Frame has
-    always been the same television, skip this step.** *Why: the Player then
-    removes from the set every uploaded picture it cannot account for, and a
-    store that names the wrong set's ids would also select by them.*
+    the wall whose set changed. The cost is a re-upload of that wall's works, and
+    **the pictures the old store put on that set stay on it for good**: the new
+    Player has no record of them, so it leaves them alone and uploads every work
+    again beside them. The household can delete the extra copies on the set. **If
+    the Frame has always been the same television, skip this step.** *Why: a store
+    from before this release takes the first set it meets as the one its rows
+    were made on and records their ids as pictures the Player put there, matched
+    by id alone, so a household picture that happens to carry one would be
+    removed; and a store that names the wrong set's ids would also select by
+    them.*
 
 7. **IF step 2 showed a new Player setting:** add it.
 
@@ -401,11 +407,24 @@ time, use F9 there.)
   widened on open** to the schema the running Player knows, and **an older
   Player refuses a store newer than itself**: it shows no art on that wall,
   saying `daemon.state_too_new`. A Player from before 2026-11-19 writes schema 2
-  and the release that follows it writes 4, so going back across it parks every
+  and the release that follows it writes 5, so going back across it parks every
   Frame wall until step 19b sets each store's version back. The older Player then
-  ignores the new columns and table, and sends every work again (one upload per
+  ignores the new columns and tables, and sends every work again (one upload per
   work); the rows stay, so going forward again loses nothing but the recorded
   television, which is forgotten and taken from the first read.
+- **Going back across schema 5 needs the owner's say-so each time** (the owner,
+  2026-11-25), because what the release before it does to the set is not
+  harmless. Measured at integration (v0.8.0 at its tag against a schema-5 store, on
+  no Pi and with no television; that nothing then connects to the set is read from
+  v0.8.0's `run_frame_wall`, which returns before the Frame wall is built): v0.8.0,
+  which writes schema 2, refuses the
+  newer store, journals `daemon.state_too_new`, parks only the Frame wall and
+  **touches nothing on the set**. **Only after step 19b sets the store's version
+  to 2, or the store is deleted, does its sweep remove every uploaded picture its
+  own records do not name**: the household's pictures, an older Player's
+  leftovers, even the one on screen. So the steps below stop at 19b without the
+  owner's word. Leaving the stores as they are, the walls on the old revision
+  stay parked and the set is untouched.
 
 17. **IF step 2's sections say the release goes back as a pair** (the server
     and the Player together): roll the server back first, using the homelab
@@ -454,8 +473,13 @@ time, use F9 there.)
      whatever it set, which `.env` does not.* If it printed `1`, or
      `No such file`, there is nothing to do → step 19b.
 
-19b. Ask the old revision which Frame store schema it writes, and set each
-     Frame wall's store to it. **The Player must be stopped** (step 18).
+19b. **Only with the owner's say-so (see § Going back).** Ask the old revision
+     which Frame store schema it writes, and set each Frame wall's store to it.
+     **The Player must be stopped** (step 18). **Past this step the old revision
+     sweeps the set** by the rule it was written with, and removes every uploaded
+     picture its records do not name, the household's included; **without it, the
+     old revision parks that wall and touches nothing on the set.** Stop here, and
+     tell the owner, if you do not have their word.
 
          sudo -u tvpi git -C /opt/arrt-player show <old>:src/arrt_player/state/store.py | grep '^SCHEMA_VERSION'
 
@@ -478,10 +502,12 @@ time, use F9 there.)
      **Expected:** `(2,)`, or `(<n>,)` as this step's first command printed it.
      *Why not `3`: a revision that writes schema 2 refuses 3 as it refuses 4, and
      only the number the old revision writes opens the store (measured against
-     the end of wave 1's code, 2026-11-19), so the number is the one the old
+     the end of wave 1's code, 2026-11-19, and again with v0.8.0 against a
+     schema-5 store at integration), so the number is the one the old
      revision prints, never the nearest below the store's.* Or delete the store,
-     which costs a re-upload of the whole wall instead of one per work. If the
-     old revision prints 4 or more, the store opens as it is.
+     which costs a re-upload of the whole wall instead of one per work, and which
+     has the same effect on the set. If the old revision prints 5 or more, the
+     store opens as it is.
 
 20. Repeat steps 8–14, which put the old revision's environment and unit back
     and start it.

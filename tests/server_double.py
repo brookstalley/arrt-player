@@ -1,22 +1,24 @@
 """Arrt's Player surface, as the contract describes it, and nothing more.
 
-Served on the contract's own routes (`contract/routes.json`) with the contract's
-own admission rules (`player-contract.md` § Transport), so the tests that use it
-pin the Player to the contract rather than to Arrt's code, which a Player in
-another repository will not have:
+Served on the contract's own routes (`routes()`), and **every answer is a row of
+the contract's transport table** (`transport()`): the double decides which case
+a request is, and the row gives the status and the kind of body, so the tests
+that use it pin the Player to the contract rather than to Arrt's code, which a
+Player in another repository will not have. A case the table does not name
+cannot be answered (`answer` raises), and `answered` records each row served,
+which `tests/test_transport_table.py` replays row by row.
 
-* every request carries a client's token: unknown is `401`;
-* a per-wall route for a wall not assigned to that client is `403`;
-* `GET /client` lists that client's walls with an ETag, `304` on a match;
-* `GET /walls/{wall_id}/manifest/v{major}` serves a wall's manifest at the
-  major it is published at, with an ETag, and `404` at any other major;
-* `POST /client/heartbeat` and `POST /walls/{wall_id}/heartbeat` are `204`, and
-  `400` for a body the contract's schema refuses — so a Player writing a bad one
-  fails here as it would against Arrt;
-* `GET /media/sha256-{hex}` streams a held master in pieces, so a Player that
-  stops reading is seen to stop;
-* `GET /labels/{label_id}` serves a label document with an ETag, `304` on a
-  match, and `403` for a label output another client holds or an unknown id.
+What the double decides for itself is only what the table leaves to a server:
+which client a token is, which walls and labels it holds, its body limit
+(`BODY_LIMIT_BYTES`, the server's own and not the contract's), and the ETag rule
+of `conditional_get` (`etag_for`). Both heartbeats are validated against their
+schemas (the client heartbeat's rules a schema cannot state too, as the package
+states them), so a Player writing a bad one fails here as it would against Arrt.
+Masters are streamed in pieces, so a Player that stops reading is seen to stop.
+
+The forced answers (`manifest_status`, `client_status` and the rest) are the
+failure tests' levers: a forced status a row of that route names is answered as
+that row, and any other (a `5xx`) bare, as the table's `unanswered` reads it.
 """
 
 import hashlib
@@ -27,13 +29,33 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
-from arrt_contract import root, routes, validator
+from arrt_contract import root, routes, semantic_errors, transport, validator
 from PIL import Image
 
 CONTRACT = root()
 ROUTES = routes()
-CLIENT_HEARTBEAT = validator("schemas/client-heartbeat.v1.schema.json")
+TRANSPORT = transport()
+CLIENT_HEARTBEAT_SCHEMA = "schemas/client-heartbeat.v1.schema.json"
+CLIENT_HEARTBEAT = validator(CLIENT_HEARTBEAT_SCHEMA)
 WALL_HEARTBEAT = validator("schemas/heartbeat.v1.schema.json")
+
+#: The largest request body the double reads, as Arrt's `BODY_LIMIT_BYTES` is:
+#: a server's own limit, which the contract names no number for (`too_large`).
+BODY_LIMIT_BYTES = 256 * 1024
+
+
+def row(route: str, case: str) -> dict:
+    """The transport table's row for one answer of one route, or KeyError naming what the table lacks."""
+    for answer in TRANSPORT["routes"][route]["answers"]:
+        if answer["case"] == case:
+            return answer
+    raise KeyError(f"the contract's transport table has no answer {case!r} for route {route!r}")
+
+
+def contract_etag(body: bytes) -> str:
+    """The tag `conditional_get` says this server sends: the quoted lowercase hex SHA-256 of the body."""
+    return f'"{hashlib.sha256(body).hexdigest()}"'
+
 
 #: How much of a master `serve_media` writes at a time.
 MEDIA_CHUNK_BYTES = 64 * 1024
@@ -100,6 +122,56 @@ class ServerDouble:
         #: a test of the running process, on the system clock, moves it to now.
         self.schedule_starts = SCHEDULE_STARTS
         self._generation = itertools.count(1)
+        #: Each answer given, in order, as (route, case): the transport table's
+        #: row it was. A forced status no row names is recorded as its class.
+        self.answered: list[tuple[str, str]] = []
+        #: The ETag each document is served with. The contract's rule unless a
+        #: test stands in a server that sent some other tag.
+        self.etag_for = contract_etag
+        #: The client each label output belongs to, mapped or not: an output its
+        #: client holds that captions no wall answers 404, any other 403.
+        self.label_owners: dict[str, str] = {}
+        #: A forced answer for every client heartbeat.
+        self.client_heartbeat_status: int | None = None
+
+    # -- answering from the table ------------------------------------------------------
+
+    def answer(
+        self,
+        route: str,
+        case: str,
+        *,
+        sentence: str = "",
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> web.Response:
+        """The row's status, with the kind of body the row names; `sentence` is an error's, `body` a document's."""
+        answer = row(route, case)
+        self.answered.append((route, case))
+        status, kind = answer["status"], answer["body"]
+        if kind == "error":
+            return web.json_response({"error": sentence}, status=status, headers=headers)
+        if kind == "document":
+            return web.Response(body=body, content_type="application/json", status=status, headers=headers)
+        if kind == "none":
+            return web.Response(status=status, headers=headers)
+        raise ValueError(f"row {route}/{case} has a body of kind {kind!r}, which is not answered this way")
+
+    def _forced(self, route: str, status: int) -> web.Response:
+        """A failure test's forced status: the first row of the route that names it, else bare, as a status of its class."""
+        for answer in TRANSPORT["routes"][route]["answers"]:
+            if answer["status"] == status and answer["body"] in ("error", "none"):
+                return self.answer(route, answer["case"], sentence=f"forced {status}")
+        self.answered.append((route, f"{status // 100}xx"))
+        return web.Response(status=status)
+
+    def _conditional(self, route: str, request: web.Request, body: bytes) -> web.Response:
+        """`ok` with the body's tag, or `unchanged` when If-None-Match names it (`conditional_get`)."""
+        etag = self.etag_for(body)
+        headers = {"ETag": etag, "Cache-Control": "no-cache"}
+        if request.headers.get("If-None-Match") == etag:
+            return self.answer(route, "unchanged", headers=headers)
+        return self.answer(route, "ok", body=body, headers=headers)
 
     # -- the app ---------------------------------------------------------------------
 
@@ -121,99 +193,121 @@ class ServerDouble:
             application.router.add_route(ROUTES[key]["method"], ROUTES[key]["path"], handler)
         return application
 
-    def _admit(self, request: web.Request, wall_id: str | None) -> tuple[dict | None, web.Response | None]:
-        header = request.headers.get("Authorization")
-        self.authorizations.append(header)
+    def _note(self, request: web.Request) -> None:
+        self.authorizations.append(request.headers.get("Authorization"))
         self.requests.append((request.method, request.path))
+
+    def _admit(self, route: str, request: web.Request, wall_id: str | None) -> tuple[dict | None, web.Response | None]:
+        """The client a token is, or the row refusing it: `no_valid_token`, or `not_this_clients_wall` on a wall's route."""
+        header = request.headers.get("Authorization")
         client_id = self.tokens.get((header or "").removeprefix("Bearer "))
         if client_id is None:
-            return None, web.json_response({"error": "A valid client token is required."}, status=401)
+            return None, self.answer(route, "no_valid_token", sentence="A valid client token is required.")
         client = self.clients.get(client_id, {"name": client_id, "walls": []})
         if wall_id is not None and wall_id not in {wall["wall_id"] for wall in client["walls"]}:
-            return None, web.json_response({"error": "That wall is not this client's."}, status=403)
+            return None, self.answer(route, "not_this_clients_wall", sentence="That wall is not this client's.")
         return {"client_id": client_id, **client}, None
 
+    async def _read_body(self, route: str, request: web.Request) -> tuple[bytes | None, web.Response | None]:
+        """A POST's body, or `too_large` past `BODY_LIMIT_BYTES`, refused before the token is read, as Arrt does."""
+        body = bytearray()
+        async for chunk in request.content.iter_chunked(MEDIA_CHUNK_BYTES):
+            body += chunk
+            if len(body) > BODY_LIMIT_BYTES:
+                return None, self.answer(route, "too_large", sentence="The body is over this server's limit.")
+        return bytes(body), None
+
     async def serve_client(self, request: web.Request) -> web.Response:
-        client, refused = self._admit(request, None)
+        self._note(request)
+        client, refused = self._admit("client", request, None)
         if refused is not None:
             return refused
         if self.client_status is not None:
-            return web.Response(status=self.client_status)
-        body = self.client_body or json.dumps(client).encode()
-        etag = f'"{hashlib.sha256(body).hexdigest()}"'
-        if request.headers.get("If-None-Match") == etag:
-            return web.Response(status=304, headers={"ETag": etag})
-        return web.Response(body=body, content_type="application/json", headers={"ETag": etag})
+            return self._forced("client", self.client_status)
+        return self._conditional("client", request, self.client_body or json.dumps(client).encode())
 
     async def receive_client_heartbeat(self, request: web.Request) -> web.Response:
-        _client, refused = self._admit(request, None)
+        self._note(request)
+        body, refused = await self._read_body("client_heartbeat", request)
         if refused is not None:
             return refused
+        _client, refused = self._admit("client_heartbeat", request, None)
+        if refused is not None:
+            return refused
+        if self.client_heartbeat_status is not None:
+            return self._forced("client_heartbeat", self.client_heartbeat_status)
         try:
-            document = json.loads(await request.read())
+            document = json.loads(body)
         except ValueError:
-            return web.json_response({"error": "The body is not JSON."}, status=400)
+            return self.answer("client_heartbeat", "not_json", sentence="The body is not JSON.")
         errors = [error.message for error in CLIENT_HEARTBEAT.iter_errors(document)]
-        names = [output.get("name") for output in document.get("outputs", []) if isinstance(output, dict)]
-        if len(names) != len(set(names)):
-            errors.append("two outputs share a name")
+        # The rules a schema cannot state are the package's, asked only of a report the schema accepts.
+        errors = errors or semantic_errors(document, schema=CLIENT_HEARTBEAT_SCHEMA)
         if errors:
-            return web.json_response({"error": "; ".join(errors)}, status=400)
+            return self.answer("client_heartbeat", "not_a_client_heartbeat", sentence="; ".join(errors))
         self.client_heartbeats.append(document)
-        return web.Response(status=204)
+        return self.answer("client_heartbeat", "accepted")
 
     async def serve_label(self, request: web.Request) -> web.Response:
-        client, refused = self._admit(request, None)
+        self._note(request)
+        client, refused = self._admit("label", request, None)
         if refused is not None:
             return refused
         if self.label_status is not None:
-            return web.Response(status=self.label_status)
+            return self._forced("label", self.label_status)
         label_id = request.match_info["label_id"]
         document = self.label_documents.get(label_id)
-        if document is None or label_id not in {label["label_id"] for label in client.get("labels", [])}:
-            return web.json_response({"error": "That label output is not this client's."}, status=403)
-        body = json.dumps(document).encode()
-        etag = f'"{hashlib.sha256(body).hexdigest()}"'
-        if request.headers.get("If-None-Match") == etag:
-            return web.Response(status=304, headers={"ETag": etag})
-        return web.Response(body=body, content_type="application/json", headers={"ETag": etag})
+        if self.label_owners.get(label_id) != client["client_id"] or document is None:
+            return self.answer("label", "not_this_clients_label", sentence="That label output is not this client's.")
+        if label_id not in {label["label_id"] for label in client.get("labels", [])}:
+            return self.answer("label", "captions_no_wall", sentence="That label output captions no wall.")
+        return self._conditional("label", request, json.dumps(document).encode())
 
     async def serve_manifest_major(self, request: web.Request) -> web.Response:
         """A wall's manifest at one major, as Arrt mounts it: 404 for a major it does not publish for that wall."""
+        self._note(request)
         major = int(request.match_info["major"])
         self.majors_requested.append(major)
         wall_id = request.match_info["wall_id"]
-        _client, refused = self._admit(request, wall_id)
+        _client, refused = self._admit("manifest_major", request, wall_id)
         if refused is not None:
             return refused
         if self.manifest_status is not None:
-            return web.Response(status=self.manifest_status)
+            return self._forced("manifest_major", self.manifest_status)
         manifest = self.manifests.get(wall_id)
-        if manifest is None or self.served_at.get(wall_id, manifest["schema"]["major"]) != major:
-            return web.json_response({"error": f"No manifest of major {major} is published for this wall."}, status=404)
+        if manifest is None:
+            return self.answer("manifest_major", "nothing_hung", sentence="Nothing is hung on this wall.")
+        if self.served_at.get(wall_id, manifest["schema"]["major"]) != major:
+            return self.answer(
+                "manifest_major", "major_not_published", sentence=f"No manifest of major {major} is published for this wall."
+            )
         body = json.dumps(manifest).encode()
         if not self.manifest_etags:
-            return web.Response(body=body, content_type="application/json")
-        etag = f'"{hashlib.sha256(body).hexdigest()}"'
-        if request.headers.get("If-None-Match") == etag:
-            return web.Response(status=304, headers={"ETag": etag})
-        return web.Response(body=body, content_type="application/json", headers={"ETag": etag})
+            # A server or a proxy that strips the tag, which the contract's own server never does.
+            return self.answer("manifest_major", "ok", body=body)
+        return self._conditional("manifest_major", request, body)
 
     async def serve_media(self, request: web.Request) -> web.StreamResponse:
-        _client, refused = self._admit(request, None)
+        self._note(request)
+        _client, refused = self._admit("media", request, None)
         if refused is not None:
             return refused
         sha = request.match_info["sha256"]
         if sha in self.media_dropped:
+            # No answer at all, which the table's `unanswered` reads as the server gone.
             request.transport.close()
             return web.Response(status=200)
         status = self.media_status_by_sha.get(sha, self.media_status)
         if status is not None:
-            return web.Response(status=status)
+            return self._forced("media", status)
         data = self.media.get(sha)
         if data is None:
-            return web.json_response({"error": "No render with that hash is held."}, status=404)
-        response = web.StreamResponse(headers={"Content-Type": "image/jpeg"})
+            return self.answer("media", "not_held", sentence="No render with that hash is held.")
+        self.answered.append(("media", "ok"))
+        response = web.StreamResponse(
+            status=row("media", "ok")["status"],
+            headers={"Content-Type": "image/jpeg", "Cache-Control": "public, max-age=31536000, immutable"},
+        )
         response.content_length = len(data)
         await response.prepare(request)
         sent = self.media_sent.setdefault(sha, [])
@@ -230,26 +324,31 @@ class ServerDouble:
         return response
 
     async def receive_heartbeat(self, request: web.Request) -> web.Response:
+        self._note(request)
         wall_id = request.match_info["wall_id"]
-        _client, refused = self._admit(request, wall_id)
+        body, refused = await self._read_body("heartbeat", request)
+        if refused is not None:
+            return refused
+        _client, refused = self._admit("heartbeat", request, wall_id)
         if refused is not None:
             return refused
         if self.heartbeat_status is not None:
-            return web.Response(status=self.heartbeat_status)
-        body = await request.read()
+            return self._forced("heartbeat", self.heartbeat_status)
         try:
             document = json.loads(body)
         except ValueError:
-            return web.json_response({"error": "The body is not JSON."}, status=400)
+            document = None
+        if not isinstance(document, dict):
+            return self.answer("heartbeat", "not_an_object", sentence="The body is not a JSON object.")
         errors = [error.message for error in WALL_HEARTBEAT.iter_errors(document)]
         if errors:
-            return web.json_response({"error": "; ".join(errors)}, status=400)
+            return self.answer("heartbeat", "not_a_heartbeat", sentence="; ".join(errors))
         self.heartbeats.append(body)
         self.heartbeats_by_wall.setdefault(wall_id, []).append(document)
         if self.echo_heartbeats_to is not None:
             # What Arrt does with a POSTed heartbeat on a host it shares.
             self.echo_heartbeats_to.write_bytes(body)
-        return web.Response(status=204)
+        return self.answer("heartbeat", "accepted")
 
     # -- curating ----------------------------------------------------------------------
 
@@ -278,8 +377,10 @@ class ServerDouble:
         client["labels"] = [label for label in client.get("labels", []) if label["output"] != output]
         client["labels"].append({"label_id": label_id, "output": output, "wall_id": wall_id})
         self.label_documents[label_id] = document
+        self.label_owners[label_id] = client_id
 
     def unmap_label(self, label_id: str) -> None:
+        """Take a label output off its wall: still its client's, so it answers `captions_no_wall`."""
         for client in self.clients.values():
             client["labels"] = [label for label in client.get("labels", []) if label["label_id"] != label_id]
 

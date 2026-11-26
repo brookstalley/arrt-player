@@ -7,7 +7,10 @@ reachable — so "curation stopped" has to be indistinguishable, from here, from
 """
 
 import logging
+import sqlite3
+from pathlib import Path
 
+from fake_tv import ours_on_the_set
 from fakes import FakeTv
 
 from arrt_player.state import DisplayState
@@ -126,16 +129,16 @@ async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns
 ):
     """The declared deliverable, on the path it is most likely to be needed.
 
-    Removing what the binding table cannot account for was reachable from exactly
-    one place — the tick a manifest is first seen on — and the watcher reports a
-    manifest once. A set asleep on that tick aborted the pass and the work was
-    never attempted again, so on a fresh install the legacy uploads the chunk
-    exists to clear would have stayed on the television for ever. Owing the work
-    until it is done, rather than attempting it when the news arrives, is the fix.
+    The removal is first due on the tick a manifest is first seen on, and the
+    watcher reports a manifest once. Were it attempted only when that news
+    arrives, a set asleep on that tick would abort the pass and the removal
+    would never be attempted again, so a picture the Player recorded putting
+    there and no binding wants would stay on the television for ever. Owing the
+    work until it is done is what prevents that. The picture is one the Player
+    recorded putting there that no binding wants, which is all it removes; a
+    picture it has no record of is never removed, owed or not.
     """
-    from pathlib import Path
-
-    tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+    ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
     tv.unavailable = True
     publish(["w1"])
 
@@ -148,7 +151,9 @@ async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns
     assert "MY-LEGACY-1" not in tv.holding, "orphan removal was dropped rather than deferred"
 
 
-async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, tv: FakeTv, publish, clock, settings):
+async def test_a_reconciliation_interrupted_halfway_is_still_owed(
+    daemon: Wall, tv: FakeTv, publish, clock, settings, state: DisplayState
+):
     """Cleared on the far side of the call, so a set that goes away during it does
     not leave the work recorded as done — and retried on a wait, not on every poll.
 
@@ -156,9 +161,7 @@ async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, 
     ungated would ask the set again every second, which is the unbounded cadence
     this loop guards against twice elsewhere.
     """
-    from pathlib import Path
-
-    tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+    ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
     tv.removal_unconfirmable = True
     publish(["w1"])
     await daemon.tick()
@@ -180,7 +183,7 @@ async def test_a_reconciliation_interrupted_halfway_is_still_owed(daemon: Wall, 
 
 
 async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever(
-    daemon: Wall, tv: FakeTv, publish, clock, settings
+    daemon: Wall, tv: FakeTv, publish, clock, settings, state: DisplayState
 ):
     """A *known* refusal is an answer, and asking again learns nothing.
 
@@ -194,9 +197,7 @@ async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever
     to `True` with nothing exercising it: the whole suite passed with the old value
     restored, because no test had ever produced a removal the set survived.
     """
-    from pathlib import Path
-
-    tv.holding["MY-STUBBORN"] = Path("/gone/stubborn.jpg")
+    ours_on_the_set(tv, state, "MY-STUBBORN", Path("/gone/stubborn.jpg"))
     tv.unremovable = {"MY-STUBBORN"}
     publish(["w1"])
 
@@ -213,6 +214,109 @@ async def test_a_removal_the_set_refuses_settles_instead_of_being_asked_for_ever
         await daemon.tick()
 
     assert len(tv.removed) == asked, "an answered refusal was re-asked; that outcome was already established"
+
+
+# -- what the Player did not put on the set (the owner's ruling) --------------------
+#
+# The three cases above, each with a picture the Player has no record of putting
+# on the set: the household's own, or an older Player's. It is never asked for,
+# so there is nothing to owe through an outage, nothing to retry, and no line
+# saying the Player meant to remove it.
+
+#: Every line the wall writes about removing a picture, or failing to.
+_REMOVAL_LINES = ("tv.orphans_removed", "tv.orphan_removal_unconfirmed", "binding.retirement_unconfirmed", "binding.retired")
+
+
+class _CountingListings(FakeTv):
+    """The double, counting the requests for the set's list of its pictures: what a reconciliation owed costs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listings = 0
+
+    async def listed_pictures(self) -> dict[str, str | None]:
+        self.listings += 1
+        return await super().listed_pictures()
+
+
+def _a_frame_on(tv: FakeTv, settings, state: DisplayState, clock) -> Wall:
+    from arrt_player.displays.frame import frame_wall
+    from arrt_player.manifest import Watcher
+
+    return frame_wall(settings=settings, tv=tv, state=state, watcher=Watcher(settings.manifest_path), clock=clock.as_clock())
+
+
+def _removal_lines(caplog) -> list[str]:
+    return [record.event for record in caplog.records if getattr(record, "event", None) in _REMOVAL_LINES]
+
+
+async def test_a_picture_the_player_did_not_put_there_is_not_owed_through_an_outage(
+    settings, state: DisplayState, publish, clock, caplog
+):
+    tv = _CountingListings()
+    tv.holding["MY-HOUSEHOLD-1"] = Path("/the-households/own-picture.jpg")
+    daemon = _a_frame_on(tv, settings, state, clock)
+    tv.unavailable = True
+    publish(["w1"])
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+        tv.unavailable = False
+        await daemon.tick()
+        listed = tv.listings
+        for _ in range(3):
+            clock.advance(settings.tv_retry_max_seconds + 1)
+            await daemon.tick()
+
+    assert "MY-HOUSEHOLD-1" in tv.holding, "the household's picture was removed when the set returned"
+    assert tv.removed == []
+    assert tv.listings == listed, "a reconciliation stayed owed on account of a picture the Player did not put there"
+    assert _removal_lines(caplog) == []
+
+
+async def test_a_picture_the_player_did_not_put_there_is_not_retried_after_an_interruption(
+    settings, state: DisplayState, publish, clock, caplog
+):
+    tv = _CountingListings()
+    tv.holding["MY-HOUSEHOLD-1"] = Path("/the-households/own-picture.jpg")
+    tv.removal_unconfirmable = True
+    daemon = _a_frame_on(tv, settings, state, clock)
+    publish(["w1"])
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+        tv.unavailable = True
+        await daemon.tick()
+        tv.unavailable = False
+        listed = tv.listings
+        clock.advance(settings.tv_retry_max_seconds)
+        await daemon.tick()
+        await daemon.tick()
+
+    assert "MY-HOUSEHOLD-1" in tv.holding
+    assert tv.removed == [], "a removal was asked for a picture the Player did not put there"
+    assert tv.listings == listed, "the reconciliation was retried on account of a picture the Player did not put there"
+    assert _removal_lines(caplog) == []
+
+
+async def test_a_picture_the_player_did_not_put_there_is_never_asked_for_though_the_set_would_keep_it(
+    settings, state: DisplayState, publish, clock, caplog
+):
+    tv = FakeTv()
+    tv.holding["MY-HOUSEHOLD-1"] = Path("/the-households/own-picture.jpg")
+    tv.unremovable = {"MY-HOUSEHOLD-1"}
+    daemon = _a_frame_on(tv, settings, state, clock)
+    publish(["w1"])
+
+    with caplog.at_level(logging.INFO):
+        await daemon.tick()
+        clock.advance(settings.tv_retry_max_seconds + 1)
+        for _ in range(3):
+            await daemon.tick()
+
+    assert "MY-HOUSEHOLD-1" in tv.holding
+    assert tv.removed == [], "the set was asked to part with a picture the Player did not put there"
+    assert _removal_lines(caplog) == []
 
 
 async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(
@@ -234,3 +338,89 @@ async def test_a_manifest_published_while_the_set_is_asleep_is_still_adopted(
     await daemon.tick()
 
     assert publish.work_of(tv.on_the_wall) == "w2"
+
+
+# -- an upload sent while the set would not say, which never landed ------------------------------------------
+
+
+def _uploads_of_no_set(path: Path) -> list[tuple]:
+    with sqlite3.connect(path) as connection:
+        return connection.execute("SELECT marker, tv_content_id FROM tv_upload WHERE tv_identity IS NULL").fetchall()
+
+
+async def _an_outage_and_the_set_back(wall: Wall, tv: FakeTv, clock) -> None:
+    """The set goes away for a pass, found gone by its news, and comes back saying which it is; no new feed."""
+    tv.unavailable = True
+    tv.art_mode_announced = True
+    clock.advance(30)
+    await wall.tick()
+    tv.unavailable = False
+    clock.advance(400)
+    await wall.tick()
+    await wall.tick()
+
+
+async def test_an_upload_of_no_set_that_never_landed_leaves_once_its_set_is_listed_and_costs_no_listing_after(
+    settings, state: DisplayState, publish, clock
+):
+    """The set stops saying which it is, the wall goes on, and its uploads are refused: recorded with no set, never
+    on any. Once that set says and is listed without them, their records go, and the set coming back again after
+    each later outage costs no listing on their account."""
+    from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+    tv = _CountingListings()
+    this_set = tv.device_id
+    publish(["w1", "w2"], interval_seconds=3600)
+    await _a_frame_on(tv, settings, state, clock).tick()
+    tv.device_id, tv.refuse_uploads = None, True
+    wall = _a_frame_on(tv, settings, state, clock)
+    await wall.tick()
+    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+    await wall.tick()
+    refused = _uploads_of_no_set(settings.state_path)
+    assert refused, "no upload was sent while the set would not say"
+    assert all(content_id is None for _, content_id in refused)
+
+    tv.device_id, tv.refuse_uploads = this_set, False
+    listed = tv.listings
+    await _an_outage_and_the_set_back(wall, tv, clock)
+    assert tv.listings == listed + 1, "the set the uploads were sent toward was not listed once it said"
+    assert _uploads_of_no_set(settings.state_path) == [], "an upload that never landed stayed recorded"
+    assert not state.has_unplaced_uploads()
+
+    listed = tv.listings
+    for _ in range(3):
+        await _an_outage_and_the_set_back(wall, tv, clock)
+    assert tv.listings == listed, "the set coming back was listed again with nothing owed"
+
+
+async def test_uploads_of_no_set_a_listing_cannot_settle_cost_one_listing_a_process_not_one_a_connection(
+    settings, state: DisplayState, publish, clock
+):
+    """The uploads of a spell on a set that would not say landed, and the set, once it says, lists their ids with no
+    date: it cannot say whether they are the Player's, and they stay recorded with no set. Its coming back after each
+    later outage is not listed again on their account."""
+    from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+    tv = _CountingListings()
+    this_set = tv.device_id
+    publish(["w1", "w2"], interval_seconds=3600)
+    await _a_frame_on(tv, settings, state, clock).tick()
+    tv.device_id = None
+    wall = _a_frame_on(tv, settings, state, clock)
+    await wall.tick()
+    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+    await wall.tick()
+    landed = _uploads_of_no_set(settings.state_path)
+    assert landed, "nothing was uploaded while the set would not say"
+    assert all(content_id is not None for _, content_id in landed)
+
+    tv.device_id = this_set
+    tv.dates = {}
+    await _an_outage_and_the_set_back(wall, tv, clock)
+    assert sorted(_uploads_of_no_set(settings.state_path)) == sorted(landed), "a listing with no dates settled them"
+
+    listed = tv.listings
+    for _ in range(3):
+        await _an_outage_and_the_set_back(wall, tv, clock)
+    assert tv.listings == listed, "the set was listed again on each connection for uploads it cannot settle"

@@ -4,14 +4,14 @@ version: 1
 depends_on:
   - artifact: project-state
   - artifact: architecture
-last_validated: 2026-11-19
+last_validated: 2026-11-25
 ---
 
 # Observability Strategy — Arrt Player
 
 **What this covers.** What the Player says about itself, where it goes, and how
 an operator finds a failure from it. It describes the code as it stood on
-2026-11-19; every claim names the `file:symbol` it rests
+2026-11-25, after audit waves 2 and 3; every claim names the `file:symbol` it rests
 on.
 
 **Why it matters more here than usual.** The Player runs unattended and its only
@@ -60,14 +60,18 @@ the Player sends, and the rules both sides share:
    the panel is connected.
 6. **When the television at the Frame's address is a different set**, the journal
    says so once, with the set a short hash names, how many bindings were set
-   aside and how many of the new set's came back (`binding.set_changed`); when
-   the set will not say which it is, once (`tv.unidentified`), and again if the
-   wall goes on without it after fifteen minutes (`tv.unidentified_going_on`).
+   aside and how many of the new set's came back (`binding.set_changed`), and
+   how many pictures the set lists that the Player's records do not name and it
+   therefore leaves where they are (`tv.others_left_alone`, once per set in a
+   process); when the set will not say which it is, once (`tv.unidentified`), and
+   again if the wall goes on without it after fifteen minutes
+   (`tv.unidentified_going_on`).
    **The journal names a set by `set-` and the first eight hex digits of a
-   SHA-256 of its `device.duid`, never by the id** (`displays/frame.py:_known_as`,
-   which no line bypasses), because a journal is what gets pasted into an issue
-   in a public repository; the full id goes only to the server, in the client
-   heartbeat.
+   SHA-256 of its `device.duid`, never by the id** (`logs.py:known_as`, which
+   every line that names a set goes through, the wall's and the client
+   heartbeat's `client.identity_changed` alike), because a journal is what gets
+   pasted into an issue in a public repository; the full id goes to the server, in
+   the client heartbeat.
 
 ## Architecture
 
@@ -159,19 +163,20 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `client.worker_crashed` / `client.label_crashed` | ERROR (traceback) | `Supervisor._keep_running` | A worker raised; restarting after the backoff |
 | `client.worker_ended` / `client.label_ended` | ERROR | `Supervisor._keep_running` | A worker returned without being asked to |
 | `client.worker_retire_failed` / `client.label_retire_failed` | ERROR (traceback) | `Supervisor._keep_running` | A wall or label retired while its worker waited to restart was called once more to leave its output, and raised |
-| `client.identity_unreadable` / `client.identity_read` | WARNING / INFO | `client.FrameIdentity.refresh` | The Frame's device id could not be read, then could |
+| `client.identity_unreadable` / `client.identity_read` | WARNING / INFO | `client.FrameIdentity.refresh` | The Frame's device id could not be read, then could; the last one read is reported meanwhile. The read is one REST GET a minute, and these are said once per episode, not once a minute |
+| `client.identity_changed` | WARNING | `client.FrameIdentity.refresh` | The set answering at the Frame's address says another `device.duid` than the last one read (`output`, `set_now`, `set_was`, each a short hash, never the id): it is reported as the new one at once, said once per change |
 | **Client routes** (`pull.ClientPull`) | | | |
 | `client.unreachable` / `client.reachable` | WARNING / INFO | `ClientPull._report_unreachable`, `fetch` | `GET /client` got no answer, a timeout or a 5xx |
 | `client.refused` / `client.accepted` | ERROR / INFO | `ClientPull.fetch` | The server refused the client (with `status`) |
 | `client.document_refused` / `client.document_readable` | ERROR / INFO | `ClientPull.fetch` | A client document this reader will not act on |
 | `client.cache_unwritable` / `client.cache_writable` | ERROR / INFO | `ClientPull.fetch` | `.client.json` could not be written; the document is still followed |
 | `client.cache_unreadable` | WARNING | `ClientPull.cached` | The cached client document could not be read at start |
-| `client.heartbeat_refused` / `client.heartbeat_ok` | WARNING / INFO | `ClientPull.report` | The server refused the client heartbeat |
+| `client.heartbeat_refused` / `client.heartbeat_ok` | WARNING / INFO | `ClientPull.report` | The server did not take the client heartbeat (`status`): said once per episode. A refusal in the server's error form is held, sent again only when the report changes or after 300 s; any other answer (a `401`, `408`, `429`, a `5xx`, a body not in the server's form) is sent again at the next poll |
 | **A wall's pull** (`pull.Pull`) | | | |
 | `pull.started` | INFO | `Pull.run` | The wall's pull began, with `wall_id`, server, cache dir |
 | `pull.unreachable` / `pull.reachable` | WARNING / INFO | `Pull._report_unreachable`, `_report_reachable` | The feed route got no answer, a timeout or a 5xx |
 | `pull.refused` / `pull.accepted` | ERROR / INFO | `Pull._report_refused`, `_report_accepted` | 401 (token), 403 (not this client's wall), 404 at every major, or another status; once per status |
-| `pull.manifest_refused` / `pull.manifest_readable` | ERROR / INFO | `Pull._pull_manifest` | A feed the parser refuses; the cached one stays |
+| `pull.manifest_refused` / `pull.manifest_readable` | ERROR / INFO | `Pull._pull_manifest` | A feed the parser refuses, one that runs past 16 MiB, or one that stages a work twice; the cached one stays, and the next poll asks again |
 | `pull.media_failing` / `pull.media_ok` | WARNING / INFO | `Pull._hold_or_adopt`, `_media_settled` | A master could not be fetched in a way that may clear; the feed already cached is kept for up to `hold_seconds` (600) |
 | `pull.hold_ended` | WARNING | `Pull._hold_or_adopt` | The hold ran out: the feed is cached without the masters still missing (`work_ids`) and with no ETag, and they are asked for again every poll; said once per episode |
 | `pull.work_skipped` | WARNING | `Pull._skip_once` | A master 404s, fails its hash, runs past the bytes its feed declares, or has no size declared; that work is skipped (once per hash) |
@@ -206,13 +211,15 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `rotation.wall_unchanged` / `rotation.wall_recovered` | WARNING / INFO | `FrameDisplay._report_wall_unchanged`; `_wall`, a `frame._WaitedEpisode`, at `clear` | The set accepted a selection and displayed nothing (`art_mode`); said once, and its end once, whenever the wall's wait is cleared: a selection that took, or the set announcing a change of mode |
 | `binding.uploaded`, `binding.upload_failed` | INFO, WARNING | `FrameDisplay._upload` | A work uploaded to the set, or not |
 | `binding.orphaned` | WARNING | `FrameDisplay._rebind_or_reraise`, `_reconcile_with_the_set` | The set no longer lists a content id the store has |
-| `tv.unidentified` / `tv.identified` | WARNING / INFO | `FrameDisplay._set_would_not_say`, `_know_the_set` | **The set would not say which set it is** (a REST read of its device description failed or carried no `device.duid`): the wall uses none of its bindings on it and asks again on its own ladder, said once; then it said. Ends the pass, so it is not an outage (the heartbeat's `television_reachable` is `null`, not `false`) |
-| `tv.unidentified_going_on` | WARNING | `FrameDisplay._go_on_unidentified` | The set has not said for `IDENTITY_PATIENCE_SECONDS` (15 minutes), so the wall shows art on it from an empty store held in memory, uploading the work it shows and then the feed's other works one a pass, and **removing nothing**, until it says (then `tv.identified`, and a reconciliation removes those uploads). Said again after an outage, which starts the 15 minutes again |
-| `binding.set_adopted` | INFO | `FrameDisplay._met` | The store had recorded no set (written before schema 4), so the first one read is taken as the bindings' own (`set_now`); nothing is removed until one is recorded |
+| `tv.unidentified` / `tv.identified` | WARNING / INFO | `frame._IdentityReads.unanswered`, `answered` | **The set would not say which set it is** (a REST read of its device description failed or carried no `device.duid`): the wall uses none of its bindings on it and asks again on its own ladder, said once; then it said. Ends the pass, so it is not an outage (the heartbeat's `television_reachable` is `null`, not `false`) |
+| `tv.unidentified_going_on` | WARNING | `FrameDisplay._become` (entering `GoingOn`) | The set has not said for `IDENTITY_PATIENCE_SECONDS` (15 minutes), so the wall shows art on it from an empty store held in memory, uploading the work it shows and then the feed's other works one a pass, and **removing nothing**, until it says (then `tv.identified`, and a reconciliation takes those uploads off a set they were sent toward or that spoke on their connection, and off no other). Said again after an outage, which starts the 15 minutes again |
+| `binding.set_adopted` | INFO | `FrameDisplay._met` | The store had recorded no set (written before schema 4), so the first one read is taken as the bindings' own (`set_now`), and its bindings as uploads to it; nothing is removed until one is recorded |
 | `binding.set_changed` | WARNING | `FrameDisplay._met` | **The television at this address is not the one the bindings were made on**: they were set aside under that set (`set_was`, `set_now`, `set_aside`, `restored`), the wall starts on this set as on a first run, and the other set keeps the Player's pictures until it is met again |
 | `binding.retired` | INFO | `FrameDisplay._retire` | Works no adopted feed has named for 14 days of the wall running were retired (`retired`, `removed` images, `kept_by_the_set`) |
 | `binding.retirement_unconfirmed` | WARNING | `FrameDisplay._remove_orphans` | Whether the images of works due to retire were removed could not be established (`requested`); asked again next pass |
-| `tv.orphans_removed`, `tv.orphan_removal_unconfirmed` | INFO, WARNING | `FrameDisplay._remove_orphans` | Unaccounted images removed from the set, or the outcome unknown |
+| `tv.orphans_removed`, `tv.orphan_removal_unconfirmed` | INFO, WARNING | `FrameDisplay._remove_orphans` | Images this Player put on the set, which its upload records name and no binding wants, removed (`removed`, `surviving`), or the outcome unknown (`requested`) |
+| `tv.others_left_alone` | INFO | `FrameDisplay._say_what_is_left_alone` | The set lists pictures the Player's upload records do not name (`left_alone`, `set_now`): the household's, an older Player's, or this Player's own that its records cannot match. They are left where they are; said once per set in this process, at the first reconciliation that finds any |
+| `tv.markers_unconfirmed` | WARNING | `FrameDisplay._say_what_the_set_does_not_confirm` | The set lists pictures this Player recorded putting there without the `image_date` each was sent with, or with another (`unconfirmed`, `set_now`): a set that does not echo the marker, or a firmware that stopped. A picture is the Player's only with its marker, so none of them is removed and every later one stays too; said once per set in a process, at the first reconciliation that finds any (`DisplayState.unconfirmed_on`) |
 | `tv.removal_incomplete` | WARNING | `SamsungTv.remove` | Some images survived a removal |
 | `tv.upload_misreported` | WARNING | `SamsungTv.upload` | The library's upload reply disagreed with what the set holds |
 | `tv.selection_unreadable` | WARNING | `SamsungTv._on_image_selected` | An `image_selected` announcement could not be read |
@@ -223,10 +230,10 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `brightness.set` | INFO | `FrameDisplay._apply_brightness` | Brightness set from the sun's angle |
 | **HDMI** (`kms.py:KmsOutput`, `displays/screen.py:ScreenDisplay`, `displays/screen_brightness.py:ScreenBrightness`; in slideshow mode the `screen.brightness_*` events come from the slideshow's screen, with `wall_id` `slideshow`) | | | |
 | `screen.absent` / `screen.returned` | WARNING / INFO | `KmsOutput._gone`, `_draw` | No screen on the connector, then one (drawn at once) |
-| `screen.draw_failed` / `screen.draw_recovered` | WARNING / INFO | `ScreenDisplay.show` | The output refused a picture |
+| `screen.draw_failed` / `screen.draw_recovered` | WARNING / INFO | `ScreenDisplay._put_up` | The output refused a picture; the display asks for it again on each following pass until the output takes it |
 | `screen.blanked` / `screen.blank_failed` | INFO / WARNING | `displays/screen.go_dark` | A wall that left an output (`wall_id`, `output`) had its screen drawn black, or the device refused and the screen keeps its last picture |
 | `screen.refresh_failed` / `screen.refresh_recovered` | WARNING / INFO | `ScreenDisplay._refresh` | The per-poll redraw failed |
-| `rotation.selected` | INFO | `ScreenDisplay.show` | A work drawn (`picture_path`) |
+| `rotation.selected` | INFO | `ScreenDisplay._put_up` | A work drawn (`picture_path`), also when a refused picture is drawn on a later pass |
 | `screen.brightness_set` | INFO, or WARNING when `read_back` differs | `ScreenBrightness._said_set` | The screen's brightness set from the sun (`output`, `brightness`, `read_back`, `solar_angle`); written only when the value changes |
 | `screen.brightness_unsupported` | INFO | `ScreenBrightness._said_unsupported` | A screen with no brightness control, or a scale of 0 (`reason`); said once, and the screen left alone until it is replaced |
 | `screen.brightness_no_answer` / `screen.brightness_answering` | INFO / INFO | `ScreenBrightness._no_answer`, `_answered` | Nothing acknowledged the DDC/CI address (no DDC/CI, or asleep); said once, asked again each interval, and said again when it answers |
@@ -236,7 +243,7 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `panel.type_scale` | INFO | `__main__.label_surface` | The derived type size, floor and border, once at start |
 | `panel.unavailable` | WARNING | `__main__.label_panel` | A configured panel will not open, has no text stack, or has no viewing distance; walls unaffected |
 | `panel.size_disagrees` | WARNING | `EpaperSurface._warn_if_the_panel_disagrees_about_its_size` | The driver reports a size other than `.env`'s |
-| `panel.close_failed` | WARNING | `EpaperSurface.close` | The panel's power-down raised |
+| `panel.close_failed` | WARNING | `EpaperSurface.close` | The panel's power-down raised (`output`, the panel's name, when the surface was built for one) |
 | `label.renderer_started` | INFO | `LabelRenderer.run` | A renderer captions a wall (`label_id`, `output`, `wall_id`) |
 | `label.renderer_retired` | INFO | `LabelRenderer.run` | A label output was unmapped and its renderer, called once more already stopped, leaves the panel blank without starting or fetching anything |
 | `label.no_panel` | ERROR | `__main__.run_label` | A label is mapped to an output this client holds no panel for (`label_id`, `output`); said once and not drawn, never on another panel |
@@ -251,7 +258,7 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `label.document_refused` / `label.document_readable` | ERROR / INFO | `LabelPull.fetch` | A label document this reader will not use |
 | `label.drawn` | INFO | `LabelPanel.draw` | The only positive label line: the panel captions a work |
 | `label.blanked`, `label.card`, `label.absent` | INFO | `LabelPanel.draw` | Blank on purpose (with `display_state`), the wall's card, or a work with no label text |
-| `label.close_abandoned` | WARNING | `LabelPanel.close` | A draw was still in the driver after the label budget when the panel was to be closed; the panel is left open |
+| `label.close_abandoned` | WARNING | `LabelPanel.close` | A draw was still in the driver after the label budget when the panel was to be closed; the panel is left open (`output`) |
 | `label.failed` / `label.recovered` | WARNING / INFO | `LabelPanel._would_not_take_it`, `draw` | A drawing did not reach the panel (refused, raised, still drawing, or over the 15 s budget) |
 | `label.unusable` | WARNING | `LabelPanel.draw` | The geometry leaves no usable area; once per episode |
 | `label.shrunk` | WARNING | `LabelPanel.draw` | Identifying facts set below the legibility floor (`floor_px`, `smallest_px`) |
@@ -337,8 +344,11 @@ the server, so a manifest backoff never delays it.
 **The client heartbeat**, one per client, built by `client.client_heartbeat` and
 sent by `Supervisor._report_outputs` on each client poll when the outputs changed
 or 60 s have passed. It carries `reported_at`, `outputs` (each `name`, `kind`,
-`connected`, `screen`, and `identity` for a Frame once read) and, when the client
-has a panel, `label_outputs` (each `name`, `kind`, `connected`, `size`).
+`connected`, `screen`, and `identity` for a Frame once read), when the client
+has a panel, `label_outputs` (each `name`, `kind`, `connected`, `size`), and, when
+the settings page can be reached from the server's network, `settings_url` (absent,
+never null, for a page bound to loopback; a change of address alone sends the
+report again). A report the server refused is held (`client.heartbeat_refused`).
 
 - An HDMI connector with nothing plugged in is `connected: false`
   (`client.hdmi_outputs`).
@@ -350,12 +360,13 @@ has a panel, `label_outputs` (each `name`, `kind`, `connected`, `size`).
   one label output `file-label-0`, kind `epaper` because the contract's label
   outputs have no other (`__main__.player_outputs`, `displays/file_output.py`).
   It builds no `FrameIdentity`.
-- **The Frame's identity is read once for this report and never again, while the
-  wall's worker reads it on every connection. Known limit, not fixed:** a
-  different set answering at the same address without a Player restart is
-  followed by the wall's store (`binding.set_changed`), and the client heartbeat
-  goes on reporting the first set's `device.duid` until the Player restarts. The
-  server then places walls on the old identity (`client.FrameIdentity`).
+- **The Frame's identity is read for this report once per heartbeat interval**,
+  one REST GET a minute with no art channel and no key, and the last one read is
+  kept through a failed read, so a different set answering at the same address is
+  reported within an interval without a restart (`client.identity_changed`,
+  `client.FrameIdentity`). The wall's worker reads it separately, on every
+  connection. Whether that read reaches the set the art channel is open on is the
+  operator's to measure (`build-plan-audit-wave-3.md` § Operator's checklist).
 - A panel is `connected: false` when it would not open or its last draw failed
   (`label_renderer.LabelPanel.report`). **Why** it would not open is not sent:
   `LabelPanel.error` is held and never reported. The journal's

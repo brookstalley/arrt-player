@@ -4,7 +4,7 @@ version: 1
 depends_on:
   - artifact: product-brief
   - artifact: data-model
-last_validated: 2026-11-19
+last_validated: 2026-11-25
 ---
 
 # Security Model — Arrt Player
@@ -268,7 +268,7 @@ reach outside the cache or onto another host with the token.
 |---|---|---|
 | Client document | `client.py:parse_client_document` | Not JSON, not an object, no `client_id`/`name`, `walls` or `labels` not a list, any entry missing a key. Refused whole; walls keep running. |
 | Wall id from the document | `config.py:ClientSettings.wall` (`PLAIN_COMPONENT`) | Not one plain path component: `..`, `/`, a leading dot; or a name the cache directory reserves for its own files (derived from the constants that name them). The wall is not started. |
-| Manifest (feed) | `manifest.py:parse`, `_feed`, `_work`, `_slot`, `_scene`, `_instant` | Wrong major, malformed, a rule of Arrt's `player-contract.md` § Rules a schema cannot state broken, an instant without an offset, a media hash not 64 lowercase hex. Last good feed kept. |
+| Manifest (feed) | `manifest.py:parse`, `_feed`, `_work`, `_slot`, `_scene`, `_instant` | Wrong major, malformed (a work staged twice included), a rule of Arrt's `player-contract.md` § Rules a schema cannot state broken, an instant without an offset, a media hash not 64 lowercase hex, or a body past 16 MiB (`pull.py:MANIFEST_MAX_BYTES`). Last good feed kept. |
 | Master bytes | `pull.py:Pull._cache_media`, `_stream_to` | SHA-256 does not match the feed, or the body runs past the bytes the feed declares for it, or the feed declares none. Discarded or not asked for; a master is never held whole in memory. |
 | Client and label documents | `pull.py:DOCUMENT_MAX_BYTES` | Larger than 1 MiB. Refused whole. |
 | Master image | `compose.py:compose` | Pillow cannot decode it, or its decompression-bomb guard fires (`Image.DecompressionBombError` is caught). |
@@ -310,7 +310,8 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   and so is the read of the set's identity (`SamsungTv.read_identity`: one GET of
   the device description through its own short-lived client, no pairing and no
   art channel), which the wall sends on each new connection **whatever the set is
-  showing, a programme included**, because it changes nothing on the set.
+  showing, a programme included**, because it changes nothing on the set, and
+  which the client sends once a minute for its heartbeat.
   No test asserts the absence of a key press in `src/`; the norm index records
   that the daemon's power guard arrives with Player power control.
   `tools/power_probe.py` presses power and refuses to without
@@ -325,15 +326,40 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   (`samsung-tv-state-findings.md` § What works in each state). Connecting and
   listing are reads and are not held. Whether a held write would have disturbed a
   programme is unmeasured, and the gate does not find out.
-- **It deletes from the set every user upload it cannot account for.**
-  `FrameDisplay._remove_orphans` removes every content id in `MY-C0002`
-  (`tv/client.py:UPLOADED_CATEGORY`, "my-pictures") that no row of this wall's
-  `tv_binding` names. A fresh store therefore clears the category. Whatever else
-  shares that category on the set is removed with it. **That holds for a
-  television the Player meets with no record of it, which includes a different
-  set at the Frame's address: the uploaded-pictures category is cleared, and the
-  pictures the household put there go with the Player's own.** The settings page
-  says so before a new address is saved and after.
+- **It removes from the set only what it recorded uploading.** Every upload is
+  recorded on the device's store before it is sent, with the set it goes to and
+  the `image_date` it carries (`tv_upload`; `DisplayState.record_sending`;
+  `tv/client.py:upload_marker`), and `FrameDisplay._remove_orphans` removes, of
+  what the set lists in `MY-C0002` (`tv/client.py:UPLOADED_CATEGORY`,
+  "my-pictures"), only the pictures those records name there
+  (`DisplayState.uploads_on`) that no binding in use wants or that are due to
+  retire. Everything else the set lists stays: **the household's own pictures,
+  those an older Player put up and never recorded, and any of this Player's own
+  its records cannot match.** That holds for a television the Player meets with no
+  record of it, which includes a different set at the Frame's address, and for a
+  store that has just been deleted. The journal says once per set, in each
+  process, how many it leaves (`tv.others_left_alone`), and the settings page
+  says so before a new address is saved and after. A picture is the Player's on a
+  set when a record of that set's holds its id with the date the listing shows
+  equal to the marker the upload carried, or, for an upload whose id was never
+  learned, when it is the one listed picture carrying that marker; or, for a
+  record carried from a binding an older store wrote, which has no marker, when
+  the listing shows its id (the date shown is then kept as its marker). A
+  household picture the set stamps with the same second as an upload of the
+  Player's on that set is the residue; so would be one under a carried record's
+  id, were the set to give a removed picture's id to a new one before the first
+  listing after the upgrade (not measured). **An upload whose record cannot be written is not
+  sent** (`StoreFault`), because a picture with no record is one the Player could
+  never take off. **The rule rests on the set echoing the marker**, measured once,
+  on one upload (`platform-and-dependency-findings.md`); on a set that does not,
+  the Player's records never match and nothing it uploads there is removed, which
+  the journal says once per set in a process (`tv.markers_unconfirmed`). The
+  owner ruled this on 2026-11-19 ("yes to recommendations") and accepted its costs
+  on 2026-11-25: the pictures an older Player put up stay until a person deletes
+  them on the set (no tool of this repository removes a picture it did not
+  upload), and a rollback across it needs the
+  owner's say-so each time, because the release before it sweeps by the old rule
+  (`deploy/README.md`, the runbook's § Going back).
 - **A binding is used only on the set it was made on.** A set's content ids are its
   own, so an id recorded on one set names some other picture on the next one:
   selecting it would show a stranger's picture, and removing it delete one. The
@@ -361,16 +387,28 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   held in memory, uploading the work it shows and then the feed's other works
   one a pass, and removing nothing (`tv.unidentified_going_on`). An outage drops
   that store and starts the fifteen minutes again, so a connection that flaps
-  uploads nothing more. Once the set says, the wall returns to the device's
-  store, with its own bindings, and the reconciliation that leaving the store in
-  memory owes removes what it uploaded: **never the picture on the wall before
-  another has been selected**, because what a Frame does when the image it shows
-  is deleted has never been measured. The same holds for every removal of an
-  image the Player knows is up.
-  **Known limit, recorded and not fixed:** a set that opens its art channel and
+  uploads nothing more. Those uploads are recorded on the device's store with no
+  set, and once the set says, the wall returns to the device's store, with its own
+  bindings, and the reconciliation that leaving the store in memory owes removes
+  them from that set **only if it is one they were sent toward** (the set the
+  store last recorded, listed at the address they went to) **or the one that said
+  which it is on the connection they went on**, found by id and marker: **never
+  the picture on the wall before another has been selected**, because what a
+  Frame does when the image it shows is deleted has never been measured. The same
+  holds for every removal of an image the Player knows is up. A record of no set
+  is never matched on any other set, by id or by marker, whatever a picture there
+  carries, because the address may reach another set before this connection is
+  seen to have gone. **A failure that may have taken the connection without
+  ending the pass** (an upload's read-back, an art-mode read) **starts a new
+  spell** with the same store in memory, so a set heard from on the next
+  connection is never taken as the one the earlier uploads went to.
+  **Known limits, recorded and not fixed:** a set that opens its art channel and
   never gives its `device.duid` gains one theme of the store in memory's copies
-  per outage and its fifteen minutes, and nothing removes them, because a
-  removal needs a store that records the connected set. What would retire it is
+  per outage and its fifteen minutes, and nothing removes them until a set they may
+  be on says. Copies also stay for good when the set turns out to be a third one,
+  when the store knew no set and the spell was lost, when a restart lands on
+  another set, and when the set does not echo the marker; and a record of one set
+  stays as a row after the Frame's address changes. What would retire the first is
   the measurement of whether any set does this (`samsung-tv-state-findings.md` § What is still owed, item 8); no
   cap is built for it. Held by `tests/test_bindings.py::TestABindingIsUsedOnlyOnTheSetItWasMadeOn`
   and `::TestASetThatWillNotSayWhichItIs`.
@@ -381,13 +419,14 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
 ## Data Privacy
 
 - **No personal data.** The Player stores artworks' ids, images and label text,
-  its own settings, and per-set content ids and each set's `device.duid`
-  (`data-model.md`). A `duid` is a device's id, not the address or the MAC the
+  its own settings, and per-set content ids and each set's `device.duid`, and a
+  record of each upload it sent with the `image_date` it carried (`data-model.md`). A `duid` is a device's id, not the address or the MAC the
   same reply carries, neither of which the Player reads or records; the journal
-  names a set by a short hash of it, never the id (`displays/frame.py:_known_as`).
+  names a set by a short hash of it, never the id (`logs.py:known_as`).
 - **What leaves the device in Arrt mode**, all to the server: the client heartbeat (outputs,
-  their screen sizes, and the Frame's `device.duid`;
-  `client.py:client_heartbeat`, `FrameIdentity`) and each wall's heartbeat
+  their screen sizes, the Frame's `device.duid`, and the address of the Player's
+  settings page, left out when the page is bound to loopback;
+  `client.py:client_heartbeat`, `settings_url`, `FrameIdentity`) and each wall's heartbeat
   (`heartbeat.py:Health.document`, including `last_error` as free text from the
   journal). Nothing goes to any third party.
 - **What leaves the device in slideshow mode**: the listing request and the
@@ -523,7 +562,7 @@ timeout.
   (`platform-and-dependency-findings.md`). Its TLS and token handling are as
   described above and not the Player's to change.
 - The contract package is taken at a released tag (`[tool.uv.sources]`
-  `arrt-contract`, `contract-v1.0.0`); `CLAUDE.md` forbids patching it.
+  `arrt-contract`, `contract-v1.3.0`); `CLAUDE.md` forbids patching it.
 - Everything else resolves through `uv.lock`. No provenance policy beyond the
   lockfile, as in Arrt § Supply Chain.
 

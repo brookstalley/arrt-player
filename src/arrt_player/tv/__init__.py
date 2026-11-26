@@ -22,6 +22,7 @@ from arrt_player.tv.client import (
     TvRemovalUnconfirmed,
     TvUnavailable,
     TvUploadFailed,
+    upload_marker,
 )
 
 __all__ = [
@@ -39,4 +40,5 @@ __all__ = [
     "TvRemovalUnconfirmed",
     "TvUnavailable",
     "TvUploadFailed",
+    "upload_marker",
 ]

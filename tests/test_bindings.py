@@ -1,23 +1,28 @@
 """What this television holds, what this device believes, and the gap between them.
 
-Two defects shape everything here. The 2024 loader recorded a successful upload
+Two facts shape everything here. The 2024 loader recorded a successful upload
 with no content id, so a failure read as a success; and the television's single
-user-upload category means anything this device cannot account for is an image
-nobody will ever remove if this process does not.
+user-upload category holds the household's own pictures beside the Player's, so
+the Player removes only what it recorded uploading to that set. A copy it sent
+without a record is one it will never remove, which is why an upload is recorded
+before it is sent and not sent when that record cannot be written.
 """
 
+import hashlib
 import logging
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from fake_tv import ours_on_the_set
 from fakes import FakeTv
 from PIL import Image
 
-from arrt_player.displays.frame import frame_wall
+from arrt_player.displays.frame import GoingOn, frame_wall
 from arrt_player.manifest import Watcher
 from arrt_player.state import DisplayState, UploadStatus
+from arrt_player.tv import TvUnavailable
 from arrt_player.wall import Wall
 
 
@@ -287,23 +292,72 @@ class TestUploading:
 
 
 class TestOrphans:
-    async def test_an_upload_the_binding_table_cannot_account_for_is_removed(self, daemon: Wall, tv: FakeTv, publish, caplog):
-        """A fresh install clears the set, and that is the correct behaviour.
+    async def test_an_upload_the_player_has_no_record_of_is_left_on_a_set_it_meets_fresh(
+        self, daemon: Wall, tv: FakeTv, publish, caplog
+    ):
+        """The owner's ruling: the Player removes from a television only the pictures it recorded uploading.
 
-        Images uploaded by a previous generation are not assets to adopt: nothing
-        joins them to a work, so adopting one would bind a work to a picture that
-        is not the render its manifest entry names.
+        A fresh install meets a set holding the household's own uploads, one of
+        them stamped with a date: none is removed, none is adopted as a work's
+        picture, and the journal says once how many it leaves alone.
         """
-        tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
-        tv.holding["MY-LEGACY-2"] = Path("/gone/legacy-2.jpg")
+        tv.holding["MY-LEGACY-1"] = Path("/the-households/legacy-1.jpg")
+        tv.holding["MY-LEGACY-2"] = Path("/the-households/legacy-2.jpg")
+        tv.dates["MY-LEGACY-2"] = "2026:06:21 12:00:00"
         publish(["w1"])
 
         with caplog.at_level(logging.INFO):
             await daemon.tick()
+            publish(["w1"])
+            await daemon.tick()
 
-        assert "MY-LEGACY-1" not in tv.holding
-        assert "MY-LEGACY-2" not in tv.holding
-        assert tv.removed == [("MY-LEGACY-1", "MY-LEGACY-2")]
+        assert {"MY-LEGACY-1", "MY-LEGACY-2"} <= set(tv.holding), "a picture the Player did not put there was removed"
+        assert tv.removed == []
+        assert not _store_events(caplog, "tv.orphans_removed")
+        left_alone = _store_events(caplog, "tv.others_left_alone")
+        assert [record.left_alone for record in left_alone] == [2], "the pictures left alone were not said once"
+
+    async def test_a_set_that_stops_listing_the_date_an_upload_carried_is_said_once(self, settings, clock, publish, caplog):
+        """A set whose listing drops or rewrites `image_date` (a firmware that does not echo it) leaves every
+        picture of the Player's there for good, because a picture is the Player's only with its marker. The
+        journal says so once per set in a process, with how many of the Player's recorded pictures it cannot
+        confirm, apart from the household's pictures it leaves alone."""
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.dates.pop(on_the_set["w1"])  # listed with no date
+        tv.dates[on_the_set["w2"]] = "2020:01:01 00:00:00"  # listed with another
+        tv.holding["MY-F0099"] = HOUSEHOLDS
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            # One the set lists with its own marker, as a set that echoes it does: not counted.
+            ours_on_the_set(tv, store, "MY-F0077", Path("/a-previous-render.jpg"))
+            wall = _a_frame(settings, tv, store, clock)
+            for order in (["w2", "w1"], ["w1", "w2"], ["w2", "w1"]):
+                publish(order, interval_seconds=3600)
+                await wall.tick()
+                clock.advance(1)
+
+        said = _store_events(caplog, "tv.markers_unconfirmed")
+        assert [(record.unconfirmed, record.set_now) for record in said] == [
+            (2, f"set-{hashlib.sha256(THIS_SET.encode()).hexdigest()[:8]}")
+        ], "a set not echoing the upload's date was not said once, with the Player's own pictures it cannot confirm"
+        assert said[0].levelno == logging.WARNING
+        assert set(on_the_set.values()) | {"MY-F0099"} <= set(tv.holding)
+        assert "MY-F0077" not in tv.holding, "the picture listed with its marker was not taken for the Player's"
+
+    async def test_an_upload_the_player_has_no_record_of_is_left_on_a_set_it_has_a_store_for(self, settings, clock, publish):
+        """The same on a set the wall has lived on: the household adds a picture there, and it stays."""
+        tv = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, tv)
+        tv.holding["MY-F0099"] = HOUSEHOLDS
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w2", "w1"], interval_seconds=3600)
+            await wall.tick()
+
+        assert "MY-F0099" in tv.holding, "the household's picture was removed from a set the Player has a store for"
+        assert tv.removed == []
 
     async def test_a_work_the_manifest_still_names_is_never_removed(self, daemon: Wall, tv: FakeTv, publish, clock):
         publish(["w1", "w2"], interval_seconds=10)
@@ -383,10 +437,12 @@ class TestOrphans:
         assert wait == settings.tv_retry_min_seconds, "a refusal the set could not explain was not treated as an outage"
         assert state.binding_for("w2").tv_content_id == content_id, "a live binding was thrown away"
 
-    async def test_an_unconfirmable_removal_is_reported_as_unknown_and_retried(self, daemon: Wall, tv: FakeTv, publish, caplog):
+    async def test_an_unconfirmable_removal_is_reported_as_unknown_and_retried(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, caplog
+    ):
         """The library discards the reply to a removal, so claiming either outcome
         would be a guess. Unknown is reported as unknown."""
-        tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+        ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
         tv.removal_unconfirmable = True
         publish(["w1"])
 
@@ -954,7 +1010,7 @@ class TestAWorkNobodyHangsLeavesTheSet:
         left = await _a_theme_then_another(daemon, tv, publish, state)
         clock.advance(15 * DAY)
         await daemon.tick()  # the retirement falls due
-        tv.holding["MY-LEGACY-1"] = Path("/gone/legacy-1.jpg")
+        ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
         removals = len(tv.removed)
 
         with caplog.at_level(logging.INFO):
@@ -1109,7 +1165,7 @@ class TestTheStoreKeepsWhenAWorkWasLastNamed:
             assert binding.last_named_at == clock.as_clock().now()
         with sqlite3.connect(settings.state_path) as connection:
             assert connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,)
-        assert SCHEMA_VERSION == 4
+        assert SCHEMA_VERSION == 5
 
     def test_the_wall_time_a_store_counted_survives_reopening_and_a_new_row_is_named_at_it(self, settings, clock):
         with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
@@ -1537,9 +1593,9 @@ class TestASetThatWillNotSayWhichItIs:
     async def test_a_schema_2_store_opens_through_both_migrations_and_sends_no_removal_until_the_set_says(
         self, settings, clock, publish
     ):
-        """Two releases back, one file: 2 to 3 names every row at the upgrade (chunk 06), 3 to 4 records no set
-        (this chunk). So the rows are kept and none is due, the store knows no set, and on a set that will not say,
-        through its patience and twenty days beyond, nothing is removed."""
+        """Two releases back, one file: 2 to 3 names every row at the upgrade, 3 to 4 records no set. So the rows are
+        kept and none is due, the store knows no set, and on a set that will not say, through its patience and twenty
+        days beyond, nothing is removed."""
         from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
         from arrt_player.state.store import SCHEMA_VERSION
 
@@ -1588,7 +1644,8 @@ class TestASetThatWillNotSayWhichItIs:
             for _ in range(3):
                 clock.advance(IDENTITY_PATIENCE_SECONDS / 2)
                 await wall.tick()
-            assert store.last_selected_work_id == "w1", "the store in memory wrote to the device's store"
+            # Forgotten when the store in memory first changed the wall, and written by nothing since.
+            assert store.last_selected_work_id is None, "the device's store still names a work the set no longer shows"
 
         assert tv.selected, "the wall believed the picture its own store last put up was on a set it could not name"
         assert "MY-F0011" not in tv.selected
@@ -1720,9 +1777,410 @@ class TestASetThatWillNotSayWhichItIs:
 
         assert len(_store_events(caplog, "binding.set_changed")) == 1, "the change of set was not said once"
         assert another.removed, "the reconciliation a change of set owes was lost to the fault"
-        assert "MY-F0011" not in another.holding
+        assert "MY-F0011" in another.holding, "the household's own picture was removed"
         assert not any(removing_what_it_displays), "the picture the store in memory put up was removed while shown"
-        assert not set(another.holding) - accounted, f"{sorted(set(another.holding) - accounted)} stayed on the set"
+        assert set(another.holding) - accounted == {"MY-F0011"}, f"{sorted(set(another.holding) - accounted)} on the set"
+
+
+# -- one phase of the wall with respect to the set -----------------------------------
+#
+# Which set the wall is on is one of four phases (`displays.frame.SetPhase`), and
+# what the wall uses, says and counts follows from it. Each sequence below
+# drives a wall through what the set and the store can do between passes, and
+# after every pass checks that what the wall holds is the phase it is in and
+# nothing between two.
+
+
+def _the_set_says(device_id: str | None):
+    def event(tv: FakeTv, store: DisplayState, publish, clock):
+        tv.device_id = device_id
+        clock.advance(400)  # past the identity read's longest wait
+
+    return event
+
+
+def _the_patience_runs_out(tv: FakeTv, store: DisplayState, publish, clock):
+    from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+    clock.advance(IDENTITY_PATIENCE_SECONDS)
+
+
+def _an_outage(tv: FakeTv, store: DisplayState, publish, clock):
+    tv.unavailable = True
+    clock.advance(30)
+    publish(["w2", "w1"], interval_seconds=3600)  # a republish, so the pass asks the set something
+
+    def after():
+        tv.unavailable = False
+        publish(["w1", "w2"], interval_seconds=3600)
+
+    return after
+
+
+def _an_upload_refused(tv: FakeTv, store: DisplayState, publish, clock):
+    tv.refuse_uploads = True
+    clock.advance(30)
+    publish(["w1", "w2", "w3"], interval_seconds=3600)
+
+    def after():
+        tv.refuse_uploads = False
+
+    return after
+
+
+def _a_store_fault(tv: FakeTv, store: DisplayState, publish, clock):
+    clock.advance(30)
+    armed = _arm(store, lambda: _sqlite_error("SQLITE_BUSY", "database is locked"), times=1)
+    return lambda: _disarm(store, armed)
+
+
+def _says_and_forgetting_the_wall_fails(device_id: str):
+    """The set says which it is, and the store cannot forget the work on the wall once, as when leaving the store in memory."""
+
+    def event(tv: FakeTv, store: DisplayState, publish, clock):
+        armed = _arm(
+            store,
+            lambda: _sqlite_error("SQLITE_BUSY", "database is locked"),
+            failing=lambda statement: statement.startswith("DELETE FROM daemon_state WHERE key = ?"),
+            times=1,
+        )
+        _the_set_says(device_id)(tv, store, publish, clock)
+        return lambda: _disarm(store, armed)
+
+    return event
+
+
+_BETWEEN_PASSES = {
+    "this set says": _the_set_says(THIS_SET),
+    "another set says": _the_set_says(ANOTHER_SET),
+    "the set will not say": _the_set_says(None),
+    "the patience runs out": _the_patience_runs_out,
+    "an outage": _an_outage,
+    "an upload refused": _an_upload_refused,
+    "a store fault": _a_store_fault,
+    "this set says and forgetting the wall fails": _says_and_forgetting_the_wall_fails(THIS_SET),
+    "another set says and forgetting the wall fails": _says_and_forgetting_the_wall_fails(ANOTHER_SET),
+}
+
+
+class _ThePhaseIsOneOfFour:
+    """After each pass: what the wall holds is its phase's, and its lines and its count followed the phase."""
+
+    def __init__(self, wall: Wall, tv: FakeTv, store: DisplayState, clock, caplog) -> None:
+        self._display, self._tv, self._store, self._clock, self._caplog = wall._display, tv, store, clock, caplog
+        self._seen = None
+        self._connects, self._connected_at = 0, None
+        self._going_on_lines = 0
+        self._recorded = store.tv_identity
+        self._set_changed_lines = 0
+        self._first_pass_at = None
+        #: Every phase the wall was found in, so a sequence that never reached one is seen not to test it.
+        self.phases: set[str] = set()
+        #: How many times the wall was seen leaving a going on, each with its store in memory found closed.
+        self.left_going_on = 0
+
+    def after_a_pass(self, history: list[str]) -> None:
+        from arrt_player.displays.frame import GoingOn, Identified, NotYetKnown, Withheld
+
+        now = self._clock.as_clock().monotonic()
+        where = " -> ".join(history)
+        phase = self._display._phase
+        if self._first_pass_at is None:
+            self._first_pass_at = now
+        if self._tv.connects != self._connects:
+            self._connects, self._connected_at = self._tv.connects, now
+
+        assert isinstance(phase, NotYetKnown | Identified | Withheld | GoingOn), where
+        self.the_store_in_memory_is_let_go(phase, where)
+        self._what_the_phase_holds(phase, now, where)
+        self._what_the_journal_says(phase, now, where)
+        assert self._store.feed_seconds == pytest.approx(
+            now - self._first_pass_at
+        ), f"{where}: the device's store counted {self._store.feed_seconds} s of a wall that ran {now - self._first_pass_at} s"
+        self.phases.add(type(phase).__name__)
+        self._seen, self._recorded = phase, self._store.tv_identity
+
+    def the_store_in_memory_is_let_go(self, phase, where: str) -> None:
+        """Whatever ended a going on, its store in memory is closed: using it raises.
+
+        A going on that carries on in a new spell, its connection having maybe
+        gone, keeps its store in memory open and in use, and is a new spell.
+        """
+        from arrt_player.displays.frame import GoingOn
+
+        if isinstance(self._seen, GoingOn) and isinstance(phase, GoingOn) and phase.scratch is self._seen.scratch:
+            assert phase is self._seen or phase.spell != self._seen.spell, f"{where}: a new going on kept the old spell"
+        elif isinstance(self._seen, GoingOn) and phase is not self._seen:
+            try:
+                self._seen.scratch._connection.execute("SELECT 1")
+            except sqlite3.ProgrammingError:
+                self.left_going_on += 1
+            else:
+                pytest.fail(f"{where}: the store in memory of the going on that ended is still open")
+
+    def _what_the_phase_holds(self, phase, now: float, where: str) -> None:
+        """The store in use, the set the store records, and the patience, each the phase's."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, GoingOn, Identified, Withheld
+
+        if isinstance(phase, GoingOn):
+            assert self._display._state is phase.scratch, f"{where}: going on without the store in memory in use"
+            assert phase.scratch is not self._store
+        else:
+            assert self._display._state is self._store, f"{where}: {type(phase).__name__} with the store in memory in use"
+        if isinstance(phase, Identified):
+            assert self._store.tv_identity == phase.identity, f"{where}: identified as a set the store did not record"
+        if isinstance(phase, Withheld):
+            assert self._connected_at <= phase.since <= now, f"{where}: the patience did not start with this connection"
+            assert now - phase.since < IDENTITY_PATIENCE_SECONDS, f"{where}: still waiting past the patience"
+
+    def _what_the_journal_says(self, phase, now: float, where: str) -> None:
+        """The going-on line once per going-on, the episode of a set not saying open while it does not, every change said."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, GoingOn, Identified, Withheld
+
+        going_on = len(_store_events(self._caplog, "tv.unidentified_going_on"))
+        if isinstance(phase, GoingOn) and not isinstance(self._seen, GoingOn):
+            assert going_on > self._going_on_lines, f"{where}: went on from the store in memory without saying so"
+            assert now - self._connected_at >= IDENTITY_PATIENCE_SECONDS, f"{where}: went on inside the patience"
+        elif isinstance(phase, GoingOn):
+            assert going_on == self._going_on_lines, f"{where}: said it went on twice in one going-on"
+
+        unidentified = len(_store_events(self._caplog, "tv.unidentified"))
+        identified = len(_store_events(self._caplog, "tv.identified"))
+        if isinstance(phase, Withheld | GoingOn):
+            assert unidentified == identified + 1, f"{where}: {type(phase).__name__} outside the episode of a set not saying"
+        if isinstance(phase, Identified):
+            assert unidentified == identified, f"{where}: identified with the episode of a set not saying still open"
+
+        set_changed = len(_store_events(self._caplog, "binding.set_changed"))
+        if self._recorded is not None and self._store.tv_identity != self._recorded:
+            assert set_changed == self._set_changed_lines + 1, f"{where}: the store moved to another set unsaid"
+        self._going_on_lines, self._set_changed_lines = going_on, set_changed
+
+
+#: How each sequence begins, and the phase the wall is in once it has: on the set it met, waiting for a set
+#: to say, and going on from the store in memory, with no set recorded and with one.
+_OPENINGS = {
+    "a wall on the set it met": ((THIS_SET,), "Identified"),
+    "a wall waiting for the set to say": ((None,), "Withheld"),
+    "a wall going on from the store in memory": ((None, "the patience runs out"), "GoingOn"),
+    "a wall going on from the store in memory after it met its set": (
+        (THIS_SET, "an outage", "the set will not say", "the patience runs out"),
+        "GoingOn",
+    ),
+}
+
+
+class TestTheWallIsInOnePhaseOfFour:
+    @pytest.mark.parametrize("first", sorted(_BETWEEN_PASSES))
+    @pytest.mark.parametrize("opening", sorted(_OPENINGS))
+    async def test_every_sequence_of_what_the_set_and_the_store_do_leaves_one_phase(
+        self, settings, clock, publish, caplog, opening, first
+    ):
+        """From `opening`, every sequence of three that starts with `first`; then the set says twice, which ends
+        each on the device's store."""
+        import itertools
+
+        (device_id, *before), opened_in = _OPENINGS[opening]
+        runs, opened, phases, left_going_on = 0, set(), set(), 0
+        for rest in itertools.product(sorted(_BETWEEN_PASSES), repeat=2):
+            runs += 1
+            caplog.clear()
+            tv = _a_set(device_id)
+            with caplog.at_level(logging.INFO), DisplayState(Path(":memory:"), now=clock.as_clock().now) as store:
+                wall = _a_frame(settings, tv, store, clock)
+                watching = _ThePhaseIsOneOfFour(wall, tv, store, clock, caplog)
+                publish(["w1", "w2"], interval_seconds=3600)
+                history = [opening]
+                await wall.tick()
+                watching.after_a_pass(history)
+                for step, name in enumerate((*before, first, *rest, "this set says", "this set says")):
+                    if step == len(before):
+                        opened.add(type(wall._display._phase).__name__)
+                    history.append(name)
+                    undo = _BETWEEN_PASSES[name](tv, store, publish, clock)
+                    await wall.tick()
+                    watching.after_a_pass(history)
+                    if undo is not None:
+                        undo()
+                await wall._display.close()
+                watching.the_store_in_memory_is_let_go(wall._display._phase, " -> ".join([*history, "the wall closes"]))
+                phases |= watching.phases
+                left_going_on += watching.left_going_on
+        assert runs == len(_BETWEEN_PASSES) ** 2
+        assert opened == {opened_in}, f"{opening} opened the sequences in {sorted(opened)}"
+        if first == "an outage":
+            assert "NotYetKnown" in phases, "an outage did not leave the wall not knowing the set"
+        if "GoingOn" in phases:
+            assert left_going_on > 0, "no going on was seen to end, so its store in memory was never checked closed"
+
+
+class TestTheWallsRunningTimeIsTheWallsWhicheverStoreItUses:
+    async def test_a_work_that_left_while_the_store_in_memory_was_in_use_retires_fourteen_days_after_it_left(
+        self, settings, clock, publish
+    ):
+        """Three days from the store in memory, w2 leaving the feed in the first hour of them: once the set says,
+        w2's image stays on it until fourteen days of the wall's running time after it left, and goes then."""
+        from arrt_player.displays.frame import FEED_TIME_SAVED_EVERY_SECONDS, IDENTITY_PATIENCE_SECONDS, RETIRED_AFTER_SECONDS
+
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory
+            publish(["w1"], interval_seconds=3600)  # w2 leaves the feed
+            await wall.tick()
+            it_left_at = store.feed_seconds
+            assert it_left_at == IDENTITY_PATIENCE_SECONDS + 1, "the device's store did not count the wall's running time"
+            since_it_left = 0.0
+            for _ in range(3 * 24):
+                clock.advance(3600)
+                since_it_left += 3600
+                await wall.tick()
+            assert store.binding_for("w2").last_named_feed_seconds == it_left_at, "the device's store lost when w2 left"
+            with sqlite3.connect(settings.state_path) as connection:
+                (saved,) = connection.execute("SELECT value FROM daemon_state WHERE key = 'feed_seconds'").fetchone()
+            assert float(saved) > store.feed_seconds - FEED_TIME_SAVED_EVERY_SECONDS, "the count was not saved on the disk"
+            tv.device_id = THIS_SET
+            clock.advance(400)
+            since_it_left += 400
+            await wall.tick()  # the set says: back on the device's store
+            clock.advance(1)
+            since_it_left += 1
+            await wall.tick()
+            assert store.tv_identity == THIS_SET
+
+            clock.advance(RETIRED_AFTER_SECONDS - since_it_left - 2 * 3600)
+            await wall.tick()
+            await wall.tick()
+            assert on_the_set["w2"] in tv.holding, "w2 was retired before fourteen days of running time since it left"
+            assert store.binding_for("w2") is not None
+            for _ in range(4):
+                clock.advance(3600)
+                await wall.tick()
+            await wall.tick()
+            retired = store.binding_for("w2")
+
+        assert on_the_set["w2"] not in tv.holding, "w2 stayed on the set past fourteen days of running time since it left"
+        assert retired is None
+        assert on_the_set["w1"] in tv.holding
+
+    async def test_a_retirement_due_while_the_store_in_memory_is_in_use_is_judged_once_the_set_says(
+        self, settings, clock, publish
+    ):
+        """w1 and w2 fall due while the wall goes on from the store in memory: the set is asked nothing on their
+        account until it says which it is, and then their images leave it."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _CountingListings()
+        tv.device_id = THIS_SET
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            left = await _a_theme_then_another(wall, tv, publish, store)
+            tv.device_id, tv.unavailable = None, True
+            publish(["w3"], interval_seconds=3600)
+            await wall.tick()  # the outage
+            tv.unavailable = False
+            clock.advance(400)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS)
+            await wall.tick()  # from the store in memory
+            listed = tv.listings
+            clock.advance(15 * DAY)
+            for _ in range(3):
+                await wall.tick()  # the count is written, and w1 and w2 are due on the device's store
+                clock.advance(3600)
+            assert tv.listings == listed, "the set was asked for its list on account of bindings not in use"
+            assert set(left.values()) <= set(tv.holding)
+            tv.device_id = THIS_SET
+            clock.advance(400)
+            await wall.tick()
+            await wall.tick()
+
+        assert not set(left.values()) & set(tv.holding), "the works due to retire stayed on the set once it said"
+
+
+class _CountingListings(FakeTv):
+    """The double, counting the requests for the set's list of its pictures."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.listings = 0
+
+    async def listed_pictures(self) -> dict[str, str | None]:
+        self.listings += 1
+        return await super().listed_pictures()
+
+
+class _ReplacedMidSelection(FakeTv):
+    """A set that stops answering at the address while a selection is sent to it, and another that answers next.
+
+    The selection fails as the real client reports a dropped connection, and
+    the reconnect reaches the set armed in `replaced_by`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.replaced_by: FakeTv | None = None
+
+    async def _send_show(self, content_id: str) -> bool:
+        other, self.replaced_by = self.replaced_by, None
+        if other is None:
+            return await super()._send_show(content_id)
+        self.device_id, self.holding, self._next_id = other.device_id, dict(other.holding), other._next_id
+        self.dates = dict(other.dates)
+        self.displaying, self.selected, self.uploaded = other.displaying, [], []
+        raise self._dropping(TvUnavailable(f"the television went away while {content_id} was being selected"))
+
+
+class TestARefusedSelectionWhoseReconnectReachesAnotherSet:
+    @pytest.mark.parametrize(
+        "the_other_set",
+        [
+            "holds the work under its own id",
+            "holds the work under the id the first set refused",
+            "holds none of the wall's works, and a picture of its own under the refused id",
+        ],
+    )
+    async def test_the_work_is_looked_up_again_in_that_sets_bindings(self, settings, clock, publish, caplog, the_other_set):
+        """The wall moves to w2, the set goes away inside the selection, and another set answers the reconnect:
+        w2 goes up on it in the same pass, from that set's own binding when it has one and uploaded once when it
+        has none, and nothing is said about the id the first set refused."""
+        if the_other_set.startswith("holds none"):
+            other = _a_set(ANOTHER_SET, numbered_from=20, **{"MY-F0012": HOUSEHOLDS})
+        else:
+            other = _a_set(ANOTHER_SET, numbered_from=20 if "its own id" in the_other_set else 10)
+            await _a_life_on(settings, clock, publish, other)
+        tv = _ReplacedMidSelection()
+        tv.device_id, tv._next_id = THIS_SET, 10
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2"], interval_seconds=10)
+            await wall.tick()  # w1 up on this set, w2 uploaded behind it
+            refused = store.binding_for("w2").tv_content_id
+            assert refused == "MY-F0012"
+            its_own = {binding.artwork_id: binding.tv_content_id for binding in store.bindings()}
+            tv.replaced_by = other
+            clock.advance(10)
+            caplog.clear()
+            wait = await wall.tick()  # w2's slot: the selection, the outage, the reconnect to the other set
+            uploaded, bound = list(tv.uploaded), store.binding_for("w2")
+
+        assert publish.work_of(tv.on_the_wall) == "w2", "w2 did not go up on the set that answered"
+        assert wait == settings.poll_interval_seconds, "the wall backed off from a set that showed the work"
+        assert not _store_events(caplog, "tv.unavailable")
+        orphaned = [record.tv_content_id for record in _store_events(caplog, "binding.orphaned")]
+        assert refused not in orphaned, "the journal named an id the set that answered never refused"
+        if the_other_set.startswith("holds none"):
+            sent = [publish.work_of(path) for path in uploaded]
+            assert sent.count("w2") == 1, f"w2 was uploaded {sent.count('w2')} times to a set that held none of the wall's works"
+            assert bound.tv_content_id == tv.displaying
+        else:
+            assert uploaded == [], "w2 was uploaded again to a set that holds it"
+            assert tv.displaying == bound.tv_content_id != its_own["w1"]
 
 
 class _AModeThatWillNotRead(FakeTv):
@@ -1742,12 +2200,13 @@ async def test_a_failure_that_may_have_cost_the_connection_has_the_next_one_iden
     if failure.startswith("an upload"):
         tv.refuse_uploads = True
     elif failure.startswith("a removal"):
-        tv.holding["MY-F0999"] = Path("/nobodys/picture.jpg")
         tv.removal_unconfirmable = True
     else:
         tv.displays_nothing_selected = True
 
     with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+        if failure.startswith("a removal"):
+            ours_on_the_set(tv, store, "MY-F0999", Path("/a-re-rendered-works/previous-picture.jpg"))
         wall = _a_frame(settings, tv, store, clock)
         publish(["w1", "w2"], interval_seconds=3600)
         await wall.tick()
@@ -1756,3 +2215,517 @@ async def test_a_failure_that_may_have_cost_the_connection_has_the_next_one_iden
         await wall.tick()
 
     assert tv.identity_reads == 2, f"after {failure}, the next pass used the bindings without asking which set it reaches"
+
+
+# -- the Player removes from a set only what it recorded uploading ------------------
+#
+# The owner's ruling (2026-11-19). Every upload is recorded on the device's store
+# before it is sent, with the set it goes to, or none while the set will not say,
+# and the `image_date` marker it carries; a reconciliation removes, of what the
+# set lists, only what those records name there.
+
+
+def _uploads(path: Path) -> list[tuple]:
+    """The upload records on disk, as (set, marker, content id), in no meaningful order."""
+    with sqlite3.connect(path) as connection:
+        return connection.execute("SELECT tv_identity, marker, tv_content_id FROM tv_upload").fetchall()
+
+
+def _removals_recorded(tv: FakeTv) -> list[bool]:
+    """Wrap `tv`'s removal so each records whether it asked for the picture the set displayed."""
+    asked_for_the_wall: list[bool] = []
+    send_remove = tv._send_remove
+
+    async def recording(content_ids):
+        asked_for_the_wall.append(tv.displaying in content_ids)
+        return await send_remove(content_ids)
+
+    tv._send_remove = recording
+    return asked_for_the_wall
+
+
+def _a_schema_4_store(path: Path) -> None:
+    """The store as the previous schema left it: no upload record, at user_version 4."""
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE tv_upload")
+        connection.execute("PRAGMA user_version = 4")
+
+
+class TestThePlayerRemovesOnlyWhatItRecordedUploading:
+    async def test_an_upload_reported_failed_that_landed_is_gone_at_the_next_reconciliation(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock, settings
+    ):
+        """The library reports no id and the read-back fails, though the picture landed: its record, written before
+        it was sent, finds it by its marker at the next listing, and it is removed; the work's own copy stays."""
+        tv.uploads_land_unconfirmed = True
+        publish(["w1"], interval_seconds=3600)
+        await daemon.tick()
+        landed = set(tv.holding)
+        assert len(landed) == 1, "the armed upload did not land"
+        assert state.binding_for("w1").upload_status is UploadStatus.FAILED
+
+        tv.uploads_land_unconfirmed = False
+        clock.advance(settings.upload_retry_seconds + 1)
+        await daemon.tick()  # w1 is uploaded again, and shown
+        bound = state.binding_for("w1").tv_content_id
+        publish(["w1"], interval_seconds=3600)
+        await daemon.tick()  # the next reconciliation
+
+        assert not landed & set(tv.holding), "the copy whose upload was reported failed stayed on the set"
+        assert bound in tv.holding
+        assert publish.work_of(tv.on_the_wall) == "w1"
+
+    async def test_a_re_rendered_works_previous_image_leaves_the_set_at_the_next_reconciliation(
+        self, daemon: Wall, tv: FakeTv, publish, state: DisplayState, clock
+    ):
+        """Its upload was recorded, and no binding names it once the work is sent again: the Player's to remove."""
+        publish(["w1", "w2"], interval_seconds=10)
+        await daemon.tick()  # w1 up, w2 uploaded behind it
+        previous = state.binding_for("w2").tv_content_id
+        Image.new("RGB", (8, 8), (255, 0, 0)).save(publish.picture("w2"), format="JPEG")
+        clock.advance(10)
+        await daemon.tick()  # w2's slot: sent again, and shown
+        assert state.binding_for("w2").tv_content_id != previous
+        assert publish.work_of(tv.on_the_wall) == "w2"
+        publish(["w1", "w2"], interval_seconds=10)
+        await daemon.tick()
+
+        assert previous not in tv.holding, "the re-rendered work's previous image stayed on the set"
+        assert state.binding_for("w2").tv_content_id in tv.holding
+
+    async def test_a_store_that_refuses_writes_puts_no_picture_on_the_set(self, settings, clock, publish, caplog):
+        """An upload whose record cannot be written is not sent, so a store that cannot write costs the wall its new
+        works, never the set a copy per pass that nothing records."""
+        tv = _a_set(THIS_SET)
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2", "w3", "w4", "w5"], interval_seconds=3600)
+            await wall.tick()  # adopted and reconciled; w1 up, w2 uploaded behind it
+            held = dict(tv.holding)
+            armed = _arm(
+                store,
+                lambda: _sqlite_error("SQLITE_FULL", "database or disk is full"),
+                failing=lambda statement: statement == "COMMIT" or statement.lstrip().startswith(("INSERT", "UPDATE", "DELETE")),
+            )
+            for _ in range(3):
+                clock.advance(settings.tv_retry_max_seconds + 1)
+                await wall.tick()
+            _disarm(store, armed)
+
+        assert armed.raised >= 3, "the passes did not reach the store's writes"
+        assert tv.holding == held, f"the set gained {sorted(set(tv.holding) - set(held))} from a store that cannot write"
+        assert [record.operation for record in _store_events(caplog, "store.failed")] == ["record_sending"]
+
+    async def test_an_upload_held_for_a_programme_leaves_no_record(self, settings, clock, publish):
+        """Somebody switches to a programme while w1 uploads: w1's selection is held, and w2's upload after it is
+        held at the gate. Nothing of w2 was sent, so its record goes, whether or not the set had said which it is,
+        and an upload held while the set would not say leaves nothing for a later set to be asked about."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        for device_id in (THIS_SET, None):
+            settings.state_path.unlink(missing_ok=True)
+            tv = _a_set(device_id)
+            tv.seconds_for["upload"] = 10
+            tv.at(5, art_mode="off")
+            with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+                wall = _a_frame(settings, tv, store, clock)
+                publish(["w1", "w2"], interval_seconds=3600)
+                await wall.tick()
+                if device_id is None:
+                    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+                    await wall.tick()
+                recorded = _uploads(settings.state_path)
+                unplaced = store.has_unplaced_uploads()
+
+            (w1,) = tv.uploaded
+            assert publish.work_of(w1) == "w1", f"{device_id}: the upload before the programme did not reach the set"
+            assert tv.art_mode_reads, f"{device_id}: the set was never asked, so no upload was ever held"
+            assert [(identity, content_id) for identity, _, content_id in recorded] == [
+                (device_id, "MY-F0011")
+            ], f"{device_id}: the held upload left a record"
+            assert unplaced is (device_id is None)
+
+    async def test_the_uploads_of_a_set_that_would_not_say_come_off_once_it_says_after_an_outage(self, settings, clock, publish):
+        """A theme uploaded while the set would not say, then an outage, then the set says with no new feed: the
+        copies are recorded with no set, found on it by their markers and removed, the one on the wall last."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        asked_for_the_wall = _removals_recorded(tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory: w1 uploaded and selected, w2 uploaded
+            copies = set(tv.holding) - set(on_the_set.values())
+            assert len(copies) == 2, f"the store in memory put up {sorted(copies)}"
+            assert {(identity, content_id) for identity, _, content_id in _uploads(settings.state_path)} >= {
+                (None, content_id) for content_id in copies
+            }, "the store in memory's uploads were not recorded on the device's store with no set"
+
+            tv.unavailable = True
+            tv.art_mode_announced = True  # news the pass reads the set for, so it finds the set gone; no new feed
+            clock.advance(30)
+            await wall.tick()  # the outage ends the going on
+            assert not isinstance(wall._display._phase, GoingOn), "the outage did not end the going on"
+            tv.unavailable, tv.device_id = False, THIS_SET
+            clock.advance(400)
+            await wall.tick()  # the set says; no feed is published from here on
+            assert tv.displaying in copies or tv.displaying == on_the_set["w1"]
+            clock.advance(1)
+            await wall.tick()
+
+        assert not copies & set(tv.holding), f"{sorted(copies & set(tv.holding))} stayed on the set once it said"
+        assert set(on_the_set.values()) <= set(tv.holding), "a picture of the device store's own was removed"
+        assert asked_for_the_wall, "no removal was sent for the copies"
+        assert not any(asked_for_the_wall), "the copy on the wall was asked for while shown"
+        assert publish.work_of(tv.on_the_wall) == "w1"
+        assert all(identity is not None for identity, _, _ in _uploads(settings.state_path)), "a copy's record stayed unplaced"
+
+    async def test_the_uploads_of_a_set_that_would_not_say_are_left_off_another_set_and_come_off_their_own(
+        self, settings, clock, publish
+    ):
+        """The first set goes away and another answers at the address, before any call of the wall's has seen the
+        connection go: the copies are not on it, nothing of its own is removed, and their records stay with no set.
+        When the first set says again, they come off it."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()
+            first_set = (dict(tv.holding), dict(tv.dates), tv._next_id)
+            copies = set(tv.holding) - set(on_the_set.values())
+
+            tv.unavailable = True
+            clock.advance(30)
+            await wall.tick()  # a quiet pass: nothing is sent on the art channel to find the set gone
+            # Another set at the address, holding the household's picture under an id the first set gave a copy.
+            tv.unavailable, tv.device_id = False, ANOTHER_SET
+            tv.holding, tv.dates, tv._next_id = {min(copies): HOUSEHOLDS}, {}, 40
+            clock.advance(400)
+            publish(["w1", "w2"], interval_seconds=3600)
+            for _ in range(3):
+                await wall.tick()
+                clock.advance(1)
+            assert HOUSEHOLDS in tv.holding.values(), "the household's picture on the other set was removed"
+            unplaced = [content_id for identity, _, content_id in _uploads(settings.state_path) if identity is None]
+            assert sorted(unplaced) == sorted(copies), "the copies' records did not wait for the set they are on"
+
+            tv.unavailable = True
+            publish(["w2", "w1"], interval_seconds=3600)  # a republish, so the pass asks the set and finds it gone
+            await wall.tick()
+            tv.unavailable, tv.device_id = False, THIS_SET
+            tv.holding, tv.dates, tv._next_id = first_set
+            clock.advance(400)
+            for _ in range(3):
+                await wall.tick()
+                clock.advance(1)
+
+        assert not copies & set(tv.holding), "the copies stayed on the set they were put on once it said"
+        assert set(on_the_set.values()) <= set(tv.holding)
+
+    async def test_an_upload_whose_read_back_took_the_connection_is_never_found_on_the_set_the_next_one_reaches(
+        self, settings, clock, publish
+    ):
+        """While the set would not say, an upload lands and its read-back fails, which drops the connection as the
+        last call of the pass. The next pass's connection reaches another set at the address, which says which it
+        is and holds the household's picture stamped with that upload's second: the picture stays, because the
+        upload went on a connection that set was never heard from on."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2", "w3"], interval_seconds=3600)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory: w1 uploaded and selected, w2 uploaded behind it
+            assert isinstance(wall._display._phase, GoingOn)
+            tv.uploads_land_unconfirmed = True
+            clock.advance(1)
+            await wall.tick()  # w3 lands, its read-back fails, and the connection goes with it: the pass's last call
+            assert isinstance(wall._display._phase, GoingOn), "the pass ended otherwise than on the failed upload"
+            (failed,) = [marker for identity, marker, content_id in _uploads(settings.state_path) if content_id is None]
+
+            # Another set at the address, holding the household's picture stamped in the failed upload's second.
+            tv.uploads_land_unconfirmed, tv.device_id = False, ANOTHER_SET
+            tv.holding, tv.dates, tv._next_id = {"MY-F0001": HOUSEHOLDS}, {"MY-F0001": failed}, 40
+            for _ in range(4):
+                clock.advance(400)
+                await wall.tick()
+
+        assert not isinstance(wall._display._phase, GoingOn), "the other set never said which it is"
+        assert HOUSEHOLDS in tv.holding.values(), "the household's picture on the other set was taken for the Player's"
+        assert tv.removed == [] or all("MY-F0001" not in asked for asked in tv.removed)
+
+    async def test_a_player_started_again_mid_spell_takes_the_spells_copies_off_and_puts_its_own_up(
+        self, settings, clock, publish
+    ):
+        """The process stops while the wall goes on from the store in memory: the next one, on the set that says,
+        finds the copies by their records and removes them, and puts a picture of its own bindings up in the same
+        pass, because the device's store forgot the wall when the store in memory began changing it."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()
+            copies = set(tv.holding) - set(on_the_set.values())
+            assert tv.displaying in copies
+
+        tv.device_id = THIS_SET
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            assert store.last_selected_work_id is None, "the device's store believed its own picture was still up"
+            wall = _a_frame(settings, tv, store, clock)
+            await wall.tick()
+
+        assert not copies & set(tv.holding), "the copies of the stopped process stayed on the set"
+        assert tv.displaying == on_the_set["w1"], "the wall was left on a picture removed from under it"
+
+    async def test_a_schema_4_store_still_removes_what_it_put_there_and_nothing_else(self, settings, clock, publish):
+        """The bindings of a store from the previous schema are its uploads: a re-rendered work's previous image and
+        a retiring work's image leave the set as before, the set's recorded identity is kept, and the household's
+        picture and an older Player's unrecorded one stay."""
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv, works=("w1", "w2", "w3"))
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2", "w3"], interval_seconds=3600)
+            await wall.tick()  # w3 uploaded behind the rest
+            on_the_set = {binding.artwork_id: binding.tv_content_id for binding in store.bindings()}
+        assert len(on_the_set) == 3
+        _a_schema_4_store(settings.state_path)
+        tv.holding["MY-F0099"] = HOUSEHOLDS
+        tv.holding["MY-F0098"] = Path("/an-older-players/unrecorded-copy.jpg")
+        tv.dates["MY-F0098"] = "2026:01:01 00:00:00"
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            assert store.tv_identity == THIS_SET, "a store at schema 4 forgot which set its bindings were made on"
+            wall = _a_frame(settings, tv, store, clock)
+            Image.new("RGB", (8, 8), (255, 0, 0)).save(publish.picture("w1"), format="JPEG")
+            publish(["w1", "w2"], interval_seconds=3600)  # w3 leaves the feed
+            await wall.tick()  # w1 is uploaded again
+            assert store.binding_for("w1").tv_content_id != on_the_set["w1"]
+            publish(["w1", "w2"], interval_seconds=3600)
+            await wall.tick()  # the reconciliation that takes w1's previous image off
+            clock.advance(15 * DAY)
+            for _ in range(3):
+                await wall.tick()
+                clock.advance(3600)
+
+        assert on_the_set["w1"] not in tv.holding, "the re-rendered work's previous image stayed on the set"
+        assert on_the_set["w3"] not in tv.holding, "the retiring work's image stayed on the set"
+        assert on_the_set["w2"] in tv.holding
+        assert {"MY-F0099", "MY-F0098"} <= set(tv.holding), "a picture the store never recorded was removed"
+
+
+class TestTheUploadRecord:
+    def test_two_uploads_in_one_second_carry_two_markers(self, state: DisplayState):
+        from arrt_player.tv import upload_marker
+
+        first = state.record_sending(THIS_SET, marker_for=upload_marker)
+        second = state.record_sending(THIS_SET, marker_for=upload_marker)
+
+        assert first.marker != second.marker, "two live records would be found by one marker"
+
+    def test_a_picture_with_a_recorded_id_and_another_marker_is_not_the_players(self, state: DisplayState):
+        """The id the Player recorded, listed under a date its upload never carried, is somebody else's picture now."""
+        from arrt_player.tv import upload_marker
+
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker)
+        state.learned(sent.key, "MY-F0001")
+
+        assert state.uploads_on(THIS_SET, {"MY-F0001": "1999:01:01 00:00:00"}) == frozenset()
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == frozenset(), "the record outlived its picture"
+
+    def test_a_listing_with_no_date_names_nothing_and_drops_nothing(self, state: DisplayState):
+        from arrt_player.tv import upload_marker
+
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker)
+        state.learned(sent.key, "MY-F0001")
+
+        assert state.uploads_on(THIS_SET, {"MY-F0001": None}) == frozenset()
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == {"MY-F0001"}
+
+    def test_an_upload_whose_id_was_never_learned_is_found_by_its_marker_alone_and_only_alone(self, state: DisplayState):
+        from arrt_player.tv import upload_marker
+
+        alone = state.record_sending(THIS_SET, marker_for=upload_marker)
+        twice = state.record_sending(THIS_SET, marker_for=upload_marker)
+        listed = {"MY-F0001": alone.marker, "MY-F0002": twice.marker, "MY-F0003": twice.marker, "MY-F0004": None}
+
+        assert state.uploads_on(THIS_SET, listed) == {"MY-F0001"}, "a marker two pictures carry was taken as the Player's"
+        assert state.uploads_on(THIS_SET, listed) == {"MY-F0001"}, "the found upload did not keep its id"
+
+    def test_an_upload_of_no_set_waits_for_the_set_it_is_on(self, state: DisplayState):
+        from arrt_player.tv import upload_marker
+
+        state.belongs_to(THIS_SET)
+        sent = state.record_sending(None, marker_for=upload_marker)
+        state.learned(sent.key, "MY-F0001")
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0001": "1999:01:01 00:00:00", "MY-F0002": sent.marker}) == frozenset()
+        assert state.has_unplaced_uploads(), "an upload of no set was dropped by a set it is not on"
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == {"MY-F0001"}
+        assert not state.has_unplaced_uploads()
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0001": sent.marker}) == frozenset(), "placed on two sets"
+
+    def test_a_schema_4_store_takes_its_bindings_in_use_and_set_aside_as_its_uploads(self, settings, clock):
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            store.belongs_to(THIS_SET)
+            store.record_upload("w1", "MY-F0001", render_fingerprint="sha256:w1")
+            store.belongs_to(ANOTHER_SET)
+            store.record_upload("w1", "MY-F0021", render_fingerprint="sha256:w1")
+            store.record_upload_failure("w2")
+        _a_schema_4_store(settings.state_path)
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            assert store.tv_identity == ANOTHER_SET
+            listed_here = {"MY-F0021": "2026:01:01 00:00:00", "MY-F0001": "2026:01:01 00:00:01"}
+            assert store.uploads_on(ANOTHER_SET, listed_here) == {"MY-F0021"}
+            assert store.uploads_on(THIS_SET, {"MY-F0001": "2026:01:01 00:00:02"}) == {"MY-F0001"}
+            assert not store.has_unplaced_uploads()
+
+    def test_a_store_that_knew_no_set_takes_its_bindings_as_uploads_when_it_adopts_one(self, settings, clock):
+        rows = [("1", "w1", "MY-F0001", "1:1", "2026-01-01T00:00:00+00:00", "uploaded")]
+        _a_schema_3_store(settings.state_path, rows, identity=THIS_SET)
+
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            assert store.uploads_on(THIS_SET, {"MY-F0001": None}) == frozenset(), "a store that knew no set named a picture"
+            store.belongs_to(THIS_SET)
+            assert store.uploads_on(THIS_SET, {"MY-F0001": None}) == {"MY-F0001"}
+
+
+class TestARecordOfNoSet:
+    """An upload sent while the set would not say which it is: recorded with no set, toward the set the store last
+    recorded and the address it was sent to, and found only on that set at that address."""
+
+    ADDRESS = "192.0.2.20"
+
+    SPELL = "a-spell"
+
+    def _sent_toward(self, state: DisplayState, identity: str | None, *, learning: str | None = None) -> str:
+        from arrt_player.tv import upload_marker
+
+        if identity is not None:
+            state.belongs_to(identity)
+        sent = state.record_sending(None, marker_for=upload_marker, address=self.ADDRESS, spell=self.SPELL)
+        if learning is not None:
+            state.learned(sent.key, learning)
+        return sent.marker
+
+    def test_it_is_never_found_on_another_set_by_its_marker_and_waits_for_its_own(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0500": marker}, address=self.ADDRESS) == frozenset()
+        assert state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS), "another set's listing settled it"
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address=self.ADDRESS) == {"MY-F0011"}
+
+    def test_it_is_never_found_on_another_set_by_its_id_and_marker(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET, learning="MY-F0011")
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": marker}, address=self.ADDRESS) == frozenset()
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address=self.ADDRESS) == {"MY-F0011"}
+
+    def test_it_is_not_found_on_its_set_listed_at_another_address(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET, learning="MY-F0011")
+
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address="192.0.2.21") == frozenset()
+        assert not state.has_unplaced_uploads(THIS_SET, address="192.0.2.21")
+        assert state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS), "a listing at another address settled it"
+
+    def test_one_that_never_landed_leaves_once_its_set_is_listed_without_it(self, state: DisplayState):
+        self._sent_toward(state, THIS_SET)
+
+        assert state.uploads_on(THIS_SET, {"MY-F0001": "2026:01:01 00:00:00"}, address=self.ADDRESS) == frozenset()
+        assert not state.has_unplaced_uploads(), "an upload that never landed stayed recorded"
+
+    def test_one_sent_before_the_store_knew_any_set_is_found_nowhere_and_leaves_at_the_first_listing(self, state: DisplayState):
+        marker = self._sent_toward(state, None, learning="MY-F0011")
+
+        assert not state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS)
+        assert state.uploads_on(THIS_SET, {"MY-F0011": marker}, address=self.ADDRESS) == frozenset()
+        assert not state.has_unplaced_uploads(), "a record no set can ever match stayed"
+
+    def test_it_is_found_on_the_set_heard_from_on_its_connection(self, state: DisplayState):
+        marker = self._sent_toward(state, None, learning="MY-F0011")
+        state.heard_from(self.SPELL, ANOTHER_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": marker}, address=self.ADDRESS) == {"MY-F0011"}
+
+    def test_listed_without_it_on_one_set_it_may_be_on_it_still_waits_for_the_other(self, state: DisplayState):
+        marker = self._sent_toward(state, THIS_SET, learning="MY-F0011")
+        state.heard_from(self.SPELL, ANOTHER_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0021": marker}, address=self.ADDRESS) == frozenset()
+        assert state.has_unplaced_uploads(THIS_SET, address=self.ADDRESS)
+        assert not state.has_unplaced_uploads(ANOTHER_SET, address=self.ADDRESS), "it was still sent toward the set"
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": marker}, address=self.ADDRESS) == frozenset()
+        assert state.uploads_on(THIS_SET, {}, address=self.ADDRESS) == frozenset()
+        assert not state.has_unplaced_uploads(), "it stayed once each set it may be on was listed without it"
+
+    def test_a_spell_heard_from_reaches_only_its_own_uploads(self, state: DisplayState):
+        from arrt_player.tv import upload_marker
+
+        state.belongs_to(THIS_SET)
+        earlier = state.record_sending(None, marker_for=upload_marker, address=self.ADDRESS, spell="an-earlier-spell")
+        state.learned(earlier.key, "MY-F0011")
+        state.heard_from(self.SPELL, ANOTHER_SET)
+
+        assert state.uploads_on(ANOTHER_SET, {"MY-F0011": earlier.marker}, address=self.ADDRESS) == frozenset()
+
+
+class TestARecordThatLeft:
+    def test_an_id_gone_from_the_listing_and_listed_again_is_left_alone(self, state: DisplayState):
+        """The set stopped listing the Player's picture (somebody deleted it there), and its record went; the id
+        listed again later, even with the same date, is not the Player's."""
+        from arrt_player.tv import upload_marker
+
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker)
+        state.learned(sent.key, "MY-F0001")
+
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == {"MY-F0001"}
+        assert state.uploads_on(THIS_SET, {}) == frozenset()
+        assert state.uploads_on(THIS_SET, {"MY-F0001": sent.marker}) == frozenset(), "a record outlived its picture"
+
+
+def _statements_that_write(store: DisplayState) -> list[str]:
+    """Trace `store`'s connection: the head of every statement it sends that writes, a commit included."""
+    sent: list[str] = []
+
+    def trace(statement: str) -> None:
+        head = statement.split(None, 1)[0].upper() if statement.strip() else ""
+        if head in {"INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN", "COMMIT"}:
+            sent.append(statement.strip().splitlines()[0])
+
+    store._connection.set_trace_callback(trace)
+    return sent
+
+
+class TestAMatchWithNothingToChangeWritesNothing:
+    def test_a_listing_that_changes_no_record_sends_no_write(self, state: DisplayState):
+        """A reconciliation follows every feed adopted: when the listing changes no record, the card is not written."""
+        from arrt_player.tv import upload_marker
+
+        state.belongs_to(THIS_SET)
+        sent = state.record_sending(THIS_SET, marker_for=upload_marker, address="192.0.2.20")
+        state.learned(sent.key, "MY-F0011")
+        listed = {"MY-F0011": sent.marker, "MY-F0099": None}
+        assert state.uploads_on(THIS_SET, listed, address="192.0.2.20") == {"MY-F0011"}
+        writes = _statements_that_write(state)
+
+        assert state.uploads_on(THIS_SET, listed, address="192.0.2.20") == {"MY-F0011"}
+        assert writes == [], f"a listing that changed nothing wrote {writes}"

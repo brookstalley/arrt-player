@@ -527,15 +527,16 @@ reads the set's `device.duid` when it connects (one REST read, sent whatever the
 set is showing, no key and no pairing) and keeps a binding only for the set it was
 made on. *The same television at a new address* keeps its pictures and uploads
 nothing again. *A different television* starts afresh: every work is uploaded to
-it, and **the uploaded-pictures category there is cleared of what the Player did
-not put in it, the household's own pictures included**; the old set keeps the
-Player's pictures until the Player is pointed at it again (its bindings come
-back, and nothing is re-uploaded) or somebody removes them there. The first start
+it, and **what that set already lists is left alone, the household's own pictures
+included** (§ The Player removes only what it recorded uploading, below); the old
+set keeps the Player's pictures until the Player is pointed at it again (its
+bindings come back, and nothing is re-uploaded) or somebody removes them there. The first start
 on a store from before this release says `binding.set_adopted` and removes nothing
 until it has the set's id. If the set will not say who it is, the wall uses no
 stored picture for fifteen minutes (`tv.unidentified`), then shows art from
 memory and removes nothing (`tv.unidentified_going_on`). The store moves to schema
-4, and the settings page says what a new address does before and after a save.
+4 (and to 5 in the section below), and the settings page says what a new address
+does before and after a save.
 The reasons are `security-model.md` § What it does to the television and
 `data-model.md` § DisplayState.
 
@@ -586,8 +587,90 @@ display.service` prints `active`; and the runbook's steps 13a to 14c.
 **The way back** is the previous revision, plus one change on each Frame wall's
 store: it refuses a schema it does not know, and parks that wall. Stop the Player
 and set the store's version to the one the previous revision writes (the runbook's
-§ Going back, step 19b). Moved `TV_ADDRESS` to the page? Move it back into `.env`,
+§ Going back, step 19b, which needs the owner's say-so: § The Player removes only
+what it recorded uploading, below). Moved `TV_ADDRESS` to the page? Move it back into `.env`,
 delete it from `values` in `.settings.json` and set `version` to 2 (step 19a).
+
+## The Player removes only what it recorded uploading, and says its state in the server's words (2026-11-25, audit wave 3)
+
+**The owner is told before the deploy** (2026-11-25, accepted): an older Player put
+pictures on the television and never recorded them, and the new one leaves them
+there. Before installing, count the pictures in the set's own list of uploaded
+pictures; after the first reconciliation, count again and read the journal's count of
+pictures left alone (below). The household can delete any leftovers on the set;
+nothing in this repository removes a picture it did not upload.
+
+**What the Player removes from the television is only what it recorded uploading.**
+Every upload is written to the wall's store before it is sent, with the television
+it goes to and the `image_date` it carries, and the Player removes from a set only
+pictures those records name there. Everything else the set lists stays: the
+household's own, an older Player's that it never recorded, and any of this Player's
+that its records cannot match. The journal says once per set, in each process, how
+many it leaves (`tv.others_left_alone`, with `left_alone` and `set_now`). A store
+from before this release takes every binding with a content id as an upload of the
+set it was made on, so what the last release put up is still the Player's to remove
+(a retired work's image, a re-rendered work's old one). **What it gives up:** a
+copy an older Player uploaded whose read-back failed, one made while its store could
+not write, the theme a set that would not say received per outage, every picture
+under a store deleted at runbook step 6a (the new Player records none of them),
+and images of an earlier generation of this product. **A set that does not echo the
+`image_date` it was sent** (measured once, on one upload) matches none of the
+Player's records, and then nothing the Player uploads there is ever removed, which
+the journal says once per set in a process (`tv.markers_unconfirmed`): check
+it at the set before the deploy (`build-plan-audit-wave-3.md` § Operator's
+checklist, item 14). The store moves to schema 5 (`tv_upload`); a wall whose store
+cannot be written sends no upload.
+
+**The way back across schema 5 needs the owner's say-so each time.** Measured at
+integration (v0.8.0 at its tag against a schema-5 store, on no Pi and with no
+television; that nothing then connects to the set is read from v0.8.0's
+`run_frame_wall`, which returns before the Frame wall is built): the release before
+(v0.8.0, schema 2) refuses the newer store, journals
+`daemon.state_too_new`, parks only the Frame wall and touches nothing on the set.
+Only after the runbook's step 19b sets the store's version to 2, or the store is
+deleted, does its sweep remove every uploaded picture its own records do not name:
+the household's, an older Player's leftovers, even the one on screen. Without the
+owner's word, leave the stores as they are and roll forward again.
+
+**The contract moves to 1.3.0.** The Player refuses a feed that stages one work
+twice (the wall keeps its last good feed, `pull.manifest_refused`) and one that
+runs past 16 MiB, and reports the address of its settings page to the server
+(`settings_url`, the first name in `UI_ALLOWED_HOSTS`, else the address the page is
+bound to, else the address it reached the server from; none when the page is bound
+to loopback), so the server's Players page links to it. **If that link names an
+address a phone cannot reach, list the page's name in `UI_ALLOWED_HOSTS`.** The
+Frame's identity is read for that report once a minute (one REST GET a minute, no
+key), so another television at the Frame's address is reported within a minute
+(`client.identity_changed`); a report the server refuses in its error form is sent
+again only when it changes or after five minutes.
+
+**The settings page says the Player's state in the server's words:** "No token
+yet", "Waiting for its first report", "Reporting", "Not heard from since <date>" and
+"Report unreadable", as the server's Players page does for the same Player, and
+its own sentences where the server has none ("The server does not accept this
+Player's token", "No report taken since the Player started"). A screen on the
+slideshow picker is "Screen off" or "No screen". The page agrees with a server of
+Arrt's wave 3 or later, which remembers a refused report in memory and says
+"Report unreadable" until it accepts one (forgotten at the server's restart); a
+server before that records nothing of a refusal and goes on saying "Reporting",
+then "Not heard from", while this page says "Report unreadable".
+
+**Smaller changes.** Every file the Player writes whole goes through one helper
+(`safe_write.py`), so a failed write leaves no `.tmp`. A screen that refuses a
+picture is asked for it again on each following pass, and a Player that draws to
+files writes again until its picture and record have both landed. The two panel
+journal lines `panel.close_failed` and `label.close_abandoned` carry the panel's
+`output`.
+
+**Check it worked:** `journalctl -u display.service | grep -E 'tv.others_left_alone|binding.set_|tv.unidentified|client.identity_changed'`
+says how many pictures the first reconciliation left alone and shows no
+`tv.unidentified`; the settings page, opened from a phone, says "Reporting" within a
+minute or two of a start; the server's Players page, for the same Player, says the
+same; and the runbook's steps 14 to 16.
+
+**The way back** is the previous revision, with the owner's say-so and the store
+change above. The contract pin is a development dependency and changes nothing in
+the Pi's environment.
 
 ## The two new units, and where everything they name now lives
 

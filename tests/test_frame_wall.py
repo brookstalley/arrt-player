@@ -20,6 +20,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from fake_tv import ours_on_the_set
 from fakes import FakeTv
 
 from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS, frame_wall
@@ -702,15 +703,15 @@ async def test_art_mode_going_off_during_a_re_upload_stops_the_second_selection(
     assert state.last_selected_work_id == "w1"
 
 
-async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, tv: FakeTv, publish, settings):
+async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, tv: FakeTv, publish, settings, state):
     """Upload, removal, brightness and the slideshow switch were never tried with a
     programme on (`samsung-tv-state-findings.md` § What works in each state), so
     none is sent while the panel is lit and not showing art. Every one of them is
-    owed here: a fresh wall with three works to upload, a picture on the set
-    nothing accounts for, a brightness never written and a slideshow never
+    owed here: a fresh wall with three works to upload, a picture of the Player's
+    on the set no binding wants, a brightness never written and a slideshow never
     switched off."""
     publish(["w1", "w2", "w3"])
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     tv.power = "on"
 
@@ -724,13 +725,13 @@ async def test_a_set_somebody_is_watching_is_sent_no_write_at_all(daemon: Wall, 
     assert tv.selected == []
 
 
-async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon: Wall, tv: FakeTv, publish, settings):
+async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon: Wall, tv: FakeTv, publish, settings, state):
     """The other half of the same rule: switched off at the remote (`PowerState`
     standby), the set serves uploads, removals, brightness and the slideshow
     switch, all measured. Holding them there would leave a wall that spends its
     nights dark with nothing uploaded by morning."""
     publish(["w1", "w2", "w3"])
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     tv.power = "standby"
 
@@ -744,10 +745,10 @@ async def test_a_dark_set_is_still_sent_the_writes_it_was_measured_taking(daemon
     assert tv.selected == [], "a dark set was selected on, which it ignores"
 
 
-async def test_a_set_whose_power_cannot_be_read_is_sent_no_write_either(daemon: Wall, tv: FakeTv, publish, settings):
+async def test_a_set_whose_power_cannot_be_read_is_sent_no_write_either(daemon: Wall, tv: FakeTv, publish, settings, state):
     """Unreadable `PowerState` cannot tell a programme from a dark panel, so it is held as the programme is."""
     publish(["w1", "w2", "w3"])
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     tv.power_unreadable = True
 
@@ -764,7 +765,7 @@ async def test_held_writes_are_made_once_the_set_is_showing_art_again(
     evening, and the set returning to art mode gets every one of them, with none
     of the works recorded as a failed upload in between."""
     publish(["w1", "w2", "w3"], interval_seconds=3600)
-    tv.holding["MY-LEGACY-1"] = settings.wall_dir / "legacy.jpg"
+    ours_on_the_set(tv, state, "MY-LEGACY-1", settings.wall_dir / "legacy.jpg")
     tv.art_mode = "off"
     for _ in range(3):
         await daemon.tick()
@@ -898,13 +899,14 @@ class _TracingTv(FakeTv):
         self.trace.append("identity")
         return await super().read_identity()
 
-    async def listed_content_ids(self) -> frozenset[str]:
+    async def listed_pictures(self) -> dict[str, str | None]:
+        # The one listing request on the wire, whichever of the seam's two reads asked it.
         self.trace.append("list")
-        return await super().listed_content_ids()
+        return await super().listed_pictures()
 
-    async def _send_upload(self, path):
+    async def _send_upload(self, path, marker):
         self.trace.append("upload")
-        return await super()._send_upload(path)
+        return await super()._send_upload(path, marker)
 
     async def _send_show(self, content_id: str) -> bool:
         self.trace.append("select")
@@ -1014,6 +1016,7 @@ def _a_life_on(*device_ids: str):
         met_before = sets.get(tv.device_id)
         if met_before is not None:
             tv.holding, tv._next_id, tv.displaying = dict(met_before.holding), met_before._next_id, met_before.displaying
+            tv.dates = dict(met_before.dates)
         else:
             tv.holding["MY-F0001"] = Path("/the-households/own-picture.jpg")
             tv._next_id = 1
@@ -1213,8 +1216,8 @@ _WHAT_REACHES_THE_SET = {
     ),
     # Another set: none of the first set's ids is selected, and the wall starts
     # as a fresh one does, slideshow switch included. The household's picture
-    # that has the id the first set gave w1 is unaccounted for on this set, and
-    # is removed, as a fresh install removes it.
+    # that has the id the first set gave w1 is one the Player has no record of
+    # putting on this set, and is left on it: no removal is sent.
     "another set at the address": (
         _passes(_feed("w1", "w2")),
         [
@@ -1225,8 +1228,6 @@ _WHAT_REACHES_THE_SET = {
                 "get_artmode",
                 "slideshow off",
                 "list",
-                "get_artmode",
-                "remove",
                 "get_artmode",
                 "brightness",
                 "get_artmode",
@@ -1622,3 +1623,110 @@ def _what_the_set_holds_and_shows(tv: FakeTv) -> tuple:
         tv.art_mode,
         tv.took_the_screen,
     )
+
+
+# -- an upload made while the set would not say, and the household's picture on another set ------------------
+#
+# The owner's ruling: the Player removes from a television only the pictures it recorded uploading. An upload sent
+# while the set would not say which it is goes on the record of the set the Player last knew at that address, and a
+# picture on any other set is never the Player's to remove, whatever date or id it carries.
+
+_THE_FIRST_SET = "uuid:frame-in-the-living-room"
+_THE_SECOND_SET = "uuid:frame-in-the-hall"
+_THE_HOUSEHOLDS = Path("/the-households/own-picture.jpg")
+
+
+def _the_records_of_no_set(path: Path) -> list[tuple[str | None, str]]:
+    """Each upload recorded with no set, as (content id, marker): what a set that says later is matched against."""
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute("SELECT tv_content_id, marker FROM tv_upload WHERE tv_identity IS NULL").fetchall()
+    return [(content_id, marker) for content_id, marker in rows]
+
+
+def _what_was_asked_off(tv: FakeTv) -> set[str]:
+    return {content_id for removal in tv.removed for content_id in removal}
+
+
+async def _a_spell_on_a_set_that_will_not_say(
+    settings, tv: FakeTv, state: DisplayState, clock, publish, *, landing: bool
+) -> Wall:
+    """The wall lives on `tv`, which then stops saying which set it is, and is started again on it: it goes on from
+    the store in memory and uploads, each upload landing or refused. Returns the wall, still going on."""
+    publish(["w1", "w2"], interval_seconds=3600)
+    await _a_wall(settings, tv, state, clock).tick()  # the set says: w1 up, w2 uploaded behind it
+    assert state.tv_identity == tv.device_id
+    tv.device_id = None
+    tv.refuse_uploads = not landing
+    wall = _a_wall(settings, tv, state, clock)
+    await wall.tick()
+    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+    await wall.tick()
+    assert _the_records_of_no_set(settings.state_path), "nothing was sent while the set would not say"
+    return wall
+
+
+@pytest.mark.parametrize("landing", [False, True], ids=["refused-its-id-never-learned", "landed-its-id-learned"])
+async def test_a_household_picture_on_another_set_at_the_address_is_never_removed_whatever_it_carries(
+    landing: bool, settings, tv: FakeTv, state: DisplayState, clock, publish
+):
+    """Two sets at one address. Uploads are sent to the first while it will not say which it is; then the address
+    reaches the second, which says, and holds the household's pictures, each carrying the date of one of those
+    uploads and, where the first gave the upload an id, that id too. None of them is removed."""
+    wall = await _a_spell_on_a_set_that_will_not_say(settings, tv, state, clock, publish, landing=landing)
+    sent = _the_records_of_no_set(settings.state_path)
+
+    tv.unavailable = True
+    tv.art_mode_announced = True  # news the pass reads the set for, so it finds the set gone
+    clock.advance(30)
+    await wall.tick()
+    households = {content_id or f"MY-F05{n:02d}": marker for n, (content_id, marker) in enumerate(sent)}
+    tv.unavailable, tv.refuse_uploads, tv.device_id = False, False, _THE_SECOND_SET
+    tv.holding = dict.fromkeys(households, _THE_HOUSEHOLDS)
+    tv.dates = dict(households)
+    tv._next_id = 600
+    clock.advance(400)
+    publish(["w1", "w2"], interval_seconds=3600)
+    for _ in range(3):
+        await wall.tick()
+        clock.advance(1)
+
+    assert state.tv_identity == _THE_SECOND_SET, "the second set never said, so nothing was put to the test"
+    assert set(households) <= set(tv.holding), f"the household's {sorted(set(households) - set(tv.holding))} was removed"
+    assert not _what_was_asked_off(tv) & set(households), "a household picture on the other set was asked for"
+    assert sorted(_the_records_of_no_set(settings.state_path)) == sorted(sent), "the second set's listing settled them"
+
+
+async def test_an_upload_sent_to_another_address_is_not_found_on_the_set_last_known_at_the_first(
+    settings, tv: FakeTv, state: DisplayState, clock, publish
+):
+    """The wall's address is moved to another television, which will not say which it is, and the wall uploads to
+    it; the address is moved back, and the first set holds the household's pictures carrying those uploads' ids and
+    dates. The uploads were sent toward the first set, but to another address: none of them is removed."""
+    import dataclasses
+
+    publish(["w1", "w2"], interval_seconds=3600)
+    await _a_wall(settings, tv, state, clock).tick()
+    elsewhere = dataclasses.replace(settings, tv_address="192.0.2.21")
+    other = FakeTv()
+    other.device_id = None
+    other._next_id = 40
+    wall = _a_wall(elsewhere, other, state, clock)
+    await wall.tick()
+    clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+    await wall.tick()
+    sent = _the_records_of_no_set(settings.state_path)
+    assert sent, "the other television was sent nothing"
+    assert all(content_id is not None for content_id, _ in sent), "an upload to the other television did not land"
+
+    for content_id, marker in sent:
+        tv.holding[content_id] = _THE_HOUSEHOLDS
+        tv.dates[content_id] = marker
+    wall = _a_wall(settings, tv, state, clock)
+    publish(["w1", "w2"], interval_seconds=3600)
+    for _ in range(3):
+        await wall.tick()
+        clock.advance(1)
+
+    assert state.tv_identity == _THE_FIRST_SET
+    assert {content_id for content_id, _ in sent} <= set(tv.holding), "a household picture was removed"
+    assert not _what_was_asked_off(tv), "a removal was asked of the first set"

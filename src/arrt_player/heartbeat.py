@@ -39,11 +39,12 @@ surface starts lying.
 import enum
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
+
+from arrt_player.safe_write import write_whole
 
 log = logging.getLogger(__name__)
 
@@ -213,54 +214,30 @@ def path_in(root: Path, wall_id: str) -> Path:
 
 
 def write(root: Path, health: Health, *, wall_id: str, reported_at: datetime) -> None:
-    """Put the heartbeat on disk, atomically, replacing whatever was there.
+    """Put the heartbeat on disk, atomically, replacing whatever was there (`safe_write.write_whole`).
 
-    **Temp-and-rename, and the same discipline as the manifest builder's
-    `write_atomically` down to the `fsync`.** Two different failures are being
-    closed and only one of them is the obvious one.
-
+    **Two failures are being closed and only one of them is the obvious one.**
     The obvious one is the reader: curation polls this file on its own schedule,
-    so a plain truncating write leaves a window in which it sees half a document
-    — which it correctly reports as an unreadable heartbeat, i.e. as the Player
-    being broken. `Path.replace` (an `os.replace`) is atomic within a filesystem, and the temp file is
-    made in the same directory to guarantee that.
-
-    The other is power. This runs on a Pi with an SD card and no UPS, and a
-    rename can reach the disk before the bytes it renames do — so a cut at the
-    wrong moment leaves a heartbeat that exists, is the right size, and contains
-    nothing. `flush` plus `os.fsync` before the rename is what orders them, and
-    leaving it out is the defect that only ever appears after an outage, which is
+    so a plain truncating write leaves a window in which it sees half a document,
+    which it correctly reports as an unreadable heartbeat, that is, as the Player
+    being broken. The other is power: this runs on a Pi with an SD card and no
+    UPS, and a rename can reach the disk before the bytes it renames do, so a cut
+    at the wrong moment leaves a heartbeat that exists and contains nothing,
     exactly when somebody is reading this file to find out what happened.
 
-    **Blocking, and deliberately left on the caller's event loop** — the same
-    question the label draw answers the other way, at a scale that decides it. That
-    one is seconds of Pango and SPI per picture and goes to a worker thread; this
-    is a few hundred bytes and one `fsync` once per heartbeat interval, so putting
-    it on a thread would buy a millisecond and cost this function the property that
-    makes it readable, that write-fsync-rename happens in that order with nothing
-    in between.
+    **Blocking, and deliberately left on the caller's event loop.** The label draw
+    is seconds of Pango and SPI per picture and goes to a worker thread; this is a
+    few hundred bytes and one `fsync` once per heartbeat interval, so a thread
+    would buy a millisecond and cost the property that makes it readable, that
+    write, `fsync` and rename happen in that order with nothing in between.
+
+    The temporary file is named `.tmp` after the heartbeat, so a reader that opens
+    the heartbeat's own name never meets it.
 
     Raises on failure rather than swallowing. The caller is the one that knows a
     heartbeat is an annotation and not the product, and it is the caller that
     holds the report-once machinery to say so at most once per episode.
     """
     destination = path_in(root, wall_id)
-    temporary = destination.with_name(f"{destination.name}.tmp")
     payload = json.dumps(health.document(reported_at=reported_at), indent=2, ensure_ascii=False)
-    try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(payload + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(destination)
-    except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; nothing is swallowed
-        # **`BaseException`, matching the manifest builder**: a `KeyboardInterrupt`
-        # or a cancelled task between the write and the rename would otherwise
-        # leave the temp file behind for ever. It is named `.tmp` so a reader can
-        # never mistake it for the heartbeat, so this is tidiness rather than
-        # correctness — but it is tidiness on a device nobody visits.
-        #
-        # Nothing is swallowed: the cleanup is best-effort and the original
-        # exception goes straight back out.
-        temporary.unlink(missing_ok=True)
-        raise
+    write_whole(destination, (payload + "\n").encode("utf-8"), temporary=destination.with_name(f"{destination.name}.tmp"))

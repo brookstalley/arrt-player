@@ -318,7 +318,7 @@ class TestThePanelFollowsTheScreen:
 
 
 class TestTheServerGoneAway:
-    """Chunk 06 item 3: the renderer keeps its last document and still blanks on time."""
+    """The renderer keeps its last document and still blanks on time."""
 
     async def test_the_caption_is_held_for_thirty_minutes_from_the_last_answer_then_blanked_once(
         self, renderer, link, surface, clock
@@ -984,6 +984,7 @@ class TestClosingThePanelUnderADraw:
             assert surface.closed == 0, "the panel was powered down under a draw still in the driver"
             left_open = [r for r in caplog.records if getattr(r, "event", None) == "label.close_abandoned"]
             assert len(left_open) == 1, "leaving the panel was not said exactly once"
+            assert left_open[0].__dict__["output"] == panel.name, "the line did not say which panel was left open"
         finally:
             surface.release.set()
             assert await _comes_back(surface.left), "the draw thread never came back"

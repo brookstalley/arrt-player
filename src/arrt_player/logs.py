@@ -33,6 +33,7 @@ than a shared one: the Player and the server share no code by ratified norm, and
 is the cheapest possible thing to keep in two places.
 """
 
+import hashlib
 import json
 import logging
 from collections.abc import Iterator
@@ -88,6 +89,26 @@ def work_context(work_id: str) -> Iterator[None]:
         yield
     finally:
         _WORK_ID.reset(token)
+
+
+def current_work_id() -> str | None:
+    """The work bound by `work_context` where this is called, or None outside any.
+
+    The same binding `WorkCorrelationFilter` stamps on every journal line, read
+    directly: a caller handed only a path, such as a screen output, learns which
+    work the call is about from here, which is the Player's one account of it.
+    """
+    return _WORK_ID.get()
+
+
+def known_as(identity: str | None) -> str | None:
+    """A set's identity as the journal names it: enough to tell two sets apart, and not the set's own id.
+
+    The full id goes to the server in the client heartbeat; a journal is what
+    gets pasted into an issue in a public repository. Every line that names a
+    television names it through here, the wall's and the client heartbeat's alike.
+    """
+    return None if identity is None else f"set-{hashlib.sha256(identity.encode()).hexdigest()[:8]}"
 
 
 @contextmanager

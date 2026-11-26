@@ -80,12 +80,14 @@ from arrt_player import logs, notify
 from arrt_player.client import (
     FRAME_KIND,
     FrameIdentity,
+    HeardReport,
     LabelAssignment,
     OutputReport,
     Supervisor,
     WorkerStop,
     client_outputs,
     is_retired,
+    settings_url,
 )
 from arrt_player.config import (
     ARRT_MODE,
@@ -212,6 +214,7 @@ def label_surface(settings: PanelSettings) -> LabelSurface | None:
         geometry=geometry,
         type_scale=scale,
         rotate_degrees=settings.epd_rotate_degrees,
+        output=PANEL_OUTPUT,
     )
 
 
@@ -648,8 +651,13 @@ def settings_page(
     missing: tuple[str, ...] = (),
     mode: str = ARRT_MODE,
     slideshow: SlideshowStatus | None = None,
+    heard: Callable[[], HeardReport] | None = None,
 ) -> server.PageState:
-    """The page's state for this start, with a setup code when no password is set yet."""
+    """The page's state for this start, with a setup code when no password is set yet.
+
+    `heard` is the running supervisor's account of how the server last heard
+    this Player, which the page says as the Player's state.
+    """
     code = auth.new_setup_code() if store.read(ui.cache_dir).password is None else None
     return server.PageState(
         ui=ui,
@@ -660,6 +668,7 @@ def settings_page(
         missing=missing,
         mode=mode,
         slideshow=slideshow,
+        heard=heard,
     )
 
 
@@ -810,12 +819,15 @@ async def _run() -> int:
             extra={"event": "files.drawing", **settings.files.file_lines()},
         )
     clock = Clock.system()
-    identity = FrameIdentity(frame_tv(settings.frame).read_identity) if settings.frame is not None else None
+    identity = (
+        FrameIdentity(frame_tv(settings.frame).read_identity, monotonic=clock.monotonic) if settings.frame is not None else None
+    )
     panels = label_panels(settings)
+    link = ClientPull(settings, monotonic=clock.monotonic)
     supervisor = PettingSupervisor(
         watchdog=watchdog,
         settings=settings,
-        link=ClientPull(settings),
+        link=link,
         worker=partial(run_wall, settings),
         outputs=lambda: player_outputs(settings, frame_identity=identity.value if identity is not None else None),
         now=clock.now,
@@ -824,8 +836,9 @@ async def _run() -> int:
         label_outputs=lambda: [panel.report() for panel in panels.values()],
         forget_labels=LabelCacheSweep(settings),
         frame_identity=identity,
+        settings_url=lambda: settings_url(ui, link.local_address),
     )
-    page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
+    page = asyncio.create_task(run_settings_page(settings_page(ui, heard=supervisor.heard), stop), name="settings-page")
     # Once the settings are read and the panels open, before the first poll: a
     # server down at boot delays no start, and the walls start from the cache.
     watchdog.ready()

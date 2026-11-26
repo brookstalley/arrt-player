@@ -76,22 +76,26 @@ systemd restarts it.
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 from arrt_player import heartbeat as heartbeat_module
 from arrt_player.config import (
+    ALLOWED_HOSTS_SETTING,
     CACHE_DIR_NAMES,
     CACHED_MANIFEST_FILENAME,
     CLIENT_DOCUMENT_FILENAME,
@@ -100,12 +104,15 @@ from arrt_player.config import (
     PLAIN_COMPONENT,
     STATE_FILENAME,
     ClientSettings,
+    UiSettings,
     WallIdUnusable,
     WallSettings,
+    normal_host_name,
 )
 from arrt_player.episodes import Backoff, ReportOnce
-from arrt_player.logs import label_context, wall_context
+from arrt_player.logs import known_as, label_context, wall_context
 from arrt_player.manifest import MEDIA_DIRNAME
+from arrt_player.safe_write import write_whole
 
 log = logging.getLogger(__name__)
 
@@ -300,7 +307,7 @@ class LabelOutputReport:
 
 
 class FrameIdentity:
-    """The Frame's device id, read once it can be and then kept.
+    """The Frame's device id, read again once per heartbeat interval and kept through a failed read.
 
     **Read by the client, not by a wall's worker**, because a Frame with no wall on
     it must still say who it is: a Frame moved to a new client has no wall there
@@ -308,35 +315,69 @@ class FrameIdentity:
     (`player-contract.md` § Transport). The read is the television seam's
     `read_identity`, which opens no art channel and presses no key.
 
-    **Asked again on each report until it answers, then never again**, so a set
-    asleep at boot is identified once it wakes, and an identity once read does
-    not flap away when a later read would have failed. A failure is said once per
-    episode.
+    **Asked on each report until it answers, then once per heartbeat interval**,
+    so a set asleep at boot is identified once it wakes, and another set put at
+    the Frame's address is reported within one interval, without a restart: one
+    REST GET a minute. A failed read keeps the last identity read, so it does not
+    flap away while the set sleeps. A failure is said once per episode, and a
+    changed identity once per change.
     """
 
-    def __init__(self, read: Callable[[], Awaitable[str]], *, budget_seconds: float = IDENTITY_READ_BUDGET_SECONDS) -> None:
+    def __init__(
+        self,
+        read: Callable[[], Awaitable[str]],
+        *,
+        budget_seconds: float = IDENTITY_READ_BUDGET_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        interval_seconds: float = heartbeat_module.INTERVAL_SECONDS,
+    ) -> None:
         self._read = read
         self._budget = budget_seconds
+        self._monotonic = monotonic
+        self._interval = interval_seconds
         self.value: str | None = None
+        self._asked_at: float | None = None
         self._unreadable = ReportOnce()
 
     async def refresh(self) -> None:
-        """Read the identity if it is not yet known. Never raises."""
-        if self.value is not None:
+        """Read the identity if it is not yet known or its interval has come round. Never raises."""
+        now = self._monotonic()
+        if self.value is not None and self._asked_at is not None and now - self._asked_at < self._interval:
             return
+        self._asked_at = now
         try:
-            self.value = await asyncio.wait_for(self._read(), timeout=self._budget)
-        # An identity is an annotation: whatever stops the read, the Frame is reported without one.
+            read = await asyncio.wait_for(self._read(), timeout=self._budget)
+            if not isinstance(read, str) or not read:
+                raise ValueError("the read answered no device id")  # noqa: TRY301 -- one way the read fails among the rest
+        # An identity is an annotation: whatever stops the read, the Frame is reported with the last one, or none.
         except Exception as exc:  # noqa: BLE001  # prawduct:allow prawduct/broad-except -- see above
             if self._unreadable.begin():
                 log.warning(
-                    "the Frame's device id could not be read (%s); it is reported without an identity until it can be",
+                    "the Frame's device id could not be read (%s); %s",
                     f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__,
+                    (
+                        "it is reported without an identity until it can be"
+                        if self.value is None
+                        else "it is reported with the last one read until it can be read again"
+                    ),
                     extra={"event": "client.identity_unreadable", "output": FRAME_OUTPUT},
                 )
             return
         if self._unreadable.end():
             log.info("the Frame's device id was read", extra={"event": "client.identity_read", "output": FRAME_OUTPUT})
+        if self.value is not None and read != self.value:
+            log.warning(
+                "the set at the Frame's address is another set now (%s, was %s); it is reported as the new one",
+                known_as(read),
+                known_as(self.value),
+                extra={
+                    "event": "client.identity_changed",
+                    "output": FRAME_OUTPUT,
+                    "set_now": known_as(read),
+                    "set_was": known_as(self.value),
+                },
+            )
+        self.value = read
 
 
 def hdmi_outputs(drm_root: Path = DRM_ROOT) -> list[OutputReport]:
@@ -416,12 +457,17 @@ def client_outputs(
 
 
 def client_heartbeat(
-    outputs: list[OutputReport], *, reported_at: datetime, label_outputs: list[LabelOutputReport] | None = None
+    outputs: list[OutputReport],
+    *,
+    reported_at: datetime,
+    label_outputs: list[LabelOutputReport] | None = None,
+    settings_url: str | None = None,
 ) -> dict[str, Any]:
     """The client heartbeat (`contract/schemas/client-heartbeat.v1.schema.json`).
 
     `label_outputs` is left out for a client that holds none, which is how the
-    schema reads a client with no label outputs.
+    schema reads a client with no label outputs; `settings_url` is left out when
+    it is not known, because the schema allows it absent and never null.
     """
     heartbeat: dict[str, Any] = {
         heartbeat_module.REPORTED_AT_KEY: reported_at.isoformat(),
@@ -429,7 +475,63 @@ def client_heartbeat(
     }
     if label_outputs:
         heartbeat["label_outputs"] = [output.document() for output in label_outputs]
+    if settings_url is not None:
+        heartbeat["settings_url"] = settings_url
     return heartbeat
+
+
+def settings_url(ui: UiSettings, local_address: str | None) -> str | None:
+    """Where a person on the server's network reaches this Player's settings page, or None when it cannot be said.
+
+    **None when the page is bound to loopback**: no one else can reach it, and a
+    link would point at the server's own machine. Otherwise the first name in
+    `UI_ALLOWED_HOSTS`, which is the operator's word for it; else the address the
+    page is bound to, when it is bound to one; else, for a page on every
+    interface, the address this Player reached the server from
+    (`pull.ClientPull.local_address`), which is on the server's network by
+    construction. Always plain `http` on `UI_PORT`, which is how the page serves.
+
+    The first name is read from the environment `load_ui` read, in the order it
+    was written there: `UiSettings.allowed_hosts` is a set, and keeps no first.
+    An address the page could not be reached at is None rather than a guess: an
+    IPv6 address for a page bound to IPv4's every interface, a link-local
+    address (it needs an interface no other machine shares), or a bind to a
+    name rather than an address.
+    """
+    bind = ipaddress.ip_address(ui.bind) if _is_address(ui.bind) else None
+    if ui.bind.lower() == "localhost" or (bind is not None and bind.is_loopback):
+        return None
+    listed = [part.strip() for part in (ui.environment.get(ALLOWED_HOSTS_SETTING) or "").split(",") if part.strip()]
+    if listed:
+        return _page_at(normal_host_name(listed[0]), ui.port)
+    if bind is None:
+        return None
+    host = str(bind) if not bind.is_unspecified else _reachable(local_address, bind)
+    return _page_at(host, ui.port) if host is not None else None
+
+
+def _reachable(local_address: str | None, bind: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    """The local address, as a page bound to every interface of `bind`'s family can be reached at, or None."""
+    if local_address is None or not _is_address(local_address):
+        return None
+    local = ipaddress.ip_address(local_address)
+    if isinstance(local, ipaddress.IPv6Address) and local.ipv4_mapped is not None:
+        local = local.ipv4_mapped
+    if local.is_link_local or local.version > bind.version:
+        return None
+    return str(local)
+
+
+def _is_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _page_at(host: str, port: int) -> str:
+    return f"http://[{host}]:{port}/" if ":" in host else f"http://{host}:{port}/"
 
 
 # -- the walls' directories ------------------------------------------------------------
@@ -687,19 +789,10 @@ class WallCaches:
         path = entry / LEFT_STAMP_FILENAME
         temporary = entry / f".{LEFT_STAMP_FILENAME}.tmp"
         data = json.dumps({"left_at": stamp.left_at.isoformat(), "absent_seconds": stamp.absent_seconds}).encode("utf-8")
-        # Forced to the card before the rename, as the pull's files are
-        # (`pull._write_atomically`): the stamp is the only record of when the
-        # wall left, and a power cut must leave the old one or the new, whole.
-        try:
-            with temporary.open("wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(path)
-        except BaseException:  # prawduct:allow prawduct/broad-except -- cleanup-and-reraise; the temp file must go on any exit
-            with contextlib.suppress(OSError):
-                temporary.unlink(missing_ok=True)
-            raise
+        # Forced to the card before the rename: the stamp is the only record of
+        # when the wall left, and a power cut must leave the old one or the new,
+        # whole.
+        write_whole(path, data, temporary=temporary)
         stamp.written_seconds = stamp.absent_seconds
 
     def _say_unknown(self, entry: Path) -> None:
@@ -743,6 +836,53 @@ def _why_stopped(output: str, placed_on: str | None, available: dict[str, Any], 
     return False, f"on {output}, where wall {claimed[output]} is shown"
 
 
+class ReportAnswer(StrEnum):
+    """What the server last answered this Player's client heartbeat, as far as it bears on the Player's state.
+
+    Only the answers that say something of the Player on the server's side are
+    told apart: the server took the report, it refused it as one it cannot read,
+    or it refused the token it came with. Everything else (no answer, a `5xx`, a
+    `408` or `429`, an answer that is not the server's, a refusal for its size)
+    leaves the server's view of the Player as it was, so it is one answer here:
+    judged by the last report it took, or still unreadable after a refusal, which
+    the server says until it takes a report (`ClientPull.last_answer`).
+    """
+
+    #: `204`: the server holds this report.
+    ACCEPTED = "accepted"
+    #: `400` with the server's error body: the server's verdict that it cannot
+    #: read the report, which it says of this Player until it takes one.
+    UNREADABLE = "unreadable"
+    #: `401`: the server does not know the token, so it cannot say which Player sent it.
+    TOKEN_REFUSED = "token_refused"  # noqa: S105 -- an answer's name, not a secret
+    #: Anything else: the server's view of this Player is still its last report taken.
+    NOT_TAKEN = "not_taken"
+
+
+#: How many heartbeat intervals a report counts as current for, the contract's
+#: `stale_after_intervals` (`contract/timing.json`). Past it the server says a
+#: Player is not heard from, and so does the Player of itself.
+STALE_AFTER_INTERVALS: Final[int] = 3
+
+#: How old the last report taken may be while the server still calls the Player reporting.
+STALE_AFTER_SECONDS: Final[float] = heartbeat_module.INTERVAL_SECONDS * STALE_AFTER_INTERVALS
+
+
+@dataclass(frozen=True, slots=True)
+class HeardReport:
+    """What this Player knows of how the server last heard it: its last answer, and the last report taken."""
+
+    #: What the server's answers to the client heartbeat say of this Player now
+    #: (`ClientPull.last_answer`), or None before any was answered.
+    answer: ReportAnswer | None
+    #: The instant the last report the server took was made (its `reported_at`),
+    #: or None while none has been taken since this process started.
+    accepted_at: datetime | None = None
+    #: How long ago that report was taken, by the monotonic clock, so a clock set
+    #: right after boot cannot age it; None with `accepted_at`.
+    accepted_age_seconds: float | None = None
+
+
 class ClientLink(Protocol):
     """The two client routes, as the supervisor needs them. `pull.ClientPull` is the real one."""
 
@@ -754,6 +894,10 @@ class ClientLink(Protocol):
 
     async def report(self, heartbeat: dict[str, Any]) -> bool:
         """POST the client heartbeat. True when the server took it."""
+
+    @property
+    def last_answer(self) -> ReportAnswer | None:
+        """What the server's answers to `report` say of this Player now (`ClientPull.last_answer`), or None before one."""
 
     async def close(self) -> None: ...
 
@@ -841,6 +985,7 @@ class Supervisor:
         forget_labels: ForgetLabels | None = None,
         wall_caches: WallCaches | None = None,
         frame_identity: FrameIdentity | None = None,
+        settings_url: Callable[[], str | None] = lambda: None,
         restart_min_seconds: float = RESTART_MIN_SECONDS,
         restart_max_seconds: float = RESTART_MAX_SECONDS,
     ) -> None:
@@ -856,6 +1001,7 @@ class Supervisor:
         self._label_outputs = label_outputs
         self._forget_labels = forget_labels
         self._frame_identity = frame_identity
+        self._settings_url = settings_url
         self._now = now
         self._monotonic = monotonic
         self._restart_min = restart_min_seconds
@@ -875,8 +1021,11 @@ class Supervisor:
         #: lacks is news.
         self._reported_unplaceable: set[tuple[str, str]] = set()
         self._reported_unplaceable_labels: set[tuple[str, str]] = set()
-        self._reported_outputs: tuple[list[OutputReport], list[LabelOutputReport]] | None = None
+        #: The outputs, label outputs and settings address last reported and taken.
+        self._reported: tuple[list[OutputReport], list[LabelOutputReport], str | None] | None = None
         self._reported_at: float | None = None
+        #: The instant the last report the server took was made, for the settings page.
+        self._accepted_at: datetime | None = None
         #: The document the workers were last matched to, and the outputs they
         #: were matched against, so a change in either is a reason to match again.
         self._document: ClientDocument | None = None
@@ -891,6 +1040,16 @@ class Supervisor:
     def labels(self) -> dict[str, LabelAssignment]:
         """Each label output with a renderer, and what it captions."""
         return {output: running.assignment for output, running in self._labels.items()}
+
+    def heard(self) -> HeardReport:
+        """How the server last heard this Player: its last answer, and when the last report it took was made."""
+        if self._accepted_at is None or self._reported_at is None:
+            return HeardReport(answer=self._link.last_answer)
+        return HeardReport(
+            answer=self._link.last_answer,
+            accepted_at=self._accepted_at,
+            accepted_age_seconds=self._monotonic() - self._reported_at,
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         """Supervise until asked to stop, then stop every worker and wait for each."""
@@ -1303,20 +1462,26 @@ class Supervisor:
     # -- the outputs ----------------------------------------------------------------
 
     async def _report_outputs(self) -> None:
-        """POST the client heartbeat when the outputs changed, or once per heartbeat interval.
+        """POST the client heartbeat when what it says changed, or once per heartbeat interval.
 
         **Changed is news and is sent at once**: a screen plugged in is what a
-        curator is waiting to see on the Clients page before choosing it. An
-        unchanged report is sent once a minute, so the server can say how long
-        ago this client was heard from.
+        curator is waiting to see on the Clients page before choosing it, and so
+        is another set at the Frame's address or a new address for the settings
+        page. An unchanged report is sent once a minute, so the server can say
+        how long ago this client was heard from. One the server refused is held
+        (`pull.ClientPull.report` says for how long), so it is offered on every
+        poll and the link decides whether to send it.
         """
         if self._frame_identity is not None:
             await self._frame_identity.refresh()
-        outputs = (self._outputs(), self._label_outputs())
+        reporting = (self._outputs(), self._label_outputs(), self._settings_url())
         elapsed = self._monotonic()
         due = self._reported_at is None or elapsed - self._reported_at >= heartbeat_module.INTERVAL_SECONDS
-        if outputs == self._reported_outputs and not due:
+        if reporting == self._reported and not due:
             return
-        if await self._link.report(client_heartbeat(outputs[0], label_outputs=outputs[1], reported_at=self._now())):
-            self._reported_outputs = outputs
+        made = self._now()
+        heartbeat = client_heartbeat(reporting[0], label_outputs=reporting[1], settings_url=reporting[2], reported_at=made)
+        if await self._link.report(heartbeat):
+            self._reported = reporting
             self._reported_at = elapsed
+            self._accepted_at = made

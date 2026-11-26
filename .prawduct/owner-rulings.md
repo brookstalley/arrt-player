@@ -4,6 +4,39 @@
      Each entry says where the decision landed; the governing text lives there.
      Format and purpose: prawduct's templates/owner-rulings.md. -->
 
+**2026-11-25, while wave 3 was being integrated.** Recorded in full in Arrt's `owner-rulings.md` under the same date ("five
+answers while wave 3 was being integrated"). The owner: "yes to all recommendations". The two that are the Player's:
+
+- **The costs of "remove only what it recorded uploading" are accepted before any deploy.**
+  Pictures an older Player uploaded without recording them stay on the television until a
+  person deletes them. Rolling back to the release before schema 5 brings back that
+  release's sweep, which clears the household's own pictures, so **a Player rollback across
+  that release needs the owner's say-so each time**; the runbook's rollback step is owed this sentence by the wave's records chunk.
+- **Contract 1.3.0's `staging-repeated` stays must-refuse.** When this Player pins
+  `contract-v1.3.0`, its reader must refuse a feed that lists the same staging entry twice,
+  which it accepts today; the 32-output cap was ratified the same day.
+
+  *Correction, 2026-11-25, by the wave's records (the owner's words above are not
+  rewritten):* "brings back that release's sweep" is true only after the runbook's step 19b
+  (the store's version set to 2) or after the store is deleted. Until then the release
+  before schema 5 (v0.8.0) refuses the newer store, journals `daemon.state_too_new`, parks
+  only the Frame wall and touches nothing on the set; after it, its sweep removes every
+  uploaded picture its own records do not name, the household's, older leftovers, even the
+  one on screen. The runbook's § Going back and step 19b now carry the owner's say-so, and
+  the contract pin moved to `contract-v1.3.0` with the reader refusing `staging-repeated`.
+
+**2026-11-19, during wave 2 of the audit fixes.** Recorded in full in Arrt's `owner-rulings.md` under the same date ("during wave
+2 of the audit fixes, two rulings"). The one that is the Player's:
+
+- **Arrt Player removes from a television only the pictures it recorded uploading.** The
+  owner: "yes to recommendations", to the advisor's recommendation of exactly that, for a
+  later wave. Until it is built the Player clears every uploaded picture it cannot account
+  for on a set it meets fresh, which is the recorded design (`security-model.md`). Built by
+  `build-plan-audit-wave-3.md`, whose decision on what happens to pictures an older Player
+  uploaded and never recorded is the owner's to veto before any deploy.
+  *2026-11-25, by the wave's records: built, and its costs accepted (above);
+  `security-model.md` § What it does to the television says what the Player does now.*
+
 **2026-11-19, after wave 1 of the audit fixes.** The full set is in Arrt's `owner-rulings.md` under the same date. The two that are
 the Player's:
 

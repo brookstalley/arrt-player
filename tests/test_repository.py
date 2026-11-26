@@ -113,6 +113,15 @@ _DEPLOYMENT_PATHS = re.compile(r"/srv/art|/opt/samsung-frame-art-loader")
 _DEPLOYMENT_PATH_KIND = "deployment path in code"
 _CODE_TREES = ("src/", "tools/")
 
+#: A planning unit's number in prose that ships. A reader of the code meets the
+#: sentence long after the plan that numbered its chunks is gone, and a chunk's number
+#: then names nothing; the sentence says what it means, and the commit says where
+#: the work came from. Read over every file under these trees, not only `.py`,
+#: because a fixture's README is read the same way.
+_SHIPPED_PROSE_TREES = (*_CODE_TREES, "tests/")
+_CHUNK_NUMBER = re.compile(r"\b[Cc]hunk \d{2}")
+_CHUNK_NUMBER_KIND = "a chunk number in shipped prose"
+
 
 def _tracked() -> list[str]:
     listed = subprocess.run(
@@ -195,6 +204,8 @@ def _kinds_in(line: str, name: str) -> list[str]:
         and _DEPLOYMENT_PATHS.search(line)
     ):
         kinds.append(_DEPLOYMENT_PATH_KIND)
+    if name.startswith(_SHIPPED_PROSE_TREES) and _CHUNK_NUMBER.search(line):
+        kinds.append(_CHUNK_NUMBER_KIND)
     line = _EXAMPLE_HOST.sub("example-host", line)
     shapes = dict(_HOST_SHAPES)
     if not name.startswith(_FIXTURE_TREES):
@@ -220,15 +231,27 @@ def _leaks(root: pathlib.Path, names: list[str]) -> list[tuple[str, str]]:
     return found
 
 
+_WHY_REFUSED = {
+    _CHUNK_NUMBER_KIND: "durable prose carries its reason, not a chunk number, which belongs in the commit message",
+    _DEPLOYMENT_PATH_KIND: "code does not name the deployment's published paths, which do not exist on a dev machine",
+}
+_WHY_REFUSED_DEFAULT = "a deployment value, which belongs in .env or nowhere"
+
+
+def _refusal(leaks: list[tuple[str, str]]) -> str:
+    """One line per hit, each with the reason for its own kind."""
+    return "\n".join(f"{where}: {kind}: {_WHY_REFUSED.get(kind, _WHY_REFUSED_DEFAULT)}" for where, kind in leaks)
+
+
 def test_no_file_in_the_working_tree_carries_a_deployment_value():
     """Documents, `deploy/`, `.prawduct/` and config as well as source; it names file, line and kind, never the value."""
     leaks = [
-        f"{where}: {kind}"
+        (where, kind)
         for where, kind in _leaks(PROJECT, _working_tree())
         if (where.rsplit(":", 1)[0], kind) not in _ACCEPTED_RESIDUE
     ]
 
-    assert leaks == [], "a deployment value, which belongs in .env or nowhere:\n" + "\n".join(leaks)
+    assert leaks == [], "the working tree carries what this repository refuses:\n" + _refusal(leaks)
 
 
 def test_every_accepted_residue_still_matches():
@@ -538,3 +561,52 @@ def test_the_lock_records_the_commit_each_git_override_names():
         )
         assert recorded, f"{package} has no git source in uv.lock"
         assert recorded[1] == commit, f"uv.lock holds a different commit for {package} than its override names"
+
+
+@pytest.mark.parametrize("where", ["src/arrt_player/a.py", "tools/a.py", "tests/test_a.py", "tests/fixtures/a/README.md"])
+@pytest.mark.parametrize("line", ["# Chunk " + "99: the thing", "    chunk " + "07's fake", '"""Chunk ' + '12 item 3"""'])
+def test_a_chunk_number_in_shipped_prose_is_refused_in_each_tree(tmp_path, where, line):
+    target = tmp_path / where
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# prose\n" + line + "\n", encoding="utf-8")
+
+    assert _leaks(tmp_path, [where]) == [(f"{where}:2", _CHUNK_NUMBER_KIND)]
+
+
+@pytest.mark.parametrize(
+    ("where", "line"),
+    [
+        ("src/arrt_player/a.py", "# a chunk of the feed, and 25 chunks of it"),
+        ("tests/test_a.py", "# the chunk " + "9 in a list"),
+        ("src/arrt_player/a.py", "# the hunk " + "99 of a diff"),
+        (".prawduct/artifacts/a-plan.md", "### Chunk " + "99: a plan names its chunks"),
+        ("docs/a.md", "Chunk " + "24 is the measurement"),
+    ],
+)
+def test_a_lookalike_or_a_plan_that_names_its_chunks_is_not_refused(tmp_path, where, line):
+    target = tmp_path / where
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(line + "\n", encoding="utf-8")
+
+    assert _leaks(tmp_path, [where]) == []
+
+
+@pytest.mark.parametrize(
+    ("where", "line", "kind", "reason"),
+    [
+        ("src/a.py", "# Chunk " + "99", _CHUNK_NUMBER_KIND, "not a chunk number, which belongs in the commit message"),
+        ("src/a.py", 'ROOT = "' + _SRV + '"', _DEPLOYMENT_PATH_KIND, "do not exist on a dev machine"),
+        ("docs/a.md", "host 10.1.2.3", "private IPv4 address", "belongs in .env or nowhere"),
+    ],
+)
+def test_each_kind_the_scan_refuses_says_its_own_reason(tmp_path, where, line, kind, reason):
+    target = tmp_path / where
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(line + "\n", encoding="utf-8")
+
+    said = _refusal(_leaks(tmp_path, [where]))
+
+    assert kind in said
+    assert reason in said
+    if kind != "private IPv4 address":
+        assert ".env or nowhere" not in said, "a kind that is not a deployment value was told it belongs in .env"

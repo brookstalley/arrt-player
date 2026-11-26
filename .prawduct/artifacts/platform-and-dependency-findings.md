@@ -363,6 +363,15 @@ images on the wall.
 | Default `timeout=10`, path argument | raised `AssertionError` out of `upload()` |
 | Explicit `timeout=60`, path argument | returned its content id, **8.39 s** wall-clock |
 
+**The Player's rule for what it may remove rests on the first row.** An upload
+sends an `image_date` it chooses, and the set's listing carries it back, so the
+Player finds its own picture by that date whatever the library reported
+(`state/store.py:DisplayState.uploads_on`; `security-model.md` § What it does to
+the television). **That echo has been measured once, on one upload, one set and
+one firmware (2024 generation, firmware 1310).** Whether every firmware echoes it,
+and what a picture the household uploads from the set's phone app is stamped with,
+are owed (`samsung-tv-state-findings.md` § What is still owed, item 12).
+
 > **Corrected 2026-08-04, and the correction matters to anyone fixing this.** An
 > earlier version of this section made three claims it could not support, all
 > since checked against the pinned source.

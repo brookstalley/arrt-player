@@ -35,6 +35,7 @@ import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final, final
@@ -44,6 +45,20 @@ from typing import Final, final
 #: upload verb takes no category argument at all. Changing the picture is therefore a pointer
 #: into one flat list, which is why bindings and orphan removal exist.
 UPLOADED_CATEGORY: Final[str] = "MY-C0002"
+
+#: How the set writes a picture's `image_date`, which an upload sends and the
+#: set's listing echoes for each picture it holds: the protocol's own spelling,
+#: to the second, in the set's local time.
+_IMAGE_DATE_FORMAT: Final[str] = "%Y:%m:%d %H:%M:%S"
+
+
+def upload_marker(at: datetime) -> str:
+    """The `image_date` an upload sent at `at` carries: the mark by which the Player knows its own picture again.
+
+    In local time, because the set shows the date to whoever browses its
+    pictures; the Player compares it only with what it recorded sending.
+    """
+    return at.astimezone().strftime(_IMAGE_DATE_FORMAT)
 
 
 class TvUnavailable(Exception):
@@ -188,7 +203,7 @@ READS: Final[frozenset[str]] = frozenset(
     {
         "connect",
         "close",
-        "listed_content_ids",
+        "listed_pictures",
         "showing_art",
         "art_mode_announcement_pending",
         "power_state",
@@ -237,10 +252,15 @@ class TvClient(ABC):
         return await self._send_show(content_id)
 
     @final
-    async def upload(self, path: Path) -> str:
-        """Put an image on the television and return the id it was given. Held in the television state."""
+    async def upload(self, path: Path, *, marker: str | None = None) -> str:
+        """Put an image on the television, stamped `marker`, and return the id it was given. Held in the television state.
+
+        `marker` is the `image_date` the set will list the picture under; a
+        caller that keeps a record of its uploads chooses it before sending,
+        and one that does not is given the time now (`upload_marker`).
+        """
         await self._permit("upload")
-        return await self._send_upload(path)
+        return await self._send_upload(path, marker if marker is not None else upload_marker(datetime.now(UTC)))
 
     @final
     async def remove(self, content_ids: Sequence[str]) -> RemovalOutcome:
@@ -306,15 +326,27 @@ class TvClient(ABC):
         """Stop the set's own slideshow. Reached only through `disable_native_slideshow`."""
 
     @abstractmethod
+    async def listed_pictures(self) -> Mapping[str, str | None]:
+        """Every id the television lists in the uploaded category, each with the `image_date` it lists, if any.
+
+        **One request**, the set's own list of its uploads, which carries each
+        picture's date beside its id: the same request `listed_content_ids`
+        answers from.
+        """
+
     async def listed_content_ids(self) -> frozenset[str]:
-        """Every id the television currently lists in the uploaded category."""
+        """Every id the television currently lists in the uploaded category: `listed_pictures`, without the dates."""
+        return frozenset(await self.listed_pictures())
 
     @abstractmethod
-    async def _send_upload(self, path: Path) -> str:
-        """Put an image on the television and return the id it was given. Reached only through `upload`.
+    async def _send_upload(self, path: Path, marker: str) -> str:
+        """Put an image on the television, stamped `marker`, and return the id it was given. Reached only through `upload`.
 
         Raises `TvUploadFailed` only when the image is confirmed *not* to be
-        there — never merely because the library said so.
+        there — never merely because the library said so — **or when, once
+        sent, whether it landed cannot be established**: a caller that recorded
+        the marker finds it by that later. `TvUnavailable` is raised only
+        before anything was sent.
         """
 
     @abstractmethod
