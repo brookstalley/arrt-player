@@ -195,6 +195,24 @@ async def test_a_feed_is_cached_whole_with_every_works_media_verified(pull, stub
     assert sorted(adopted.works) == ["w1", "w7"]
 
 
+async def test_a_feed_that_stages_one_work_twice_is_refused_before_it_is_cached_and_said_once(
+    pull, stub, session, http_settings, caplog
+):
+    """The contract's `staging-repeated`, as the server sends it: the wall keeps the feed it had, and one line says why."""
+    good = stub.publish_feed([("w1", "2026-06-21T08:00:00+00:00", "2026-06-21T13:00:00+00:00")], staging=("w7",))
+    assert await pull.cycle(session) is True
+    stub.publish_feed([("w1", "2026-06-21T08:00:00+00:00", "2026-06-21T13:00:00+00:00")], staging=("w7", "w7"))
+
+    with caplog.at_level(logging.INFO, logger="arrt_player.pull"):
+        for _ in range(2):
+            await pull.cycle(session)
+
+    assert _cached(http_settings) == good, "a feed that stages one work twice replaced the last good one"
+    refused = [record for record in caplog.records if getattr(record, "event", None) == "pull.manifest_refused"]
+    assert len(refused) == 1, "the refusal was said other than once over two polls"
+    assert "staging lists a work more than once" in refused[0].getMessage()
+
+
 async def test_a_feed_whose_one_master_is_bad_is_cached_whole_without_it(pull, stub, session, http_settings):
     """Every work the schedule names stays in the feed; the one with no good media is the programme's to skip.
 
