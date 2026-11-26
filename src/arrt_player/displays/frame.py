@@ -418,8 +418,9 @@ class FrameDisplay:
         #: asked for again until the next feed, as the orphan path does not ask
         #: again: asking at once learns nothing.
         self._kept_by_the_set: set[str] = set()
-        #: Images the set lists that nothing accounts for, left on it by the
-        #: last reconciliation because the set was showing one of them
+        #: Pictures the upload records name as this Player's on the set that no
+        #: binding wants (`DisplayState.uploads_on`), left on it by the last
+        #: reconciliation because the set was showing one of them
         #: (`_remove_orphans`). Their removal is owed again once the wall shows
         #: another picture (`prepare`).
         self._left_on_the_wall: frozenset[str] = frozenset()
@@ -433,6 +434,9 @@ class FrameDisplay:
         #: The sets the journal has said, in this process, how many listed
         #: pictures the Player leaves alone on (`tv.others_left_alone`).
         self._left_alone_said: set[str] = set()
+        #: The sets the journal has said, in this process, list pictures of the
+        #: Player's without their markers (`tv.markers_unconfirmed`).
+        self._unconfirmed_said: set[str] = set()
 
         #: The set could not be reached at all. Its own ladder, separate from the
         #: wall's: a television that is asleep and one that is awake and ignoring
@@ -733,7 +737,7 @@ class FrameDisplay:
         """
         was = self._phase
         self._phase = phase
-        if isinstance(was, GoingOn) and phase is not was:
+        if isinstance(was, GoingOn) and not (isinstance(phase, GoingOn) and phase.scratch is was.scratch):
             was.scratch.close()
         if isinstance(phase, GoingOn) and not isinstance(was, GoingOn):
             self._forget_what_the_set_showed()
@@ -781,11 +785,19 @@ class FrameDisplay:
 
         **The store in memory is kept**: a refused upload is no outage, and it
         is only on one (`_forget_the_set`) that what was put up while the set
-        would not say is let go. A set not yet identified is asked at the next
-        pass as it would have been.
+        would not say is let go. **Its spell ends, though**: the next pass may
+        open a connection to another set at the address without any call of
+        the wall's seeing this one go, and a set heard from on that connection
+        is not one the uploads already sent went to. So the wall goes on in a
+        new spell, and what the old one sent may be found only on the set the
+        store last recorded (`GoingOn`). A set not yet identified is asked at
+        the next pass as it would have been.
         """
-        if isinstance(self._phase, Identified):
+        phase = self._phase
+        if isinstance(phase, Identified):
             self._become(NotYetKnown())
+        elif isinstance(phase, GoingOn):
+            self._become(GoingOn(phase.scratch))
 
     def _forget_the_set(self) -> None:
         """The connection went: whatever answers next is identified before a binding is used on it.
@@ -795,8 +807,8 @@ class FrameDisplay:
         connection is given a store in memory, and a theme's uploads, at most
         once per outage and its `IDENTITY_PATIENCE_SECONDS`, never once per
         flap. Those uploads are on a set nobody can name, recorded with no set,
-        and removed from the first set whose listing shows them with their
-        markers.
+        and may be found only on the sets `GoingOn` names
+        (`DisplayState.uploads_on`).
         """
         self._become(NotYetKnown())
 
@@ -1285,8 +1297,10 @@ class FrameDisplay:
     async def _reconcile_with_the_set(self, pictures: Sequence[Picture]) -> bool:
         """Compare what this device believes against what the television lists.
 
-        Runs when a manifest is adopted, and when the hourly look over the
-        bindings finds one due to retire (`_save_feed_time`), never every pass.
+        Runs only when it is owed (`_reconciliation_owed`), never every pass:
+        each place that sets it says why, among them a manifest adopted, the
+        hourly look over the bindings finding one due to retire
+        (`_save_feed_time`), and the set saying which it is (`_know_the_set`).
         The comparison costs a real request to the set, and at a one-second poll
         that would be a call per second forever — traffic that buys nothing,
         since nothing changes what the television holds except this process.
@@ -1360,9 +1374,11 @@ class FrameDisplay:
             # the set first; settled for now, because leaving that store owes
             # the work again (`_know_the_set`).
             return True
+        unconfirmed = self._store.unconfirmed_on(identity, listed)
         ours = self._store.uploads_on(identity, listed, address=self._settings.tv_address)
         self._unplaced_checked.add(identity)
         self._say_what_is_left_alone(identity, len(listed) - len(ours))
+        self._say_what_the_set_does_not_confirm(identity, unconfirmed)
         accounted = self._state.accounted_content_ids()
         unaccounted = ours - accounted
         on_the_wall = self._on_the_wall()
@@ -1439,6 +1455,25 @@ class FrameDisplay:
             "records cannot match the picture",
             left_alone,
             extra={"event": "tv.others_left_alone", "left_alone": left_alone, "set_now": known_as(identity)},
+        )
+
+    def _say_what_the_set_does_not_confirm(self, identity: str, unconfirmed: int) -> None:
+        """Say once per set in this process that it lists pictures of the Player's without the date each was sent with.
+
+        A set that does not echo `image_date`, or a firmware that stopped,
+        leaves every picture the Player puts on it there for good, because a
+        picture is the Player's only with its marker; this line is the one
+        sign of it before the set's storage fills.
+        """
+        if unconfirmed <= 0 or identity in self._unconfirmed_said:
+            return
+        self._unconfirmed_said.add(identity)
+        log.warning(
+            "the television lists %d picture(s) this Player recorded putting there without the date each was sent "
+            "with, so it cannot tell them from the household's and removes none of them; a set that does not "
+            "echo that date keeps every picture the Player puts on it",
+            unconfirmed,
+            extra={"event": "tv.markers_unconfirmed", "unconfirmed": unconfirmed, "set_now": known_as(identity)},
         )
 
     def _retirements(self, pictures: Sequence[Picture]) -> tuple[tuple[Binding, ...], frozenset[str]]:

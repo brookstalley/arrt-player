@@ -321,13 +321,28 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
   list (`ClientPull.last_answer`, which the page reads), and "Screen off" for a connector
   with nothing on it, as the vocabulary says, where the plan wrote "No screen".
 - **2026-11-25 (Chunk 09, integration):** the page says "Report unreadable" until a
-  report is taken, as the server does (whatever answers come between), where it cleared at
+  report is taken, as a server of Arrt's wave 3 or later does (whatever answers come
+  between; it remembers a refusal in memory, forgotten at its restart, where an older
+  server records nothing of one and says "Reporting", then "Not heard from"), where it cleared at
   the next answer that was not a `400`, and its turn to "Not heard from" is held by a test
   at the contract's own figure (`timing()`), not the module's; and three tests the
   interactions needed: a feed staging one work twice refused by the pull before it is cached, said once;
   a client document the card will not force leaves the last one whole and nothing staged;
   the transport table's client-heartbeat rows replayed over a report with the settings
-  address and the Frame's identity.
+  address and the Frame's identity. Arrt's real-Player test (`player_e2e`) passed on the
+  pool against this branch at `4f632344` with Arrt's server at `20970bf4` (request
+  `af787c0faae143e6b49fd26545f7c414`); the pin moves after the merge (§ Requests, Q3).
+- **2026-11-26 (Chunks 04 and 02, at the boundary review):** **a spell ends when the
+  connection may have gone.** An upload whose read-back failed, or an art-mode read that
+  failed, closes the connection without the wall's pass failing; while the wall went on
+  without a set, its spell outlived that connection, so a set heard from on the next one
+  could be taken as the one those uploads went to, and a household picture there stamped in
+  a failed upload's second removed. The wall now goes on in a new spell, with the same
+  store in memory: what the old spell sent may be found only on the set the store last
+  recorded. Every other way the connection goes ends the pass and the going on with it.
+  Cost: such copies on a set the store never recorded stay for good. **A set that does not
+  echo the marker is said** (`tv.markers_unconfirmed`, once per set in a process), where it
+  was silent.
 - **2026-11-25, the owner's rulings** ("yes to all recommendations", `.prawduct/owner-rulings.md`):
   the costs of removing only what was recorded are accepted before any deploy; a rollback
   across schema 5 needs the owner's say-so each time; `staging-repeated` stays
@@ -844,9 +859,11 @@ has been run, because no revision has been deployed since. They are not copied h
     for the uploaded category, by hand. If the date is absent or rewritten, the Player's
     records never match the set's listing, and **nothing the Player uploads there is ever
     removed**: the code does not fall back to content ids, so retired works and re-rendered
-    works leave their pictures on the set for good (it fails in the safe direction, and
-    silently; a follow-up decision). Its sign in the journal: `tv.others_left_alone` keeps
-    counting pictures the Player uploaded itself.
+    works leave their pictures on the set for good (it fails in the safe direction). Its
+    sign in the journal: `tv.markers_unconfirmed`, a WARNING once per set in a process at
+    the first reconciliation that finds any, with how many of the Player's recorded
+    pictures the set lists without their dates (`unconfirmed`); a firmware that stops
+    echoing it is said at the next process's first reconciliation.
 15. **What the set stamps on a picture the household uploads from the phone.** Upload one
     from the set's phone app and read its `image_date` (by the same hand-read as item 14). If it is a phone's photo date or the
     set's clock to the second, a collision with the Player's marker is a same-second upload;
@@ -884,8 +901,11 @@ has been run, because no revision has been deployed since. They are not copied h
     wrong set and the rule narrows further (a follow-up decision).
 21. **The KMS screen's refusal path, at a real screen** (Chunk 05's follow-up: a screen that
     refuses a picture is asked for it again each pass; tested against doubles only, never
-    on a real connector). Make a real HDMI output refuse a draw (what causes it on the Pi is
-    part of the finding; a screen unplugged as a picture is put up is the likeliest) and read
+    on a real connector). Make a real HDMI output refuse a draw: the card refusing it
+    (`drmModeSetCrtc` or `drmModeAddFB` failing, as while another process such as mpv or a
+    console holds the display, or no free CRTC) or a render that will not decode. **Not an
+    unplugged screen**: the output handles that itself, and the journal says `screen.absent`,
+    then `screen.returned`, with the selection a success, which is another path. Read
     the journal: `screen.draw_failed` once, then, when the output takes the picture,
     `screen.draw_recovered` and `rotation.selected` once each, the wall back to showing
     art, and no line repeated each pass. If the refused picture is drawn without being
@@ -912,7 +932,11 @@ has been run, because no revision has been deployed since. They are not copied h
   to the server's wave-3 planner before 1.3.0 is cut.
 - **Reviews:** Chunks 02 and 04 each get a `final` review before the next phase is
   dispatched, because 04 builds on 02 and 06 on 04. Chunk 10's `cumulative` makes the
-  branch PR-ready.
+  branch PR-ready. **As run:** neither `final` review was run; the boundary's
+  `cumulative` (`rev-20261126T005955Z-6c8d1aca`, every chunk from `aeeec7e`) stood in for
+  both. What a review of 04 was there to catch was found by integration instead (a record
+  of no set matched on any set, the follow-up below), and the cumulative found one more
+  path to it (a spell outliving its connection, fixed at the boundary).
 - **The heavy run:** the whole suite after each phase and after Chunk 10.
 - **Before any deploy:** the owner is told the first decision's cost (an older Player's
   unrecorded copies stay on the set) and item 18's check. **Done and accepted,

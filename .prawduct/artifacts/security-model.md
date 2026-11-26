@@ -342,13 +342,18 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   says so before a new address is saved and after. A picture is the Player's on a
   set when a record of that set's holds its id with the date the listing shows
   equal to the marker the upload carried, or, for an upload whose id was never
-  learned, when it is the one listed picture carrying that marker; a household
-  picture the set stamps with the same second as an upload of the Player's on
-  that set is the residue. **An upload whose record cannot be written is not
+  learned, when it is the one listed picture carrying that marker; or, for a
+  record carried from a binding an older store wrote, which has no marker, when
+  the listing shows its id (the date shown is then kept as its marker). A
+  household picture the set stamps with the same second as an upload of the
+  Player's on that set is the residue; so would be one under a carried record's
+  id, were the set to give a removed picture's id to a new one before the first
+  listing after the upgrade (not measured). **An upload whose record cannot be written is not
   sent** (`StoreFault`), because a picture with no record is one the Player could
   never take off. **The rule rests on the set echoing the marker**, measured once,
   on one upload (`platform-and-dependency-findings.md`); on a set that does not,
-  the Player's records never match and nothing it uploads there is removed. The
+  the Player's records never match and nothing it uploads there is removed, which
+  the journal says once per set in a process (`tv.markers_unconfirmed`). The
   owner ruled this on 2026-11-19 ("yes to recommendations") and accepted its costs
   on 2026-11-25: the pictures an older Player put up stay until a person deletes
   them on the set (no tool of this repository removes a picture it did not
@@ -393,7 +398,10 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   holds for every removal of an image the Player knows is up. A record of no set
   is never matched on any other set, by id or by marker, whatever a picture there
   carries, because the address may reach another set before this connection is
-  seen to have gone.
+  seen to have gone. **A failure that may have taken the connection without
+  ending the pass** (an upload's read-back, an art-mode read) **starts a new
+  spell** with the same store in memory, so a set heard from on the next
+  connection is never taken as the one the earlier uploads went to.
   **Known limits, recorded and not fixed:** a set that opens its art channel and
   never gives its `device.duid` gains one theme of the store in memory's copies
   per outage and its fifteen minutes, and nothing removes them until a set they may

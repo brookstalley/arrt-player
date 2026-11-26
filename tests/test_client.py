@@ -1572,6 +1572,7 @@ WALL_EVENTS = frozenset(
         "tv.orphan_removal_unconfirmed",
         "tv.removal_incomplete",
         "tv.others_left_alone",
+        "tv.markers_unconfirmed",
         "tv.upload_misreported",
         "tv.selection_unreadable",
         "tv.selection_observer_failed",

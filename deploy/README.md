@@ -615,13 +615,17 @@ not write, the theme a set that would not say received per outage, every picture
 under a store deleted at runbook step 6a (the new Player records none of them),
 and images of an earlier generation of this product. **A set that does not echo the
 `image_date` it was sent** (measured once, on one upload) matches none of the
-Player's records, and then nothing the Player uploads there is ever removed: check
+Player's records, and then nothing the Player uploads there is ever removed, which
+the journal says once per set in a process (`tv.markers_unconfirmed`): check
 it at the set before the deploy (`build-plan-audit-wave-3.md` § Operator's
 checklist, item 14). The store moves to schema 5 (`tv_upload`); a wall whose store
 cannot be written sends no upload.
 
 **The way back across schema 5 needs the owner's say-so each time.** Measured at
-integration: the release before (v0.8.0, schema 2) refuses the newer store, journals
+integration (v0.8.0 at its tag against a schema-5 store, on no Pi and with no
+television; that nothing then connects to the set is read from v0.8.0's
+`run_frame_wall`, which returns before the Frame wall is built): the release before
+(v0.8.0, schema 2) refuses the newer store, journals
 `daemon.state_too_new`, parks only the Frame wall and touches nothing on the set.
 Only after the runbook's step 19b sets the store's version to 2, or the store is
 deleted, does its sweep remove every uploaded picture its own records do not name:
@@ -645,7 +649,11 @@ yet", "Waiting for its first report", "Reporting", "Not heard from since <date>"
 "Report unreadable", as the server's Players page does for the same Player, and
 its own sentences where the server has none ("The server does not accept this
 Player's token", "No report taken since the Player started"). A screen on the
-slideshow picker is "Screen off" or "No screen".
+slideshow picker is "Screen off" or "No screen". The page agrees with a server of
+Arrt's wave 3 or later, which remembers a refused report in memory and says
+"Report unreadable" until it accepts one (forgotten at the server's restart); a
+server before that records nothing of a refusal and goes on saying "Reporting",
+then "Not heard from", while this page says "Report unreadable".
 
 **Smaller changes.** Every file the Player writes whole goes through one helper
 (`safe_write.py`), so a failed write leaves no `.tmp`. A screen that refuses a

@@ -19,7 +19,9 @@ recorded and any of this Player's its records cannot match are left where they a
 and the journal says how many, once per set (`tv.others_left_alone`). An upload whose
 record cannot be written is not sent. An upload made while the set will not say which
 it is is recorded with no set and found only on a set it was sent toward or that spoke
-on its connection. The store moves to schema 5 (`tv_upload`). The settings page's
+on its connection; a failure that may have taken the connection starts a new one.
+A set that lists the Player's pictures without the `image_date` each carried is said
+once per set (`tv.markers_unconfirmed`). The store moves to schema 5 (`tv_upload`). The settings page's
 sentences for a new Frame address say the other set's own pictures are left alone.
 
 **One model of which set the wall is on.** The wall's state with its set is one of
@@ -32,9 +34,12 @@ the same pass.
 **The server hears more.** The client heartbeat carries the address of the settings
 page (`settings_url`), so the server's Players page can link to it, and the Frame's
 identity is read again once a minute, so another set at the Frame's address is
-reported within a minute (`client.identity_changed`). A report the server refuses in
+reported within a minute (`client.identity_changed`, naming each set by a short
+hash as every other line does). A report the server refuses in
 its error form is held until it changes or five minutes pass. The settings page says
-the Player's state in the server's words, and a screen in its picker is "Screen off"
+the Player's state in the server's words ("Report unreadable" after a refusal agrees
+with a server of Arrt's wave 3 or later, which remembers one; an older server does
+not), and a screen in its picker is "Screen off"
 or "No screen".
 
 **The contract is `contract-v1.3.0`.** The test double answers from the contract's

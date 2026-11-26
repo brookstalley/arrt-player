@@ -219,7 +219,7 @@ the same.
 | `sent_at` | TEXT NOT NULL | ISO 8601 from the store's clock. |
 | `sent_toward` | TEXT | For a row of no set: the set this store last recorded when it was sent. |
 | `address` | TEXT | The address it was sent to (`TV_ADDRESS`); read for a row of no set, which is found only on a set listed at it. |
-| `spell` | TEXT | For a row of no set: the connection it was sent on (one stretch of the store held in memory). |
+| `spell` | TEXT | For a row of no set: the connection it was sent on (one stretch of the store held in memory). A new spell begins, with the same store in memory, at any failure that may have taken the connection without ending the pass (`FrameDisplay._the_connection_may_have_gone`), so a set heard from on a later connection is never this row's. |
 | `heard_from` | TEXT | For a row of no set: the set that said which it is on that connection (`heard_from`). |
 
 CHECK: a row names its picture by `marker` or by `tv_content_id`, never neither.

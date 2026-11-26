@@ -821,6 +821,22 @@ class DisplayState:
                 ).fetchone()
         return unplaced is not None
 
+    def unconfirmed_on(self, identity: str, listed: Mapping[str, str | None]) -> int:
+        """How many pictures this store recorded putting on `identity` the set lists without the marker each carried.
+
+        Its id listed with no date, or with another: what a set that does not
+        echo `image_date` shows, and a picture `uploads_on` then cannot take
+        for the Player's, so it is never removed. Read before `uploads_on`,
+        which drops the records listed with another date.
+        """
+        with self._operation("unconfirmed_on", "count the uploads the television lists without their markers"):
+            rows = self._connection.execute(
+                "SELECT marker, tv_content_id FROM tv_upload "
+                "WHERE tv_identity = ? AND marker IS NOT NULL AND tv_content_id IS NOT NULL",
+                (identity,),
+            ).fetchall()
+        return sum(1 for row in rows if row["tv_content_id"] in listed and listed[row["tv_content_id"]] != row["marker"])
+
     def uploads_on(self, identity: str, listed: Mapping[str, str | None], *, address: str | None = None) -> frozenset[str]:
         """Of the pictures the set `identity` lists at `address` (each id with its `image_date`), those this Player put there.
 

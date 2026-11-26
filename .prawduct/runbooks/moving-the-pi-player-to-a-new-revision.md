@@ -414,7 +414,10 @@ time, use F9 there.)
   television, which is forgotten and taken from the first read.
 - **Going back across schema 5 needs the owner's say-so each time** (the owner,
   2026-11-25), because what the release before it does to the set is not
-  harmless. Measured at integration: v0.8.0, which writes schema 2, refuses the
+  harmless. Measured at integration (v0.8.0 at its tag against a schema-5 store, on
+  no Pi and with no television; that nothing then connects to the set is read from
+  v0.8.0's `run_frame_wall`, which returns before the Frame wall is built): v0.8.0,
+  which writes schema 2, refuses the
   newer store, journals `daemon.state_too_new`, parks only the Frame wall and
   **touches nothing on the set**. **Only after step 19b sets the store's version
   to 2, or the store is deleted, does its sweep remove every uploaded picture its

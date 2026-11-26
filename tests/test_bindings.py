@@ -8,6 +8,7 @@ without a record is one it will never remove, which is why an upload is recorded
 before it is sent and not sent when that record cannot be written.
 """
 
+import hashlib
 import logging
 import sqlite3
 from datetime import timedelta
@@ -315,6 +316,31 @@ class TestOrphans:
         assert not _store_events(caplog, "tv.orphans_removed")
         left_alone = _store_events(caplog, "tv.others_left_alone")
         assert [record.left_alone for record in left_alone] == [2], "the pictures left alone were not said once"
+
+    async def test_a_set_that_stops_listing_the_date_an_upload_carried_is_said_once(self, settings, clock, publish, caplog):
+        """A set whose listing drops or rewrites `image_date` (a firmware that does not echo it) leaves every
+        picture of the Player's there for good, because a picture is the Player's only with its marker. The
+        journal says so once per set in a process, with how many of the Player's recorded pictures it cannot
+        confirm, apart from the household's pictures it leaves alone."""
+        tv = _a_set(THIS_SET)
+        on_the_set = await _a_life_on(settings, clock, publish, tv)
+        tv.dates.pop(on_the_set["w1"])  # listed with no date
+        tv.dates[on_the_set["w2"]] = "2020:01:01 00:00:00"  # listed with another
+        tv.holding["MY-F0099"] = HOUSEHOLDS
+
+        with caplog.at_level(logging.INFO), DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            for order in (["w2", "w1"], ["w1", "w2"], ["w2", "w1"]):
+                publish(order, interval_seconds=3600)
+                await wall.tick()
+                clock.advance(1)
+
+        said = _store_events(caplog, "tv.markers_unconfirmed")
+        assert [(record.unconfirmed, record.set_now) for record in said] == [
+            (2, f"set-{hashlib.sha256(THIS_SET.encode()).hexdigest()[:8]}")
+        ], "a set not echoing the upload's date was not said once, with the Player's own pictures it cannot confirm"
+        assert said[0].levelno == logging.WARNING
+        assert set(on_the_set.values()) | {"MY-F0099"} <= set(tv.holding)
 
     async def test_an_upload_the_player_has_no_record_of_is_left_on_a_set_it_has_a_store_for(self, settings, clock, publish):
         """The same on a set the wall has lived on: the household adds a picture there, and it stays."""
@@ -1872,10 +1898,16 @@ class _ThePhaseIsOneOfFour:
         self._seen, self._recorded = phase, self._store.tv_identity
 
     def the_store_in_memory_is_let_go(self, phase, where: str) -> None:
-        """Whatever ended a going on, its store in memory is closed: using it raises."""
+        """Whatever ended a going on, its store in memory is closed: using it raises.
+
+        A going on that carries on in a new spell, its connection having maybe
+        gone, keeps its store in memory open and in use, and is a new spell.
+        """
         from arrt_player.displays.frame import GoingOn
 
-        if isinstance(self._seen, GoingOn) and phase is not self._seen:
+        if isinstance(self._seen, GoingOn) and isinstance(phase, GoingOn) and phase.scratch is self._seen.scratch:
+            assert phase is self._seen or phase.spell != self._seen.spell, f"{where}: a new going on kept the old spell"
+        elif isinstance(self._seen, GoingOn) and phase is not self._seen:
             try:
                 self._seen.scratch._connection.execute("SELECT 1")
             except sqlite3.ProgrammingError:
@@ -2395,6 +2427,42 @@ class TestThePlayerRemovesOnlyWhatItRecordedUploading:
 
         assert not copies & set(tv.holding), "the copies stayed on the set they were put on once it said"
         assert set(on_the_set.values()) <= set(tv.holding)
+
+    async def test_an_upload_whose_read_back_took_the_connection_is_never_found_on_the_set_the_next_one_reaches(
+        self, settings, clock, publish
+    ):
+        """While the set would not say, an upload lands and its read-back fails, which drops the connection as the
+        last call of the pass. The next pass's connection reaches another set at the address, which says which it
+        is and holds the household's picture stamped with that upload's second: the picture stays, because the
+        upload went on a connection that set was never heard from on."""
+        from arrt_player.displays.frame import IDENTITY_PATIENCE_SECONDS
+
+        tv = _a_set(THIS_SET)
+        await _a_life_on(settings, clock, publish, tv)
+        tv.device_id = None
+        with DisplayState(settings.state_path, now=lambda: clock.as_clock().now()) as store:
+            wall = _a_frame(settings, tv, store, clock)
+            publish(["w1", "w2", "w3"], interval_seconds=3600)
+            await wall.tick()
+            clock.advance(IDENTITY_PATIENCE_SECONDS + 1)
+            await wall.tick()  # from the store in memory: w1 uploaded and selected, w2 uploaded behind it
+            assert isinstance(wall._display._phase, GoingOn)
+            tv.uploads_land_unconfirmed = True
+            clock.advance(1)
+            await wall.tick()  # w3 lands, its read-back fails, and the connection goes with it: the pass's last call
+            assert isinstance(wall._display._phase, GoingOn), "the pass ended otherwise than on the failed upload"
+            (failed,) = [marker for identity, marker, content_id in _uploads(settings.state_path) if content_id is None]
+
+            # Another set at the address, holding the household's picture stamped in the failed upload's second.
+            tv.uploads_land_unconfirmed, tv.device_id = False, ANOTHER_SET
+            tv.holding, tv.dates, tv._next_id = {"MY-F0001": HOUSEHOLDS}, {"MY-F0001": failed}, 40
+            for _ in range(4):
+                clock.advance(400)
+                await wall.tick()
+
+        assert not isinstance(wall._display._phase, GoingOn), "the other set never said which it is"
+        assert HOUSEHOLDS in tv.holding.values(), "the household's picture on the other set was taken for the Player's"
+        assert tv.removed == [] or all("MY-F0001" not in asked for asked in tv.removed)
 
     async def test_a_player_started_again_mid_spell_takes_the_spells_copies_off_and_puts_its_own_up(
         self, settings, clock, publish
