@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from arrt_player.config import UiSettings
 from arrt_player.settings_ui import auth
+from arrt_player.settings_ui import server as server_module
 from arrt_player.settings_ui.server import STATIC_CACHE_CONTROL, STATIC_DIRECTORY, PageState, build, stylesheet_href
 
 STYLESHEET = STATIC_DIRECTORY / "settings.css"
@@ -23,7 +24,7 @@ STYLESHEET = STATIC_DIRECTORY / "settings.css"
 #: Text on the ground it sits on, held to 4.5:1. Each pair is one the page draws.
 TEXT_PAIRS = [
     ("text-strong", "surface-0"),  # names, headings, labels
-    ("text", "surface-0"),  # prose and facts
+    ("text", "surface-0"),  # prose and facts, and a step not yet taken (○ No token yet)
     ("text-muted", "surface-0"),  # hints and captions
     ("text", "surface-1"),  # what is typed in a field
     ("text-muted", "surface-2"),  # a field the environment pins
@@ -31,8 +32,8 @@ TEXT_PAIRS = [
     ("text-strong", "crit-quiet"),  # a problem
     ("accent-text", "accent"),  # the filled act's label
     ("text", "surface-1"),  # a quiet act's label
-    ("good", "surface-0"),  # ● Running
-    ("warn", "surface-0"),  # ▲ Setup mode
+    ("good", "surface-0"),  # ● Reporting, ● Running
+    ("warn", "surface-0"),  # ▲ Setup mode, ▲ Report unreadable
     ("accent", "surface-0"),  # a link
 ]
 
@@ -118,6 +119,15 @@ def test_every_token_the_stylesheet_uses_is_defined():
     used = set(re.findall(r"var\(--([\w-]+)\)", css))
 
     assert used - defined == set()
+
+
+@pytest.mark.parametrize("kind", sorted(server_module._GLYPHS))
+def test_every_kind_of_state_the_page_draws_has_its_colour(kind: str):
+    """A state the page draws as `state-<kind>` with no rule falls back to the heading's colour, saying nothing of its kind."""
+    rule = re.search(rf"\.state-{kind}\b[^{{]*\{{([^}}]*)\}}", STYLESHEET.read_text(encoding="utf-8"))
+
+    assert rule, f"no .state-{kind} rule in the stylesheet"
+    assert "color: var(--" in rule.group(1)
 
 
 def test_every_typeface_the_stylesheet_names_is_on_disk():

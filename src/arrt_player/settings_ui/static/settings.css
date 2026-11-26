@@ -240,6 +240,13 @@ h1 {
   color: var(--warn);
 }
 
+/* A step not yet taken (no token yet, waiting for a first report) is no fault,
+   so it is drawn in the text's colour, as the server's Players page draws it. */
+.state-none,
+.state-waiting {
+  color: var(--text);
+}
+
 .glyph {
   margin-right: var(--space-1);
 }
