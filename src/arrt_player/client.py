@@ -88,6 +88,7 @@ from collections.abc import Awaitable, Callable, Collection
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Any, Final, Protocol
@@ -830,6 +831,51 @@ def _why_stopped(output: str, placed_on: str | None, available: dict[str, Any], 
     return False, f"on {output}, where wall {claimed[output]} is shown"
 
 
+class ReportAnswer(StrEnum):
+    """What the server last answered this Player's client heartbeat, as far as it bears on the Player's state.
+
+    Only the answers that say something of the Player on the server's side are
+    told apart: the server took the report, it refused it as one it cannot read,
+    or it refused the token it came with. Everything else (no answer, a `5xx`, a
+    `408` or `429`, an answer that is not the server's, a refusal for its size)
+    leaves the server judging the Player by the last report it took, so it is one
+    answer here.
+    """
+
+    #: `204`: the server holds this report.
+    ACCEPTED = "accepted"
+    #: `400` with the server's error body: the server's verdict that it cannot
+    #: read the report, which it says of this Player until it takes one.
+    UNREADABLE = "unreadable"
+    #: `401`: the server does not know the token, so it cannot say which Player sent it.
+    TOKEN_REFUSED = "token_refused"  # noqa: S105 -- an answer's name, not a secret
+    #: Anything else: the server's view of this Player is still its last report taken.
+    NOT_TAKEN = "not_taken"
+
+
+#: How many heartbeat intervals a report counts as current for, the contract's
+#: `stale_after_intervals` (`contract/timing.json`). Past it the server says a
+#: Player is not heard from, and so does the Player of itself.
+STALE_AFTER_INTERVALS: Final[int] = 3
+
+#: How old the last report taken may be while the server still calls the Player reporting.
+STALE_AFTER_SECONDS: Final[float] = heartbeat_module.INTERVAL_SECONDS * STALE_AFTER_INTERVALS
+
+
+@dataclass(frozen=True, slots=True)
+class HeardReport:
+    """What this Player knows of how the server last heard it: its last answer, and the last report taken."""
+
+    #: The server's last answer to a client heartbeat, or None before any was answered.
+    answer: ReportAnswer | None
+    #: The instant the last report the server took was made (its `reported_at`),
+    #: or None while none has been taken since this process started.
+    accepted_at: datetime | None = None
+    #: How long ago that report was taken, by the monotonic clock, so a clock set
+    #: right after boot cannot age it; None with `accepted_at`.
+    accepted_age_seconds: float | None = None
+
+
 class ClientLink(Protocol):
     """The two client routes, as the supervisor needs them. `pull.ClientPull` is the real one."""
 
@@ -841,6 +887,10 @@ class ClientLink(Protocol):
 
     async def report(self, heartbeat: dict[str, Any]) -> bool:
         """POST the client heartbeat. True when the server took it."""
+
+    @property
+    def last_answer(self) -> ReportAnswer | None:
+        """The server's last answer to `report`, or None before one; a report held back unsent changes nothing."""
 
     async def close(self) -> None: ...
 
@@ -967,6 +1017,8 @@ class Supervisor:
         #: The outputs, label outputs and settings address last reported and taken.
         self._reported: tuple[list[OutputReport], list[LabelOutputReport], str | None] | None = None
         self._reported_at: float | None = None
+        #: The instant the last report the server took was made, for the settings page.
+        self._accepted_at: datetime | None = None
         #: The document the workers were last matched to, and the outputs they
         #: were matched against, so a change in either is a reason to match again.
         self._document: ClientDocument | None = None
@@ -981,6 +1033,16 @@ class Supervisor:
     def labels(self) -> dict[str, LabelAssignment]:
         """Each label output with a renderer, and what it captions."""
         return {output: running.assignment for output, running in self._labels.items()}
+
+    def heard(self) -> HeardReport:
+        """How the server last heard this Player: its last answer, and when the last report it took was made."""
+        if self._accepted_at is None or self._reported_at is None:
+            return HeardReport(answer=self._link.last_answer)
+        return HeardReport(
+            answer=self._link.last_answer,
+            accepted_at=self._accepted_at,
+            accepted_age_seconds=self._monotonic() - self._reported_at,
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         """Supervise until asked to stop, then stop every worker and wait for each."""
@@ -1410,7 +1472,9 @@ class Supervisor:
         due = self._reported_at is None or elapsed - self._reported_at >= heartbeat_module.INTERVAL_SECONDS
         if reporting == self._reported and not due:
             return
-        heartbeat = client_heartbeat(reporting[0], label_outputs=reporting[1], settings_url=reporting[2], reported_at=self._now())
+        made = self._now()
+        heartbeat = client_heartbeat(reporting[0], label_outputs=reporting[1], settings_url=reporting[2], reported_at=made)
         if await self._link.report(heartbeat):
             self._reported = reporting
             self._reported_at = elapsed
+            self._accepted_at = made

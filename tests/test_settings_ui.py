@@ -19,6 +19,7 @@ import signal
 import socket
 import stat
 from collections import Counter
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import ClassVar
@@ -27,16 +28,21 @@ import aiohttp
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from arrt_contract import timing, vocabulary
 from conftest import journal
+from server_double import ServerDouble
 
 # The configuration's own refused examples, so the page is held to the same ones a start refuses.
 from test_config import FRAME, REFUSED_SECONDS, REFUSED_TV_ADDRESSES, SECONDS_KEYS, a_slideshow, an_environment
 
 from arrt_player import __main__ as entry
+from arrt_player import client as client_module
 from arrt_player import config
-from arrt_player.client import OutputReport, player_name
+from arrt_player import heartbeat as heartbeat_module
+from arrt_player.client import STALE_AFTER_SECONDS, HeardReport, OutputReport, ReportAnswer, Supervisor, player_name
 from arrt_player.config import CLIENT_DOCUMENT_FILENAME, ConfigError, SetupRequired, UiSettings, load
 from arrt_player.programmes.slideshow_status import SlideshowStatus
+from arrt_player.pull import ClientPull
 from arrt_player.settings_ui import auth, store
 from arrt_player.settings_ui import server as server_module
 from arrt_player.settings_ui.server import SECURITY_HEADERS, PageState, build, own_names, screen_name
@@ -448,12 +454,12 @@ class TestSigningIn:
         assert response.status == 303
         assert response.headers["Location"] == "/login"
 
-    async def test_signed_in_the_page_says_it_is_in_setup_mode_and_what_is_missing(self, page):
+    async def test_signed_in_the_page_says_it_has_no_token_yet_and_what_is_missing(self, page):
         await set_up(page)
 
         text = await (await page.get("/")).text()
 
-        assert "Setup mode" in text
+        assert "No token yet" in text
         assert "SERVER_URL, CLIENT_TOKEN" in text
 
     async def test_the_right_password_signs_in_and_logging_out_signs_out(self, page):
@@ -941,7 +947,7 @@ class TestThePageSpeaksTheServersWords:
 
         document = await (await signed_in.get("/")).text()
 
-        assert "HDMI 1 (a screen at 1920×1080)" in visible(document)
+        assert "HDMI 1 · a screen at 1920×1080" in visible(document)
         assert "hdmi-a-1" not in visible(document)
         assert '<option value="hdmi-a-1" selected>' in document, "the saved value must stay the connector"
 
@@ -1073,6 +1079,36 @@ def test_a_missing_cache_is_still_a_refusal(monkeypatch, capsys):
 
     assert entry.main() == 2
     assert "CACHE_DIR" in capsys.readouterr().err
+
+
+async def test_in_arrt_mode_the_page_says_the_running_supervisors_account_of_the_player(monkeypatch, cache_dir, client_settings):
+    """The page's state line is only as true as what the entry point hands it: the supervisor's own `heard`."""
+    monkeypatch.setattr(entry, "load_ui", lambda: loopback(cache_dir, free_port()))
+    monkeypatch.setattr(entry, "load", lambda: dataclasses.replace(client_settings, frame=None))
+    monkeypatch.setattr(entry.notify.Watchdog, "from_environment", classmethod(lambda cls: cls.silent()))
+    built: list[Supervisor] = []
+
+    class Recorded(entry.PettingSupervisor):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            built.append(self)
+
+        async def run(self, stop: asyncio.Event) -> None:
+            await stop.wait()
+
+    served: list[PageState] = []
+
+    async def page_of(state: PageState, stop: asyncio.Event) -> bool:
+        served.append(state)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return True
+
+    monkeypatch.setattr(entry, "PettingSupervisor", Recorded)
+    monkeypatch.setattr(entry, "run_settings_page", page_of)
+
+    assert await asyncio.wait_for(entry._run(), timeout=5) == 0
+
+    assert [state.heard for state in served] == [built[0].heard]
 
 
 def _refuse(why: str):
@@ -1764,15 +1800,15 @@ class TestWhatTheSlideshowSays:
 
         text = await (await signed_in.get("/")).text()
 
-        assert '<option value="hdmi-a-1" selected>HDMI 1 (a screen at 3840×2160)</option>' in text
-        assert '<option value="hdmi-a-2">HDMI 2 (no screen connected)</option>' in text
+        assert '<option value="hdmi-a-1" selected>HDMI 1 · a screen at 3840×2160</option>' in text
+        assert '<option value="hdmi-a-2">HDMI 2 · Screen off</option>' in text
 
     async def test_a_chosen_screen_this_machine_does_not_have_is_still_offered_and_named(self, signed_in, restarts):
         await save_slideshow(signed_in, slideshow_output="hdmi-a-2")
 
         text = await (await signed_in.get("/")).text()
 
-        assert '<option value="hdmi-a-2" selected>HDMI 2 (not found on this machine)</option>' in text
+        assert '<option value="hdmi-a-2" selected>HDMI 2 · No screen</option>' in text
 
     async def test_the_mode_the_player_is_set_to_is_the_one_checked(self, signed_in, restarts):
         before = await (await signed_in.get("/")).text()
@@ -2272,6 +2308,213 @@ class TestThePairingLabels:
         source = Path(server_module.__file__).read_text(encoding="utf-8")
 
         assert [source.count(f'"{label}"') for label in server_module.PAIRING_LABELS.values()] == [1, 1]
+
+
+# -- the Player's state, in the server's words ----------------------------------------------
+
+
+def facts(document: str) -> str:
+    """The page's line of facts beneath its heading, as a person reads it."""
+    found = re.search(r'<p class="page-facts">(.*?)</p>', document, re.DOTALL)
+    assert found, "the page drew no line of facts"
+    return visible(found.group(1))
+
+
+def state_kind(document: str) -> str:
+    """The kind of the state the line of facts opens with: `good`, `warn`, `none` or `waiting`."""
+    found = re.search(r'<p class="page-facts"><span class="state state-([a-z]+)">', document)
+    assert found, "the line of facts does not open with a state"
+    return found.group(1)
+
+
+#: When the Player made the report the double takes, on the test's clock.
+MADE = datetime(2026, 6, 21, 12, 0, tzinfo=UTC)
+
+
+class Elapsed:
+    """A monotonic clock a test moves by hand."""
+
+    def __init__(self) -> None:
+        self.seconds = 1000.0
+
+    def __call__(self) -> float:
+        return self.seconds
+
+
+@pytest.fixture
+async def double():
+    served = ServerDouble()
+    test_server = TestServer(served.app())
+    await test_server.start_server()
+    served.url = str(test_server.make_url("")).rstrip("/")
+    yield served
+    await test_server.close()
+
+
+@pytest.fixture
+def elapsed() -> Elapsed:
+    return Elapsed()
+
+
+@pytest.fixture
+async def reporting(client_settings, double, elapsed, state):
+    """The real supervisor and pull reporting to the double, wired to the page as the entry point wires them."""
+
+    async def idle(_wall, _output, stop) -> None:
+        await stop.wait()
+
+    link = ClientPull(dataclasses.replace(client_settings, server_url=double.url), monotonic=elapsed)
+    supervisor = Supervisor(
+        settings=dataclasses.replace(client_settings, server_url=double.url),
+        link=link,
+        worker=idle,
+        outputs=lambda: [OutputReport("hdmi-a-1", "framebuffer", True, (1920, 1080))],
+        now=lambda: MADE,
+        monotonic=elapsed,
+    )
+    state.missing = ()
+    state.heard = supervisor.heard
+    yield supervisor
+    await supervisor.stop_all()
+    await link.close()
+
+
+class TestThePlayersStateInTheServersWords:
+    """What the server's Players page says of this Player, its own page says of itself, in the same word."""
+
+    async def test_a_report_the_server_took_reads_reporting(self, signed_in, reporting, double):
+        await reporting.cycle()
+
+        document = await (await signed_in.get("/")).text()
+
+        assert double.client_heartbeats, "the double took no report, so the page had nothing to say"
+        assert facts(document).startswith("\u25cf Reporting · pulling from ")
+        assert state_kind(document) == "good"
+
+    async def test_a_report_refused_as_unreadable_reads_report_unreadable(self, signed_in, reporting, double, elapsed):
+        await reporting.cycle()
+        double.client_heartbeat_status = 400
+        elapsed.seconds += heartbeat_module.INTERVAL_SECONDS
+
+        await reporting.cycle()
+        document = await (await signed_in.get("/")).text()
+
+        assert facts(document).startswith("\u25b2 Report unreadable · ")
+        assert state_kind(document) == "warn"
+
+    async def test_a_report_taken_longer_ago_than_the_threshold_reads_not_heard_from_since_its_date(
+        self, signed_in, reporting, double, elapsed
+    ):
+        await reporting.cycle()
+        double.client_heartbeat_status = 503
+        elapsed.seconds += STALE_AFTER_SECONDS + 1
+
+        await reporting.cycle()
+        document = await (await signed_in.get("/")).text()
+
+        assert facts(document).startswith("\u25b2 Not heard from since 2026-06-21 12:00 UTC · ")
+
+    async def test_unanswered_within_the_threshold_still_reads_reporting_as_the_server_says(
+        self, signed_in, reporting, double, elapsed
+    ):
+        await reporting.cycle()
+        double.client_heartbeat_status = 503
+        elapsed.seconds += STALE_AFTER_SECONDS
+
+        await reporting.cycle()
+
+        assert facts(await (await signed_in.get("/")).text()).startswith("\u25cf Reporting · ")
+
+    async def test_a_report_refused_for_its_size_is_judged_by_the_last_one_taken(self, signed_in, reporting, double, elapsed):
+        """The server says nothing of a report it refuses for its size, so it goes on judging the last one it took."""
+        await reporting.cycle()
+        double.client_heartbeat_status = 413
+        elapsed.seconds += heartbeat_module.INTERVAL_SECONDS
+
+        await reporting.cycle()
+
+        assert reporting.heard().answer is ReportAnswer.NOT_TAKEN
+        assert facts(await (await signed_in.get("/")).text()).startswith("\u25cf Reporting · ")
+
+    async def test_a_refused_token_has_no_word_of_the_servers_and_is_said_in_the_pages_own(self, signed_in, reporting, double):
+        double.tokens = {}
+
+        await reporting.cycle()
+        document = await (await signed_in.get("/")).text()
+
+        assert facts(document).startswith(f"\u25b2 {server_module.NOT_ADMITTED_WORDS} · ")
+        assert not any(word.split(" {")[0] in facts(document) for word in server_module.PLAYER_STATE_WORDS.values())
+
+    async def test_nothing_taken_since_the_start_says_so_and_claims_no_state(self, signed_in, reporting, double):
+        """The server may hold a report from before the start, which this process never saw."""
+        double.client_heartbeat_status = 503
+
+        await reporting.cycle()
+
+        assert facts(await (await signed_in.get("/")).text()).startswith(f"\u25b2 {server_module.NOTHING_TAKEN_WORDS} · ")
+
+    async def test_before_the_first_answer_it_is_waiting_for_its_first_report_a_step_not_a_fault(self, signed_in, reporting):
+        document = await (await signed_in.get("/")).text()
+
+        assert facts(document).startswith("\u25cc Waiting for its first report · ")
+        assert state_kind(document) == "waiting"
+
+    async def test_before_pairing_it_reads_no_token_yet_a_step_not_a_fault(self, signed_in, state):
+        state.missing = ("CLIENT_TOKEN",)
+
+        document = await (await signed_in.get("/")).text()
+
+        assert facts(document).startswith("\u25cb No token yet · CLIENT_TOKEN not set when the Player started")
+        assert state_kind(document) == "none"
+        assert "Setup mode" not in facts(document)
+
+    @pytest.mark.parametrize(
+        ("mode", "missing"), [(config.ARRT_MODE, ("SERVER_URL",)), (config.SLIDESHOW_MODE, ("SLIDESHOW_URL",))]
+    )
+    async def test_setup_mode_with_a_token_or_in_a_slideshow_claims_no_player_state(self, signed_in, state, mode, missing):
+        state.mode, state.missing = mode, missing
+
+        document = await (await signed_in.get("/")).text()
+
+        assert facts(document).startswith("\u25b2 Setup mode · ")
+        assert "No token yet" not in document
+
+    def test_a_refused_report_wins_over_a_recent_one_taken(self):
+        heard = HeardReport(answer=ReportAnswer.UNREADABLE, accepted_at=MADE, accepted_age_seconds=1.0)
+
+        assert server_module.player_state(heard) == "report_unreadable"
+
+    @pytest.mark.parametrize("age", [STALE_AFTER_SECONDS, STALE_AFTER_SECONDS + 0.001])
+    def test_the_threshold_is_the_servers_no_older_than_is_current(self, age):
+        heard = HeardReport(answer=ReportAnswer.NOT_TAKEN, accepted_at=MADE, accepted_age_seconds=age)
+
+        assert server_module.player_state(heard) == ("reporting" if age <= STALE_AFTER_SECONDS else "not_heard_from")
+
+
+class TestTheStateWordsAreTheContracts:
+    """Each word the page says of a state is quoted from the package, which the server's pages quote too."""
+
+    def test_every_player_state_word_is_the_packages_and_none_is_missing(self):
+        assert dict(server_module.PLAYER_STATE_WORDS) == {
+            key: entry["word"] for key, entry in vocabulary()["player_states"].items()
+        }
+
+    def test_a_player_state_is_drawn_as_a_step_exactly_where_the_package_says_it_is_one(self):
+        steps = {kind for kind, look in server_module._PLAYER_STATE_LOOK.items() if look in {"none", "waiting"}}
+
+        assert set(server_module._PLAYER_STATE_LOOK) == set(vocabulary()["player_states"])
+        assert steps == {key for key, entry in vocabulary()["player_states"].items() if entry["setup"]}
+
+    def test_every_display_state_word_the_page_says_is_the_packages(self):
+        words = vocabulary()["display_states"]
+
+        assert {key: words[key]["word"] for key in server_module.DISPLAY_STATE_WORDS} == dict(server_module.DISPLAY_STATE_WORDS)
+
+    def test_the_staleness_threshold_is_the_contracts(self):
+        agreed = timing()
+
+        assert agreed["stale_after_intervals"] == client_module.STALE_AFTER_INTERVALS
+        assert agreed["heartbeat_interval_seconds"] * agreed["stale_after_intervals"] == STALE_AFTER_SECONDS
 
 
 #: A listing Reddit's slideshow takes, the test's own.

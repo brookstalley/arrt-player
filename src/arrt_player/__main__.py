@@ -80,6 +80,7 @@ from arrt_player import logs, notify
 from arrt_player.client import (
     FRAME_KIND,
     FrameIdentity,
+    HeardReport,
     LabelAssignment,
     OutputReport,
     Supervisor,
@@ -650,8 +651,13 @@ def settings_page(
     missing: tuple[str, ...] = (),
     mode: str = ARRT_MODE,
     slideshow: SlideshowStatus | None = None,
+    heard: Callable[[], HeardReport] | None = None,
 ) -> server.PageState:
-    """The page's state for this start, with a setup code when no password is set yet."""
+    """The page's state for this start, with a setup code when no password is set yet.
+
+    `heard` is the running supervisor's account of how the server last heard
+    this Player, which the page says as the Player's state.
+    """
     code = auth.new_setup_code() if store.read(ui.cache_dir).password is None else None
     return server.PageState(
         ui=ui,
@@ -662,6 +668,7 @@ def settings_page(
         missing=missing,
         mode=mode,
         slideshow=slideshow,
+        heard=heard,
     )
 
 
@@ -831,7 +838,7 @@ async def _run() -> int:
         frame_identity=identity,
         settings_url=lambda: settings_url(ui, link.local_address),
     )
-    page = asyncio.create_task(run_settings_page(settings_page(ui), stop), name="settings-page")
+    page = asyncio.create_task(run_settings_page(settings_page(ui, heard=supervisor.heard), stop), name="settings-page")
     # Once the settings are read and the panels open, before the first poll: a
     # server down at boot delays no start, and the walls start from the cache.
     watchdog.ready()

@@ -67,7 +67,16 @@ from aiohttp.web import (
     middleware,
 )
 
-from arrt_player.client import ClientDocumentUnreadable, OutputReport, hdmi_outputs, parse_client_document, player_name
+from arrt_player.client import (
+    STALE_AFTER_SECONDS,
+    ClientDocumentUnreadable,
+    HeardReport,
+    OutputReport,
+    ReportAnswer,
+    hdmi_outputs,
+    parse_client_document,
+    player_name,
+)
 from arrt_player.config import (
     ALLOWED_HOSTS_SETTING,
     ARRT_MODE,
@@ -344,6 +353,10 @@ class PageState:
     slideshow: SlideshowStatus | None = None
     #: The HDMI connectors a slideshow may be put on, read when the page is drawn.
     outputs: Callable[[], list[OutputReport]] = field(default=hdmi_outputs)
+    #: How the server last heard this Player (`Supervisor.heard`), read when the
+    #: page is drawn; None where no supervisor runs (setup mode, a slideshow),
+    #: which in Arrt mode reads as no answer yet.
+    heard: Callable[[], HeardReport] | None = None
     #: The names this machine goes by, read once at start (`own_names`).
     #: Injectable so a test can give the machine a name.
     machine_names: Callable[[str], frozenset[str]] = field(default=own_names)
@@ -813,11 +826,11 @@ def _listed(items: list[str]) -> str:
 
 
 #: The words the page labels the two pairing fields with, **and the only place
-#: they are written**. The server's dialog that issues a token must say the same:
-#: in wave 1 each repository "fixed" these to the other's old wording. The
-#: contract's vocabulary file (contract 1.2.0) is to own them, and the change that
-#: moves this Player's pin to that tag replaces this mapping with the package's
-#: words, here and nowhere else.
+#: they are written**. The server's dialog that issues a token must say the same,
+#: so the contract owns them (`vocabulary()`'s `pairing`). They are quoted here
+#: rather than read from the package because `arrt-contract` is a development
+#: dependency the Player does not install, and
+#: `tests/test_player_contract.py` holds the quote to the package.
 PAIRING_LABELS: Final[Mapping[str, str]] = MappingProxyType({"SERVER_URL": "Server address", "CLIENT_TOKEN": "Token"})
 
 #: Each key the page manages, by the label of its field, in the order the page
@@ -1093,14 +1106,19 @@ def _settings_page(
 
     if state.missing:
         shown = "nothing is shown" if state.mode == SLIDESHOW_MODE else "no walls are shown"
+        # A Player started without its token is one the server has not yet
+        # issued one, a step of setting it up, said in the server's words. Only
+        # Arrt mode requires the token, so only it can be missing it.
         facts = (
-            _state_word("warn", "Setup mode")
-            + f" · {html.escape(', '.join(state.missing))} not set when the Player started, so {shown}."
-        )
+            _state_word(_PLAYER_STATE_LOOK["no_token"], PLAYER_STATE_WORDS["no_token"])
+            if "CLIENT_TOKEN" in state.missing
+            else _state_word("warn", "Setup mode")
+        ) + f" · {html.escape(', '.join(state.missing))} not set when the Player started, so {shown}."
     elif state.slideshow is not None:
         facts = _state_word("good", "Running") + " · a Reddit slideshow"
     else:
-        facts = _state_word("good", "Running") + " · pulling from " + html.escape(_shown(state, stored, "SERVER_URL"))
+        heard = state.heard() if state.heard is not None else HeardReport(answer=None)
+        facts = _player_state_word(heard) + " · pulling from " + html.escape(_shown(state, stored, "SERVER_URL"))
     if name != local:
         facts += f" · Its server calls it {html.escape(name)}, and that name wins over its own."
 
@@ -1368,14 +1386,88 @@ def screen_name(output: str) -> str:
 
 
 def _output_words(name: str, report: OutputReport | None) -> str:
+    """A connector as the picker offers it: its name, then its state in the server's word, or the screen on it.
+
+    A connector this machine does not list is `no_screen` and one with nothing
+    detected on it `dark`, as the screen loop reports either of a wall's screen
+    (`ScreenState`). A screen that is there is described rather than given a
+    state: the page cannot see what it is showing.
+    """
     shown = screen_name(name)
     if report is None:
-        return f"{shown} (not found on this machine)"
+        return f"{shown} · {DISPLAY_STATE_WORDS['no_screen']}"
     if not report.connected:
-        return f"{shown} (no screen connected)"
+        return f"{shown} · {DISPLAY_STATE_WORDS['dark']}"
     if report.screen is not None:
-        return f"{shown} (a screen at {report.screen[0]}×{report.screen[1]})"
-    return f"{shown} (a screen)"
+        return f"{shown} · a screen at {report.screen[0]}×{report.screen[1]}"
+    return f"{shown} · a screen"
+
+
+#: The household's word for each state a Player can be in, `vocabulary()`'s
+#: `player_states`, which the server's Players page says of this Player too.
+#: Quoted, because the Player does not install the package;
+#: `tests/test_settings_ui.py` holds every word to it.
+PLAYER_STATE_WORDS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "no_token": "No token yet",
+        "awaiting_report": "Waiting for its first report",
+        "reporting": "Reporting",
+        "not_heard_from": "Not heard from since {date}",
+        "report_unreadable": "Report unreadable",
+    }
+)
+
+#: The words for the two display states the page can say of a connector,
+#: `vocabulary()`'s `display_states`, quoted and held to it as the Player's are.
+DISPLAY_STATE_WORDS: Final[Mapping[str, str]] = MappingProxyType({"dark": "Screen off", "no_screen": "No screen"})
+
+#: Each Player state's glyph and colour, as the server's Players page draws it:
+#: a step not yet taken in the text's colour, never a fault's.
+_PLAYER_STATE_LOOK: Final[Mapping[str, str]] = MappingProxyType(
+    {"no_token": "none", "awaiting_report": "waiting", "reporting": "good", "not_heard_from": "warn", "report_unreadable": "warn"}
+)
+
+#: What the page says when the server refuses this Player's token: a state the
+#: server cannot put a word to, since it cannot tell which Player sent it.
+NOT_ADMITTED_WORDS: Final[str] = "The server does not accept this Player's token"
+
+#: What the page says when no report has been taken since the Player started and
+#: the server has answered none as refused: the server judges it by a report
+#: from before the start, which this process does not know.
+NOTHING_TAKEN_WORDS: Final[str] = "No report taken since the Player started"
+
+
+def player_state(heard: HeardReport) -> str | None:
+    """This Player's state as the server would judge it from what it last answered, or None where it cannot be said.
+
+    The server's rule (`player_states`' meanings) on what the Player knows of
+    itself: a report refused as unreadable is `report_unreadable`; a report
+    taken within the staleness threshold is `reporting`, and one taken longer
+    ago `not_heard_from`; no answer yet is `awaiting_report`. Two cases have no
+    state the Player can claim: a refused token, and nothing taken since it
+    started while the server may hold an older report.
+    """
+    if heard.answer is ReportAnswer.TOKEN_REFUSED:
+        return None
+    if heard.answer is ReportAnswer.UNREADABLE:
+        return "report_unreadable"
+    if heard.accepted_age_seconds is not None:
+        return "not_heard_from" if heard.accepted_age_seconds > STALE_AFTER_SECONDS else "reporting"
+    if heard.answer is None:
+        return "awaiting_report"
+    return None
+
+
+def _player_state_word(heard: HeardReport) -> str:
+    """The Player's state as glyph and word: the server's word where there is one, the page's own otherwise."""
+    state = player_state(heard)
+    if state is None:
+        words = NOT_ADMITTED_WORDS if heard.answer is ReportAnswer.TOKEN_REFUSED else NOTHING_TAKEN_WORDS
+        return _state_word("warn", words)
+    word = PLAYER_STATE_WORDS[state]
+    if heard.accepted_at is not None:
+        word = word.replace("{date}", f"{heard.accepted_at:%Y-%m-%d %H:%M %Z}".strip())
+    return _state_word(_PLAYER_STATE_LOOK[state], word)
 
 
 _PINNED_HINT: Final[str] = "Set in the environment or .env, which wins over this page. Remove it there to manage it here."
@@ -1387,7 +1479,7 @@ _PAIR_HINT: Final[str] = "Locked because the server's address and token are mana
 _PASSWORD_HINT: Final[str] = f"At least {auth.MINIMUM_PASSWORD_LENGTH} characters."
 
 #: Glyphs as Arrt's client draws them (its `core/glyphs.js`): one meaning each.
-_GLYPHS: Final[dict[str, str]] = {"good": "\u25cf", "warn": "\u25b2"}
+_GLYPHS: Final[dict[str, str]] = {"good": "\u25cf", "warn": "\u25b2", "none": "\u25cb", "waiting": "\u25cc"}
 
 
 def _pinned_note(state: PageState, stored: store.Stored, key: str) -> str:

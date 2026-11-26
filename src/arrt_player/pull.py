@@ -65,7 +65,7 @@ import aiohttp
 from aiohttp.connector import Connection
 from aiohttp.tracing import Trace
 
-from arrt_player.client import ClientDocument, ClientDocumentUnreadable, parse_client_document
+from arrt_player.client import ClientDocument, ClientDocumentUnreadable, ReportAnswer, parse_client_document
 from arrt_player.config import CACHED_MANIFEST_FILENAME, PLAIN_COMPONENT, ClientSettings, WallSettings
 from arrt_player.episodes import ReportOnce
 from arrt_player.heartbeat import REPORTED_AT_KEY
@@ -816,6 +816,17 @@ def _is_error_body(body: bytes | None) -> bool:
     return isinstance(document, dict) and isinstance(document.get("error"), str)
 
 
+def _answer_to_a_report(status: int, *, refused: bool) -> ReportAnswer:
+    """What an answer to a client heartbeat says of the Player on the server's side (`ReportAnswer`)."""
+    if status == HTTPStatus.NO_CONTENT:
+        return ReportAnswer.ACCEPTED
+    if status == HTTPStatus.UNAUTHORIZED:
+        return ReportAnswer.TOKEN_REFUSED
+    if refused and status == HTTPStatus.BAD_REQUEST:
+        return ReportAnswer.UNREADABLE
+    return ReportAnswer.NOT_TAKEN
+
+
 class ClientPull:
     """`GET /client` and `POST /client/heartbeat`, with this client's token: the supervisor's `ClientLink`.
 
@@ -844,9 +855,16 @@ class ClientPull:
         #: The last client heartbeat the server refused, without its instant, and
         #: when it was refused; None once one is accepted.
         self._held: tuple[dict[str, Any], float] | None = None
+        #: The server's last answer to a client heartbeat, None before one.
+        self._last_answer: ReportAnswer | None = None
         #: This end's address on the last connection to the server, or None
         #: before the first one.
         self._local_address: str | None = None
+
+    @property
+    def last_answer(self) -> ReportAnswer | None:
+        """The server's last answer to `report`, or None before one; a report held back unsent changes nothing."""
+        return self._last_answer
 
     @property
     def local_address(self) -> str | None:
@@ -985,7 +1003,9 @@ class ClientPull:
         except _UNREACHABLE:
             # Said by `fetch`, which runs on the same poll; a second line here
             # would be the same outage told twice.
+            self._last_answer = ReportAnswer.NOT_TAKEN
             return False
+        self._last_answer = _answer_to_a_report(status, refused=refused)
         if status == HTTPStatus.NO_CONTENT:
             self._held = None
             if self._heartbeat_failing.end():
