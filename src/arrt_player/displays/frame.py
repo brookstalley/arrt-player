@@ -98,7 +98,7 @@ from arrt_player import brightness as brightness_module
 from arrt_player.config import Settings
 from arrt_player.episodes import Backoff, ReportOnce
 from arrt_player.heartbeat import DisplayReport, ScreenState
-from arrt_player.logs import work_context
+from arrt_player.logs import known_as, work_context
 from arrt_player.manifest import Watcher
 from arrt_player.programmes.schedule import Schedule
 from arrt_player.state import Binding, DisplayState, UploadStatus
@@ -754,7 +754,7 @@ class FrameDisplay:
         if met.change is SetChange.ADOPTED:
             log.info(
                 "the display store did not record which television its pictures were put on; they are taken as this one's",
-                extra={"event": "binding.set_adopted", "set_now": _known_as(identity)},
+                extra={"event": "binding.set_adopted", "set_now": known_as(identity)},
             )
         elif met.change is SetChange.CHANGED:
             log.warning(
@@ -765,8 +765,8 @@ class FrameDisplay:
                 met.restored,
                 extra={
                     "event": "binding.set_changed",
-                    "set_was": _known_as(met.previous),
-                    "set_now": _known_as(identity),
+                    "set_was": known_as(met.previous),
+                    "set_now": known_as(identity),
                     "set_aside": met.set_aside,
                     "restored": met.restored,
                 },
@@ -1438,7 +1438,7 @@ class FrameDisplay:
             "where they are, whoever put them there: the household, an older Player, or this Player where its "
             "records cannot match the picture",
             left_alone,
-            extra={"event": "tv.others_left_alone", "left_alone": left_alone, "set_now": _known_as(identity)},
+            extra={"event": "tv.others_left_alone", "left_alone": left_alone, "set_now": known_as(identity)},
         )
 
     def _retirements(self, pictures: Sequence[Picture]) -> tuple[tuple[Binding, ...], frozenset[str]]:
@@ -1698,15 +1698,6 @@ def _render_changed(binding: Binding, render: Path) -> bool:
     if recorded == _fingerprint(render):
         return False
     return recorded != _stamp(render)
-
-
-def _known_as(identity: str | None) -> str | None:
-    """A set's identity as the journal names it: enough to tell two sets apart, and not the set's own id.
-
-    The full id goes to the server in the client heartbeat; a journal is what
-    gets pasted into an issue in a public repository.
-    """
-    return None if identity is None else f"set-{hashlib.sha256(identity.encode()).hexdigest()[:8]}"
 
 
 def _say_the_wall_recovered() -> None:

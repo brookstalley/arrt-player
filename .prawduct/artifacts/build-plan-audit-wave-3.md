@@ -348,8 +348,7 @@ What the Player needs from `contract-v1.3.0` before it is cut. None blocks phase
 - After a Player restarts, the page can say "Waiting for its first report" for up to one
   cycle while the server says "Reporting".
 - A re-rendered work on the wall keeps its old image until its slot comes round.
-- `tv.close_failed` names no output; `client.identity_changed` names both full device ids,
-  where every other line names a set by a short hash (`displays/frame.py:_known_as`).
+- `tv.close_failed` names no output.
 - `hdmi_outputs` is not clamped to the contract's 32, which a Pi cannot reach.
 - Arrt's real-Player test reads the file output's record and then its picture, and the
   picture is renamed before the record on every draw, so a redraw between the two reads

@@ -67,12 +67,11 @@ the Player sends, and the rules both sides share:
    again if the wall goes on without it after fifteen minutes
    (`tv.unidentified_going_on`).
    **The journal names a set by `set-` and the first eight hex digits of a
-   SHA-256 of its `device.duid`, never by the id** (`displays/frame.py:_known_as`,
-   which every line of that module goes through), because a journal is what gets
+   SHA-256 of its `device.duid`, never by the id** (`logs.py:known_as`, which
+   every line that names a set goes through, the wall's and the client
+   heartbeat's `client.identity_changed` alike), because a journal is what gets
    pasted into an issue in a public repository; the full id goes to the server, in
-   the client heartbeat. **The one line that does not is `client.identity_changed`
-   (`client.FrameIdentity.refresh`), which names the new and the old id in full**: a
-   defect of that line, not the rule.
+   the client heartbeat.
 
 ## Architecture
 
@@ -165,7 +164,7 @@ of four names). A grep for `"event": "` alone misses the built ones.
 | `client.worker_ended` / `client.label_ended` | ERROR | `Supervisor._keep_running` | A worker returned without being asked to |
 | `client.worker_retire_failed` / `client.label_retire_failed` | ERROR (traceback) | `Supervisor._keep_running` | A wall or label retired while its worker waited to restart was called once more to leave its output, and raised |
 | `client.identity_unreadable` / `client.identity_read` | WARNING / INFO | `client.FrameIdentity.refresh` | The Frame's device id could not be read, then could; the last one read is reported meanwhile. The read is one REST GET a minute, and these are said once per episode, not once a minute |
-| `client.identity_changed` | WARNING | `client.FrameIdentity.refresh` | The set answering at the Frame's address says another `device.duid` than the last one read (`output`): it is reported as the new one at once, said once per change |
+| `client.identity_changed` | WARNING | `client.FrameIdentity.refresh` | The set answering at the Frame's address says another `device.duid` than the last one read (`output`, `set_now`, `set_was`, each a short hash, never the id): it is reported as the new one at once, said once per change |
 | **Client routes** (`pull.ClientPull`) | | | |
 | `client.unreachable` / `client.reachable` | WARNING / INFO | `ClientPull._report_unreachable`, `fetch` | `GET /client` got no answer, a timeout or a 5xx |
 | `client.refused` / `client.accepted` | ERROR / INFO | `ClientPull.fetch` | The server refused the client (with `status`) |

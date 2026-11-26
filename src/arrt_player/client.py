@@ -110,7 +110,7 @@ from arrt_player.config import (
     normal_host_name,
 )
 from arrt_player.episodes import Backoff, ReportOnce
-from arrt_player.logs import label_context, wall_context
+from arrt_player.logs import known_as, label_context, wall_context
 from arrt_player.manifest import MEDIA_DIRNAME
 from arrt_player.safe_write import write_whole
 
@@ -367,10 +367,15 @@ class FrameIdentity:
             log.info("the Frame's device id was read", extra={"event": "client.identity_read", "output": FRAME_OUTPUT})
         if self.value is not None and read != self.value:
             log.warning(
-                "the set at the Frame's address is another set now (device id %s, was %s); it is reported as the new one",
-                read,
-                self.value,
-                extra={"event": "client.identity_changed", "output": FRAME_OUTPUT},
+                "the set at the Frame's address is another set now (%s, was %s); it is reported as the new one",
+                known_as(read),
+                known_as(self.value),
+                extra={
+                    "event": "client.identity_changed",
+                    "output": FRAME_OUTPUT,
+                    "set_now": known_as(read),
+                    "set_was": known_as(self.value),
+                },
             )
         self.value = read
 

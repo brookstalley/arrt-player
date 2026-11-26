@@ -9,6 +9,7 @@ composition together, as the process runs them. `clients.md` § The Player and
 
 import ast
 import asyncio
+import hashlib
 import io
 import json
 import logging
@@ -1137,6 +1138,13 @@ async def test_another_set_at_the_frames_address_is_reported_within_one_interval
     assert tv.identity_reads == 3, "the identity was read other than once a minute"
     changed = [record for record in caplog.records if record.__dict__.get("event") == "client.identity_changed"]
     assert len(changed) == 1, "the new set was not said, or said on every read"
+    line = logs.JsonFormatter().format(changed[0])
+    for device_id in (first, tv.device_id):
+        assert device_id not in line, "the journal named a set by its own id, where every other line names it by a hash"
+        assert f"set-{hashlib.sha256(device_id.encode()).hexdigest()[:8]}" in line, "the line does not say which set"
+    said = json.loads(line)
+    assert said["set_now"] == f"set-{hashlib.sha256(tv.device_id.encode()).hexdigest()[:8]}"
+    assert said["set_was"] == f"set-{hashlib.sha256(first.encode()).hexdigest()[:8]}"
 
 
 async def test_an_identity_read_that_hangs_costs_the_report_its_identity_and_nothing_else(client, server, drm):

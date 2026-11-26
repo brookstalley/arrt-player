@@ -414,7 +414,7 @@ every redirect hop included (its docstring, and `tests/test_fetch.py`).
   its own settings, and per-set content ids and each set's `device.duid`, and a
   record of each upload it sent with the `image_date` it carried (`data-model.md`). A `duid` is a device's id, not the address or the MAC the
   same reply carries, neither of which the Player reads or records; the journal
-  names a set by a short hash of it, never the id (`displays/frame.py:_known_as`).
+  names a set by a short hash of it, never the id (`logs.py:known_as`).
 - **What leaves the device in Arrt mode**, all to the server: the client heartbeat (outputs,
   their screen sizes, the Frame's `device.duid`, and the address of the Player's
   settings page, left out when the page is bound to loopback;
