@@ -6,7 +6,7 @@ depends_on:
   - artifact: platform-and-dependency-findings
   - artifact: samsung-tv-state-findings
   - artifact: hdmi-output-findings
-last_validated: 2026-11-19
+last_validated: 2026-11-25
 ---
 
 # Architecture — Arrt Player
@@ -14,14 +14,14 @@ last_validated: 2026-11-19
 **What this covers.** The Player's own topology: its one process, what runs
 inside it, the channels it holds open, what it keeps on disk, and the seams that
 let the suite run with no television, screen or panel. It describes the code as
-it stood on 2026-11-19; every claim names the
+it stood on 2026-11-25, after audit waves 2 and 3; every claim names the
 `file:symbol` it rests on.
 
 **What it points at instead of restating.** The server, and every rule the two
 sides share, are Arrt's:
 
 - The wire contract is the `arrt_contract` package at the tag
-  `pyproject.toml` § `[tool.uv.sources]` names (`contract-v1.0.0` today). Its
+  `pyproject.toml` § `[tool.uv.sources]` names (`contract-v1.3.0` today). Its
   `player-contract.md` § Transport, § Versioning and § The heartbeat (minors 2–4)
   are the specification of every request below.
 - Arrt's `clients.md` § The Player is the model (one process per client, one
@@ -224,33 +224,34 @@ is that walk's output, not a recollection.
 |---|---|---|
 | `__main__` | Composition root: builds settings, the panels (`label_panels`), the outputs (`player_outputs`), the Frame client, the supervisor (`PettingSupervisor`) and the label sweep (`LabelCacheSweep`); the only place `tv.samsung`, `pull`, `kms` and the panel driver are named together | almost everything |
 | `notify` | systemd's notify protocol, `READY=1` and `WATCHDOG=1`, over `$NOTIFY_SOCKET` with no dependency; a no-op without it | `episodes` |
-| `client` | `Supervisor`, `WorkerStop` (why a worker was stopped), `WallCaches` (a departed wall's directory), the client document, output discovery (`hdmi_outputs`, `client_outputs`), the client heartbeat document, `FrameIdentity` | `config`, `episodes`, `heartbeat`, `logs`, `manifest` |
-| `pull` | Every HTTP request: `Pull` (one wall), `ClientPull` (the client routes), `LabelPull` (one label, and its cached document) | `client`, `config`, `episodes`, `heartbeat`, `label_rule`, `manifest` |
+| `client` | `Supervisor` (and `heard`, what the server last said of this Player), `WorkerStop` (why a worker was stopped), `WallCaches` (a departed wall's directory), the client document, output discovery (`hdmi_outputs`, `client_outputs`), the client heartbeat document and the settings page's address in it (`settings_url`), `FrameIdentity`, `ReportAnswer` and `HeardReport` | `config`, `episodes`, `heartbeat`, `logs`, `manifest`, `safe_write` |
+| `pull` | Every HTTP request: `Pull` (one wall), `ClientPull` (the client routes, the report it holds back after a refusal, its last answer, and the address it reached the server from), `LabelPull` (one label, and its cached document) | `client`, `config`, `episodes`, `heartbeat`, `label_rule`, `manifest`, `safe_write` |
 | `wall` | The one wall loop for every display kind; `Clock`; `DisplayRecord`; the `Display` and `Programme` protocols | `config`, `episodes`, `heartbeat`, `manifest` |
-| `displays/frame` | The Frame as a `Display`: which set this is (`_know_the_set`), uploads, bindings, their retirement, reconciliation, brightness, the art-mode gate | `brightness`, `config`, `episodes`, `heartbeat`, `logs`, `manifest`, `programmes.schedule`, `state`, `tv`, `wall` |
-| `displays/file_output` | A screen and a label drawn to a directory (`FILE_OUTPUT_DIR`): another implementation of `ScreenOutput`, and the label panel on `panel/file_surface` | `client`, `config`, `kms`, `label_renderer`, `label_rule`, `logs`, `panel` |
-| `displays/screen` | An HDMI connector as a `Display`, behind `ScreenOutput`; `go_dark`, the black a wall leaves its connector with | `compose`, `config`, `displays.screen_brightness`, `episodes`, `heartbeat`, `manifest`, `programmes.schedule`, `wall` |
+| `displays/frame` | The Frame as a `Display`: which set this is (`_know_the_set`, one phase of four, `SetPhase`), uploads and their records, bindings, their retirement, the removal of what the records name, brightness, the art-mode gate | `brightness`, `config`, `episodes`, `heartbeat`, `logs`, `manifest`, `programmes.schedule`, `state`, `tv`, `wall` |
+| `displays/file_output` | A screen and a label drawn to a directory (`FILE_OUTPUT_DIR`): another implementation of `ScreenOutput`, and the label panel on `panel/file_surface` | `client`, `config`, `kms`, `label_renderer`, `label_rule`, `logs`, `panel`, `safe_write` |
+| `displays/screen` | An HDMI connector as a `Display`, behind `ScreenOutput`; `go_dark`, the black a wall leaves its connector with | `compose`, `config`, `displays.screen_brightness`, `episodes`, `heartbeat`, `logs`, `manifest`, `programmes.schedule`, `wall` |
 | `displays/screen_brightness` | An HDMI screen's brightness on the sun, over the `ddc.DdcBus` seam | `brightness`, `config`, `ddc`, `episodes`, `wall` |
 | `programmes/schedule` | What the wall should show from a major 2 feed; composes each work for the display | `compose`, `episodes`, `logs`, `manifest`, `wall` |
 | `manifest` | Parse and watch the cached feed (`Watcher`, `parse`, `REQUESTED_MAJORS = (2,)`) | — |
-| `compose` | Mat composition for a geometry (Pillow), and `is_intact`, the check on a composed file found on disk | — |
+| `compose` | Mat composition for a geometry (Pillow), and `is_intact`, the check on a composed file found on disk | `safe_write` |
 | `kms` | `KmsOutput`/`LibdrmDevice`: libdrm through `ctypes` | `client`, `episodes` |
 | `ddc` | A monitor's DDC/CI features over its HDMI connector's I2C bus (`Ddc`, `I2cTransport`, `bus_for`); no `ddcutil` | `client` |
-| `tv/client` | The `TvClient` seam and its exceptions | — |
+| `tv/client` | The `TvClient` seam, its exceptions, and `upload_marker`, the `image_date` an upload carries | — |
 | `tv/samsung` | `SamsungTv`, the only `samsungtvws` user | `tv.client` |
-| `state/store` | `DisplayState`, the Frame's SQLite store: the bindings of the set the wall is on, those of the sets it has left, and the set's identity (`belongs_to`) | — |
+| `state/store` | `DisplayState`, the Frame's SQLite store: the bindings of the set the wall is on, those of the sets it has left, the set's identity (`belongs_to`), and the record of every upload sent (`record_sending`, `uploads_on`) | — |
 | `label_rule` | The label document and the label rule | — |
 | `label_renderer` | `LabelPanel` (the device) and `LabelRenderer` (one mapping) | `client`, `episodes`, `label_rule`, `logs`, `panel` |
 | `panel/*` | Label content, layout, legibility, raster, the `LabelSurface` seam (`surface`), Pango (`pango`), the e-paper driver (`epaper`), the surface that needs no typesetter (`file_surface`) | `panel.*` only |
-| `heartbeat` | The wall heartbeat document and its atomic write | — |
+| `heartbeat` | The wall heartbeat document and its atomic write | `safe_write` |
+| `safe_write` | The one way a file is written whole: stage beside it, `fsync`, rename, leave no temporary file (`write_whole`, `write_whole_with`) | — |
 | `logs` | JSON log shape, and the `work_id`, `wall_id` and `label_id` a worker binds around what it runs (`work_context`, `wall_context`, `label_context`) | — |
 | `episodes` | `ReportOnce`, `Backoff` | — |
 | `config` | `.env`, with the settings page's file beneath it, into `ClientSettings` / `WallSettings` / `Settings` / `UiSettings`; `FileOutputSettings`; `resolve`, `load` with the page's file swapped in, which the page judges a save by; `SetupRequired` | `compose`, `dwell`, `heartbeat`, `settings_ui.store`, `sources.reddit_settings` |
-| `settings_ui/store` | The settings page's file, `$CACHE_DIR/.settings.json` (layout 3 while it holds `TV_ADDRESS`, else 2) | — |
+| `settings_ui/store` | The settings page's file, `$CACHE_DIR/.settings.json` (layout 3 while it holds `TV_ADDRESS`, else 2) | `safe_write` |
 | `settings_ui/auth` | The page's password hash, session cookie, setup code and login throttle (per source address, under a ceiling for all of them) | — |
-| `settings_ui/server` | The settings page (`aiohttp.web`), which answers only to its own names (`_known_hosts`), saves what `config.resolve` accepts, forgets the television's pairing when the Frame's address changes, and says what a save did; the Player's one listening socket | `client`, `config`, `programmes.slideshow_status`, `settings_ui.auth`, `settings_ui.store`, `sources`, `sources.reddit_settings` |
+| `settings_ui/server` | The settings page (`aiohttp.web`), which answers only to its own names (`_known_hosts`), saves what `config.resolve` accepts, forgets the television's pairing when the Frame's address changes, says what a save did, and says the Player's state in the server's words (`PLAYER_STATE_WORDS`, from `Supervisor.heard`); the Player's one listening socket | `client`, `config`, `programmes.slideshow_status`, `settings_ui.auth`, `settings_ui.store`, `sources`, `sources.reddit_settings` |
 | `brightness` | Sun-angle brightness (astral), for the Frame and the HDMI screens | — |
-| `programmes/slideshow` | Slideshow mode's programme: the listing on its own task, the cache filled on another, playback from what is cached, the caption; the saved listing | `dwell`, `episodes`, `label_rule`, `mpv`, `programmes.slideshow_status`, `sources`, `sources.cache` |
+| `programmes/slideshow` | Slideshow mode's programme: the listing on its own task, the cache filled on another, playback from what is cached, the caption; the saved listing | `dwell`, `episodes`, `label_rule`, `mpv`, `programmes.slideshow_status`, `safe_write`, `sources`, `sources.cache` |
 | `programmes/slideshow_status` | What the settings page shows of a running slideshow | `sources` |
 | `dwell` | How long an item stays up: a still for the minimum, a clip repeated to reach it and cut at the maximum | — |
 | `mpv` | `MpvOutput`, the slideshow's screen through an mpv this process runs, started with only `MPV_ENVIRONMENT`; `renderer_problems`, `stop_stale` | `client`, `episodes`, `kms` |
@@ -330,9 +331,12 @@ behind an interface", "Async at the I/O boundary, synchronous core",
   `MEDIA_HOLD_SECONDS`, after which the new feed is cached without it and with
   no ETag, so every later poll asks for it again (`Pull._pull_manifest`,
   `_adopt_feed`, `_hold_or_adopt`).
-- `pull` never reads what the server sends without a bound, except the manifest
-  itself: a master is stopped at the bytes its feed declares, the client and
-  label documents at `DOCUMENT_MAX_BYTES` (`Pull._cache_media`, `_stream_to`).
+- `pull` never reads what the server sends without a bound: a master is stopped at
+  the bytes its feed declares, a feed at `MANIFEST_MAX_BYTES` (16 MiB), the client
+  and label documents at `DOCUMENT_MAX_BYTES` (1 MiB). Both are the contract's
+  `max_bytes` for their routes, held to it by `tests/test_transport_table.py`; a
+  document past its bound is refused as unreadable and what the cache holds stays
+  (`Pull._cache_media`, `_walk`, `_read_capped`).
 - Nothing but `displays/frame` and `tv/*` talks to the television; nothing in
   shipped code presses power. The second is Arrt's norm, tested by
   `tests/test_frame_wall.py::test_a_television_somebody_is_watching_is_left_alone`
@@ -347,6 +351,13 @@ behind an interface", "Async at the I/O boundary, synchronous core",
   sends no removal from a store that does not record the connected set
   (`FrameDisplay._know_the_set`, `_may_remove`; `security-model.md` § What it does
   to the television).
+- **The Frame removes from a set only a picture its upload records name there**
+  (`DisplayState.uploads_on`, read by `FrameDisplay._remove_orphans`), and sends no
+  upload whose record it could not write (`record_sending`). The household's
+  pictures, an older Player's and any of its own the records cannot match are left
+  where they are, said once per set (`tv.others_left_alone`).
+- Nothing under `src/` renames a temporary file into place but `safe_write` and the
+  two writers that stream a download (`tests/test_safe_writes.py`).
 - No label failure stops a wall: `LabelPanel.draw` never raises (its broad
   `except` with a pragma), and the label runs in its own task.
 
@@ -355,13 +366,13 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 | # | Channel | Transport | Direction | Sync | Contract |
 |---|---|---|---|---|---|
 | 1 | Client document | `GET /client`, ETag | server → Player | async poll, 30 s | `player-contract.md` § Transport; `pull.ClientPull.fetch` |
-| 2 | Client heartbeat | `POST /client/heartbeat`, JSON | Player → server | on change, else every 60 s | `client-heartbeat.v1`; `client.client_heartbeat`, `Supervisor._report_outputs` |
+| 2 | Client heartbeat | `POST /client/heartbeat`, JSON: the outputs, the label outputs, the Frame's `device.duid` and the settings page's address (`settings_url`) | Player → server | on change, else every 60 s; one the server refused in its error form is held until it changes or 300 s pass | `client-heartbeat.v1`; `client.client_heartbeat`, `Supervisor._report_outputs`, `ClientPull.report` |
 | 3 | Wall feed | `GET /walls/{wall_id}/manifest/v{major}`, ETag, highest major first | server → Player | async poll, `MANIFEST_POLL_SECONDS` (default 1 s) | `player-contract.md` § Major 2, § The cutover; `Pull._request_manifest` |
 | 4 | Media | `GET` of each work's `media.url`, resolved against the manifest URL; streamed to a temporary file under a running SHA-256, stopped past the bytes the feed declares; 30 s without a byte ends it, with no total | server → Player | inside a feed poll | `Pull._cache_media` |
 | 5 | Wall heartbeat | file in the wall's cache, then `POST /walls/{wall_id}/heartbeat` | Player → server | file every 60 s or on change; POST when the file changes, on the pull's own loop at the poll interval while the server answered the last manifest poll | `heartbeat.v1`; `heartbeat.write`, `Pull._heartbeats`, `Pull._forward_heartbeat` |
 | 6 | Label document | `GET /labels/{label_id}`, ETag; each accepted document cached under `CACHE_DIR/.labels/` | server → Player | poll, `LABEL_POLL_SECONDS` (default 1 s) | `labels-and-surfaces.md`; `pull.LabelPull.fetch`, `cached` |
 | 7 | Frame art channel | websocket via `samsungtvws` | Player ↔ television | async, with the set's own announcements | foreign; `tv/client.TvClient`, `samsung-tv-state-findings.md` |
-| 8 | Frame REST | HTTP via the library's REST helper | Player → television | one-shot reads: `PowerState`, and the set's `device.duid` read by the client for its heartbeat and by the wall on every new connection, before its first art-mode read of the pass, whatever the set is showing | `SamsungTv.power_state`, `SamsungTv.read_identity`, `FrameDisplay._know_the_set` |
+| 8 | Frame REST | HTTP via the library's REST helper | Player → television | one-shot reads: `PowerState`, and the set's `device.duid`, read by the client for its heartbeat once a minute (a failed read keeps the last) and by the wall on every new connection, before its first art-mode read of the pass, whatever the set is showing | `SamsungTv.power_state`, `SamsungTv.read_identity`, `FrameIdentity.refresh`, `FrameDisplay._know_the_set` |
 | 9 | HDMI | `ioctl` on `/dev/dri/card*` through libdrm (`ctypes`) | Player → screen | blocking, on a thread | `kms.py`; `hdmi-output-findings.md` |
 | 10 | E-paper | SPI and GPIO through `omni_epd` | Player → panel | blocking, on a thread | `panel/epaper.py`; `platform-and-dependency-findings.md` § The e-paper panel |
 | 11 | Connector discovery | reads `/sys/class/drm` | kernel → Player | each client poll | `client.hdmi_outputs` |
@@ -375,7 +386,7 @@ behind an interface", "Async at the I/O boundary, synchronous core",
 Bearer header (`Pull._auth`, `ClientPull._auth`, `LabelPull.fetch`). A media URL
 on another origin is fetched without the token (`Pull._cache_media`,
 `pull._same_origin`), so a manifest cannot send the token elsewhere. Nothing the server sends is
-read without a bound but the manifest (`Pull._cache_media`, `DOCUMENT_MAX_BYTES`).
+read without a bound (`Pull._cache_media`, `MANIFEST_MAX_BYTES`, `DOCUMENT_MAX_BYTES`).
 Every document from the server is parsed and refused whole if it is malformed
 (`client.parse_client_document`, `manifest.parse`, `label_rule.parse_label_document`).
 Channels 7–8 cross the LAN to a device that authenticates the Player by a token
@@ -391,7 +402,7 @@ make the Player fetch from it (`sources/fetch.py` docstring;
 
 **Channel 5 is a file first.** The wall loop writes
 `CACHE_DIR/<wall_id>/display-heartbeat-<wall_id>.json` atomically
-(`heartbeat.write`: temp, `fsync`, rename) and the pull forwards it when its
+(`heartbeat.write`, through `safe_write.write_whole`: temp, `fsync`, rename) and the pull forwards it when its
 mtime, size and `reported_at` change (`Pull._forward_heartbeat`). The loop never
 waits on the network to report. The file is in the wall's own directory, never
 one the server writes (`WallSettings.heartbeat_root`'s docstring says why).
@@ -418,7 +429,7 @@ CACHE_DIR/
     media/sha256-<hash>        verified masters              (manifest.MEDIA_DIRNAME, manifest.media_name)
     composed/                  pictures composed for this display (config.COMPOSED_DIRNAME; Schedule), each flushed to disk before it takes its name
     display-heartbeat-<wall_id>.json                         (heartbeat.HEARTBEAT_FILENAME_TEMPLATE; Wall._beat)
-    display-state.sqlite       Frame walls only, schema 4    (config.STATE_FILENAME; state.DisplayState)
+    display-state.sqlite       Frame walls only, schema 5    (config.STATE_FILENAME; state.DisplayState)
     .left.json                 only after the wall left this client: when, and for how long it has been seen gone (client.LEFT_STAMP_FILENAME; client.WallCaches)
   .settings.json               the settings page's file, layout version 2, or 3 while it holds TV_ADDRESS (settings_ui.store.SETTINGS_FILENAME, layout_for)
   .slideshow/<item_id>.<ext>   slideshow media, at most 2 GB (config.SLIDESHOW_MEDIA_DIRNAME; MediaCache)
@@ -446,8 +457,15 @@ the Frame's address; an older Player refuses a newer layout by name, and rolling
 back means deleting the newer keys and setting `version` to 2, or to 1 across the
 slideshow's (`settings_ui/store.py` docstring; `deploy/README.md` § The slideshow).
 
-**Atomic writes.** `pull._write_atomically` for the client document, manifest,
-ETags, media and label documents; `heartbeat.write` for the heartbeat. A label
+**Atomic writes.** One helper, `safe_write.write_whole`, writes every file the
+Player holds in hand: the pull's client document, manifest, ETags and label
+documents (`pull._write_atomically`), the heartbeat, a departed wall's stamp, the
+settings file (`0600` whatever the umask), the file outputs, the slideshow's saved
+listing, and a composed picture (`write_whole_with`). It stages beside the target,
+forces the bytes to the card, renames, and leaves no temporary file on any exit; each
+caller keeps its own temporary name, and it forces no directory entry, so a cut can
+still leave the old file, which is whole. Media streamed as they arrive
+(`Pull._cache_media`, `sources.fetch`) keep their own staging. A label
 document's modification time is the instant the server last answered for it
 (moved forward at most once a minute, `LABEL_ANSWER_STAMP_SECONDS`), and its ETag
 is not kept, so a restarted Player always asks for the whole document. A composed
@@ -458,8 +476,8 @@ after a new feed is cached, and a master either feed names is kept
 (`Pull._evict`, called with `held | previous`).
 
 **The Frame's store.** `state/store.py:DisplayState`: tables `tv_binding`,
-`daemon_state` and `tv_binding_aside`, version in `PRAGMA user_version`
-(`SCHEMA_VERSION = 4`; the migration is `_widen`, 2 to 3 to 4 in one function,
+`daemon_state`, `tv_binding_aside` and `tv_upload`, version in `PRAGMA user_version`
+(`SCHEMA_VERSION = 5`; the migration is `_widen`, 2 to 3 to 4 to 5 in one function,
 and `data-model.md` § DisplayState has the columns). A store from a newer Player
 raises `StateSchemaTooNew`, and `__main__.run_frame_wall` parks that one wall
 (`daemon.state_too_new`) rather than opening it. `tv_binding` cannot hold
@@ -469,9 +487,12 @@ docstring). **The store records which television its bindings were made on**
 own, so on another set the rows are moved aside under the old identity in one
 transaction, the work on the wall and the set's own-slideshow flag go with them,
 and the wall's running time with a feed (`feed_seconds`) stays, because it is the
-wall's and not a set's. The store is the only per-device state that costs
-anything to lose: losing it costs re-uploading the theme to the set, and the
-removal of what the set holds that the Player cannot then account for.
+wall's and not a set's. **`tv_upload` records every picture the Player sends,
+before it is sent, with the set it goes to and the `image_date` marker it carries**:
+what the Player may remove from a set is what those rows name there, and nothing
+else. The store is the only per-device state that costs anything to lose: losing it
+costs re-uploading the theme to the set, and the Player's record of what it put there,
+so the pictures already on the set stay until somebody removes them.
 
 **Not persisted.** Brightness (recomputed from the sun, `brightness.py`), the
 supervisor's view of running workers, every `ReportOnce` episode, the label's
@@ -491,10 +512,11 @@ is its test.
 | Server unreachable, 5xx, timeout | Walls rotate from cache; feed poll backs off; heartbeat POSTs stop; client document kept | `Pull`: 2 s doubling to 60 s (`BACKOFF_START_SECONDS`, `BACKOFF_MAX_SECONDS`), request 60 s total / 10 s connect, a master 30 s without a byte and no total (`_MEDIA_TIMEOUT`). `ClientPull`: fixed 30 s poll, 30 s / 10 s. `LabelPull`: 1 s poll, 10 s / 5 s |
 | Server down at boot | `Supervisor.run` reconciles from `.client.json` before the first request | — |
 | Token refused (401), wall not this client's (403), nothing published (404 at every major) | Logged once per status per episode; cache kept; poll continues at the normal interval | `Pull._report_refused` |
-| Feed unparseable or an unknown major | Refused before caching; the last good feed stays | `Pull._pull_manifest`, `manifest.Watcher.poll` |
+| Feed unparseable, past 16 MiB, staging a work twice, or an unknown major | Refused before caching; the last good feed stays, said once per episode (`pull.manifest_refused`) and the next poll asks again | `Pull._pull_manifest`, `_walk`, `manifest.Watcher.poll` |
 | A master 404s, fails its hash, runs past the bytes its feed declares, or has no size declared | That work is skipped; the rest of the feed is cached | `Pull._cache_media` |
 | A master fails transiently (a 5xx, a timeout, a dropped connection) | The feed already cached stays and the poll backs off, for at most 10 minutes; the heartbeat still goes, on its own loop. Then the new feed is cached without that master and without an ETag, and the master is asked for again on every poll until it arrives | `MEDIA_HOLD_SECONDS`, `Pull._hold_or_adopt`, `Pull._heartbeats`, `_Poll.MEDIA_FAILING`; `pull.media_failing`, `pull.hold_ended` |
-| The server's heartbeat answer is a 4xx or a 5xx | A 4xx is not sent again until the report changes; a 5xx is sent again next poll | `Pull._heard` |
+| The server's wall heartbeat answer is a 4xx or a 5xx | A 4xx is not sent again until the report changes; a 5xx is sent again next poll | `Pull._heard` |
+| The server refuses the client heartbeat in its error form (any `4xx` but `401`, `408` and `429`) | **The report is held**: not sent again until it changes (a screen plugged in, a new settings address; its instant aside) or 300 s have passed, so a report the server always refuses costs one request in five minutes. A `401`, `408`, `429`, a `5xx`, no answer, or a `4xx` in no error form of the server's (a proxy's page, a framework's own body) is no verdict on the report and it is sent again at the next poll. Said once per episode; the settings page says "Report unreadable" after a `400` until a report is taken. **A bounded departure from the contract's transport table**, which says only "when the report changes" and names no lapse (`build-plan-audit-wave-3.md` § Decisions made mid-build) | `ClientPull.report`, `NOT_A_VERDICT_ON_THE_REPORT`, `REFUSED_REPORT_RESEND_SECONDS`; `client.heartbeat_refused`, `client.heartbeat_ok` |
 | A composed picture is empty, cut short, or not a JPEG | Removed and composed again; a master that cannot be read for a reason that may clear is retried | `Schedule._intact`, `compose.is_intact`; `schedule.composed_damaged`, `schedule.compose_read_failed` |
 | The cache refuses a write (a full or read-only disk) | The wall keeps showing the feed already cached; the new feed is not cached and **no ETag is stored for it**, so the next poll, under the backoff, is answered whole and tries again; the heartbeat still goes, because the server answered. Said once per episode, and again when it ends. The client document's and a label document's refused writes are caught the same way, the walls and the label following the server meanwhile | `Pull._cache_feed`, `_Poll.UNWRITABLE`, `Pull._report_unwritable`; `pull.cache_unwritable` / `pull.cache_writable`, `client.cache_unwritable` / `client.cache_writable`, `label.cache_unwritable` / `label.cache_writable` |
 | A wall's pull raises | `__main__._pull_ended` logs and ends that wall's worker; the supervisor restarts both | 5 s doubling to 300 s (`client.RESTART_MIN_SECONDS`, `RESTART_MAX_SECONDS`); the ladder resets after a run longer than 300 s |
@@ -503,13 +525,15 @@ is its test.
 | Television asleep or gone | `TvUnavailable`; the wall holds; a heartbeat is still written | `TV_RETRY_MIN_SECONDS`..`TV_RETRY_MAX_SECONDS` (5 s..300 s); connect 30 s; upload 60 s; selection confirm 8 s (`config` defaults) |
 | Television in use (not art mode), or its power cannot be read | Nothing is sent to it: a selection is held whenever the set is not showing art, and an upload, removal, brightness change or slideshow switch-off whenever it is not showing art or dark. Held writes share one backoff (`FrameDisplay._writes`, a `frame._WaitedEpisode`) | `TvClient._permit` (`TvNotOurs`), `FrameDisplay.is_ours`, `_hold_the_writes`; Arrt's norm; `tv.writes_held`, `tv.writes_resumed` |
 | Selections accepted, none displayed | Said once, rotation stops trying for the pass | `Shown.WALL_UNCHANGED`, `FrameDisplay._report_wall_unchanged` |
-| The Frame's store is locked, or its disk or file fails | The pass ends and not the wall: the next comes after a wait on the same ladder as an unreachable set, said once per episode at WARNING for a lock that may clear and at ERROR for a full or read-only disk, an I/O error or a damaged file, and the heartbeat's `last_error` names it. What the store answers afterwards is what is on disk (a write that raised is rolled back). Anything else SQLite raises is this code's mistake and still reaches the supervisor's restart. **Under a lasting write fault every pass uploads a copy the store cannot record, one per backoff step**, as the restart loop it replaced did: left open | `state.store.StoreFault`, `_FAULTS`, `FrameDisplay.went_away`, `_the_store_failed`; `store.busy`, `store.failed`, `store.recovered` |
-| The set will not say which set it is | The wall uses no binding and asks again on its own ladder, said once (`tv.unidentified`); after 15 minutes it shows art from an empty store held in memory, uploading the work it shows and then the feed's other works one a pass, removing nothing; an outage drops that store and starts the 15 minutes again. When the set says, the wall returns to the device's store and owes a reconciliation that removes what the store in memory uploaded, the picture on the wall only once another has been selected. **Known limit, not fixed:** a set that opens its art channel and never gives its id gains one theme of copies per outage and its 15 minutes, and nothing removes them, because a removal needs a store that records the connected set; retired by measuring whether any set does this (`samsung-tv-state-findings.md` § What is still owed, item 8). The heartbeat reports the television as not established rather than unreachable | `FrameDisplay._know_the_set`, `_go_on_unidentified`, `IDENTITY_PATIENCE_SECONDS`; `tv.unidentified`, `tv.unidentified_going_on`, `tv.identified` |
-| A different television answers at the Frame's address | Its bindings are set aside under the old identity and it starts as on a first run, with every work uploaded and the uploaded-pictures category it holds cleared of what the Player cannot account for; the old set keeps the Player's pictures until it is met again or they are removed there. A store that recorded no set takes the first one read as its own. **Known limit, not fixed:** the client heartbeat's `FrameIdentity` reads the identity once and keeps it, while the wall reads it on every connection, so a different set answering at the same address without a restart is followed by the wall's store and not by the heartbeat, which reports the first set's identity until the Player restarts | `DisplayState.belongs_to`, `FrameDisplay._met`; `binding.set_changed`, `binding.set_adopted` |
-| A work no feed has named for 14 days of the wall running | Its image is removed from the set through the gated removal, the set's own list confirms it, and the row goes; held while the set shows a programme, and never for the work on the wall | `FrameDisplay._retirements`, `_retire`; `binding.retired`, `binding.retirement_unconfirmed` |
+| The Frame's store is locked, or its disk or file fails | The pass ends and not the wall: the next comes after a wait on the same ladder as an unreachable set, said once per episode at WARNING for a lock that may clear and at ERROR for a full or read-only disk, an I/O error or a damaged file, and the heartbeat's `last_error` names it. What the store answers afterwards is what is on disk (a write that raised is rolled back). Anything else SQLite raises is this code's mistake and still reaches the supervisor's restart. **An upload whose record cannot be written is not sent**, so a lasting write fault puts no picture on the set: the wall shows what it has already put there, and `store.failed` says why the theme stops filling | `state.store.StoreFault`, `_FAULTS`, `FrameDisplay.went_away`, `_the_store_failed`; `store.busy`, `store.failed`, `store.recovered` |
+| The set will not say which set it is | The wall uses no binding and asks again on its own ladder, said once (`tv.unidentified`); after 15 minutes it shows art from an empty store held in memory, uploading the work it shows and then the feed's other works one a pass, removing nothing; an outage drops that store and starts the 15 minutes again. Those uploads are recorded on the device's store with no set. When the set says, the wall returns to the device's store and owes a reconciliation, which takes them off a set they were sent toward (the one the store last recorded, listed at that address) or that said which it is on the connection they went on, found by id and marker, the picture on the wall only once another has been selected. **Known limits, not fixed:** a set that opens its art channel and never gives its id gains one theme of copies per outage and its 15 minutes, and nothing removes them until a set they may be on says; and copies stay on the set for good when it turns out to be a third set, when the store knew no set and the spell was lost, when a restart lands on another set, or when the set does not echo the marker (item 14 of `build-plan-audit-wave-3.md` § Operator's checklist). The first is retired by measuring whether any set does this (`samsung-tv-state-findings.md` § What is still owed, item 8). The heartbeat reports the television as not established rather than unreachable | `FrameDisplay._know_the_set`, `_go_on_unidentified`, `IDENTITY_PATIENCE_SECONDS`; `tv.unidentified`, `tv.unidentified_going_on`, `tv.identified` |
+| A different television answers at the Frame's address | Its bindings are set aside under the old identity and it starts as on a first run, with every work uploaded; **what that set already lists is left alone, the household's own pictures included** (said once per set, with how many, `tv.others_left_alone`), and the old set keeps the Player's pictures until it is met again or they are removed there. A store that recorded no set takes the first one read as its own, and its bindings as uploads to it. The client heartbeat's `FrameIdentity` reads the identity again once a minute, so the server hears of the other set within an interval and without a restart (`client.identity_changed`); a failed read keeps the last one. The read is one REST GET a minute, 2 s at most for a set that is asleep, and writes two journal lines for an episode (`client.identity_unreadable`, `client.identity_read`) | `DisplayState.belongs_to`, `FrameDisplay._met`; `binding.set_changed`, `binding.set_adopted` |
+| A work no feed has named for 14 days of the wall running | Its image is removed from the set through the gated removal when an upload record of that set names it there, the set's own list confirms it, and the row goes (a picture no record names stays); held while the set shows a programme, and never for the work on the wall | `FrameDisplay._retirements`, `_retire`; `binding.retired`, `binding.retirement_unconfirmed` |
 | A wall leaves this Player | Its directory is stamped and removed a week later, counted only while documents are read; never from a document that was not read | `client.WallCaches`, `Supervisor._sweep_walls`; `client.wall_cache_stamped` / `_returned` / `_removed` / `_unsweepable` |
 | The Player stops making progress (a supervisor that does not finish a cycle, a slideshow step that does not end), or cannot tell systemd | No `WATCHDOG=1`; after `WatchdogSec` (300 s) systemd stops it with SIGTERM and `Restart=always` starts it again; `READY=1` is owed by every mode or the start fails at `TimeoutStartSec` | `notify.Watchdog`, `PettingSupervisor`, `petting`; `deploy/display.service`; `notify.unusable`, `notify.unsent` |
 | HDMI screen absent or the card refuses | The wall rotates unseen; drawn again when a screen returns | `KmsOutput`, `ScreenDisplay._refresh` every poll |
+| A screen refuses a picture | The work is skipped and the schedule tries again at its next slot; meanwhile the display asks the output to draw the refused picture again on each following pass, so a draw the output completes on its own is seen and said once, with the work reported as selected | `ScreenDisplay._put_up`, `_refresh`; `screen.draw_failed`, `screen.draw_recovered`, `rotation.selected` |
+| A file output's write fails (a Player started with `FILE_OUTPUT_DIR`) | `refresh` writes again on every poll until both the picture and its record have landed, the record last, so a record never names a picture that is not there; a reader tells the one window by `picture_sha256` not matching the picture. A picture the output refused is asked for again by the display (the row above); each episode is said once and its end once | `FileScreenOutput._owed`, `refresh`; `screen.draw_failed` / `screen.draw_recovered`, `screen.refresh_failed` / `screen.refresh_recovered` |
 | A connector the kernel lists after the Player started, or stops listing | The walls are matched to the last document again, without waiting for the server to say anything new (it answers 304) | `Supervisor.cycle`, `_current_outputs` |
 | A wall is unassigned or moved off an HDMI connector | Its screen is drawn black, once its loop and pull have ended; a screen unplugged at that moment may show its old picture when plugged back in, until another wall is drawn there | `Supervisor._stop`, `__main__.run_screen_wall`, `displays/screen.go_dark`, `KmsOutput.blank`; `screen.blanked`, `screen.blank_failed` |
 | The connector goes, or the Player stops, or the server also gives the connector to another wall | The screen is left as it is | `client._why_stopped` |
@@ -553,13 +577,19 @@ that cannot proceed is retried on the next poll, not buffered.
 - **The Frame store is forward-refusing** (`StateSchemaTooNew`), and migrates
   forward on open (`DisplayState._widen`). Rolling back a Player across a store
   migration parks its Frame wall: a release that writes schema 2 refuses a store
-  at 3 or 4 by name (measured on 2026-11-19 against the code at the end of wave 1,
-  with `PRAGMA user_version = 3` still refused and `= 2` opening it). The way
-  back is stopping the Player and setting `PRAGMA user_version` to what the older
-  release writes, on each Frame wall's store (the runbook's § Going back); the
-  older release ignores the new columns and table, at the cost of one re-upload
-  per work, and rolling forward again forgets the recorded identity and takes the
-  first one read.
+  at 3, 4 or 5 by name (measured on 2026-11-19 against the code at the end of wave 1,
+  with `PRAGMA user_version = 3` still refused and `= 2` opening it, and again on
+  2026-11-25 with v0.8.0 against a schema-5 store). **What that release then does
+  is the old sweep, and the rollback is the owner's to allow each time**
+  (2026-11-25): v0.8.0 meets the schema-5 store, journals `daemon.state_too_new`,
+  parks only the Frame wall and touches nothing on the set. Only after the runbook's
+  step 19b sets the store's version to 2, or after the store is deleted, does its
+  sweep remove every uploaded picture its records do not name: the household's, an
+  older Player's leftovers, even the one on screen. The way back is stopping the
+  Player and setting `PRAGMA user_version` to what the older release writes, on
+  each Frame wall's store (the runbook's § Going back); the older release ignores
+  the new columns and tables, at the cost of one re-upload per work, and rolling
+  forward again forgets the recorded identity and takes the first one read.
 - **System packages.** Slideshow mode needs mpv from the distribution (`apt-get
   install --no-install-recommends mpv`) and the account in `render`
   (`deploy/display.service`, `SupplementaryGroups`). Neither is in the lockfile;
@@ -625,7 +655,7 @@ Composition and the label draw are seconds of CPU on a thread. Nothing here is d
   | Television | `tv/client.TvClient` (ABC) | `tests/fake_tv.py:FakeTv` (re-exported by `tests/fakes.py`) subclasses it, so a new verb fails the double at import; it keeps a clock of its own for the tests that wait on the set | `displays/frame.frame_wall` takes a `TvClient`; only `__main__.frame_tv` builds `SamsungTv` |
   | Label surface | `panel/surface.LabelSurface` (ABC) | `tests/fakes.py:FakeSurface` for the renderer; `tests/test_epaper.py:FakeEpd` and `FlatRasterizer` for `EpaperSurface` itself | `panel/epaper.EpaperSurface` takes its driver (`epd=`) and a rasterizer as arguments; `omni_epd` is imported only inside `open_panel` |
   | HDMI | `displays/screen.ScreenOutput` (Protocol); `kms.Device` (Protocol) | `tests/fakes.py:RecordingOutput`; `tests/fakes.py:drm_tree` builds a fake `/sys/class/drm` | `client.hdmi_outputs(drm_root=…)` and `kms.KmsOutput(drm_root=…, dev_root=…, device_for=…)` are injectable |
-  | Server | `client.ClientLink` (Protocol) for the supervisor; real `aiohttp` against a local server for the pull | `tests/server_double.py:ServerDouble`, an `aiohttp.web` app on the contract's own routes, validating client heartbeats against `client-heartbeat.v1` and wall heartbeats against `heartbeat.v1`, served by `aiohttp.test_utils.TestServer` | tests set `server_url` to the test server's URL (`tests/test_pull.py`) |
+  | Server | `client.ClientLink` (Protocol) for the supervisor; real `aiohttp` against a local server for the pull | `tests/server_double.py:ServerDouble`, an `aiohttp.web` app on the contract's own routes that decides which case a request is and answers from the contract's transport table (`arrt_contract.transport()`: each answer is a row of it), validating client heartbeats against `client-heartbeat.v1` and wall heartbeats against `heartbeat.v1`, served by `aiohttp.test_utils.TestServer`; `tests/test_transport_table.py` replays every row against the double and the Player's reaction | tests set `server_url` to the test server's URL (`tests/test_pull.py`) |
   | Clock | `wall.Clock`; `monotonic=` on `Supervisor`, `Pull`, `Backoff` | test clocks | injected everywhere a wait is measured |
   | Text stack | `panel/raster.Rasterizer` | `tests/test_epaper.py:FlatRasterizer` | the real one, `panel/pango.PangoRasterizer`, is exercised by `tests/raster`, which needs `--group raster` and skips without it |
 
@@ -688,15 +718,21 @@ Decisions visible in the code, with where each is argued. New entries append.
 13. **A wall that leaves an HDMI connector draws it black; a Player that stops
     leaves its screens as they are**, mirroring the labels
     (`displays/screen.py` docstring; `hdmi-output-findings.md`).
-14. **A binding belongs to a set, and a removal needs a store that knows which**:
-    a set's content ids are its own, so the store records `device.duid` and sets
-    another set's bindings aside (`state/store.py` docstring). The cost accepted
-    is that the old set keeps the Player's pictures until it is met again, and
-    that a television the Player meets with no record of it is cleared of the
-    uploads it cannot account for, the household's own included
-    (`security-model.md` § What it does to the television). Open for the owner:
-    whether the Player should remove only what it recorded uploading, now that the
-    store knows the set.
+14. **A binding belongs to a set, a removal needs a store that knows which, and
+    the Player removes only what it recorded uploading**: a set's content ids are
+    its own, so the store records `device.duid` and sets another set's bindings
+    aside (`state/store.py` docstring), and every upload is recorded on the store
+    before it is sent, with the set and the `image_date` marker it carries, so
+    that what a listing shows is the Player's only where a record names it there
+    (`security-model.md` § What it does to the television). The costs accepted: the
+    old set keeps the Player's pictures until it is met again; and the pictures an
+    older Player put up and never recorded, the household's own, and an earlier
+    generation's stay on a set for good, which the owner ruled on 2026-11-19 and
+    accepted before any deploy on 2026-11-25. The rule rests on the set echoing the
+    marker in its listing, which has been measured once, on one upload
+    (`platform-and-dependency-findings.md` § `upload()` reports failure on uploads
+    that succeeded); a set that does not echo it leaves every picture the Player
+    uploads there for good.
 15. **The watchdog is petted only for progress, never because the loop is
     alive**, and its signal is SIGTERM, so a restart closes the art channel
     (`notify.py` docstring; `deploy/display.service`).
@@ -707,6 +743,20 @@ Decisions visible in the code, with where each is argued. New entries append.
     are read, and a binding goes after 14 days counted only while the wall runs
     with a feed**: both on the elapsed clock, so a month switched off or a clock
     step retires nothing (`client.WallCaches`; `state/store.py` docstring).
+18. **A file is written whole by one helper** (`safe_write.py`), so a change in how
+    a write survives a power cut reaches every writer at once. It keeps each
+    writer's temporary name and adds no directory `fsync`: whether the Pi's ext4
+    needs one is a measurement the operator owes (`build-plan-audit-wave-2.md`
+    § Operator's checklist, item 8).
+19. **The wall's state with its set is one value of four** (`SetPhase`), changed
+    only by `FrameDisplay._become`, so an outage, a reconnect to another set and a
+    store fault cannot leave it half in one phase and half in another; and the wall's
+    running time with a feed is counted and saved on the device's store whichever
+    store its bindings come from.
+20. **A client heartbeat the server refused in its own error form is held for at
+    most five minutes**, and any other answer is no verdict on the report: a
+    departure from the pinned contract's table, bounded and recorded with its cost
+    (`build-plan-audit-wave-3.md` § Decisions made mid-build).
 
 ## Discrepancies with Arrt's record
 

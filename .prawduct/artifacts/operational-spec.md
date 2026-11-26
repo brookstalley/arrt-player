@@ -120,7 +120,13 @@ driver is pinned by an override at the commit the lock records
 Nothing in CI reaches a television or a panel. The suite drives a double behind
 the TV interface (`tests/fakes.py`) and a stand-in server (`tests/server_double.py`).
 The contract is taken at the tag in `pyproject.toml` (`[tool.uv.sources]`,
-`contract-v1.0.0` today).
+`contract-v1.3.0` today).
+
+**Three checks are required on `develop` and `main`** (branch protection, set
+2026-11-20, read from GitHub's protection API): "The suite", "The typesetting" and
+"Lint and format", the three job names above as the workflow reports them. Nothing
+else is asked of a merge: no review count, no signed commits, and administrators are
+not held to the checks; force pushes to either branch and its deletion are refused.
 
 ### The hand-run tools
 
@@ -151,20 +157,26 @@ Player rebuilds by pulling again. What each loss costs:
 |---|---|---|
 | A wall's media or manifest under `CACHE_DIR` | A re-pull from the server. While the server is also down, the wall has nothing to show | Automatic once the server answers |
 | `CACHE_DIR/.client.json` | Until the server answers, a restarted client knows no walls (`ClientPull.cached`) | Automatic once the server answers |
-| A Frame wall's `display-state.sqlite` | Reconciliation removes every image on the set it cannot account for and uploads the wall again; **that includes pictures the household put in the set's uploaded-pictures category**. `deploy/README.md` records about 3.5 minutes for 40 works on a fresh device | Automatic |
+| A Frame wall's `display-state.sqlite` | The wall uploads every work again, and the Player's record of what it put on the set is gone: **the pictures already there stay**, the Player's own and the household's alike, until somebody removes them on the set; it removes only what it records uploading from then on. `deploy/README.md` records about 3.5 minutes for 40 works on a fresh device | Automatic for the uploads; the leftovers by hand |
 | A departed wall's directory | Removed a week after the wall left this Player, counted only while the Player reads its client document; nothing to recover | Automatic (`client.WallCaches`) |
 | The TV token file (default `$CACHE_DIR/token_file`, so wiping `CACHE_DIR` loses it) | A pairing prompt on the television, which somebody has to accept at the set | By hand, at the set |
 | `.env` | The client token is shown once by the server and kept only in `.env` | Issue a new token on the server (Settings › Players) and rebuild `.env` from `.env.example` |
 
 **One state change is one-way.** `display-state.sqlite` carries a schema version
-(`state/store.SCHEMA_VERSION`, 4 today: 3 added the time a work was last named,
-4 the set's identity and the table that holds another set's bindings aside). A
+(`state/store.SCHEMA_VERSION`, 5 today: 3 added the time a work was last named,
+4 the set's identity and the table that holds another set's bindings aside, 5 the
+record of every upload). A
 Player older than the store refuses it and parks that wall (`StateSchemaTooNew`).
 So rolling back across a release that bumps it needs, on each Frame wall's store,
 the Player stopped and `PRAGMA user_version` set to what the older release
 writes (2 for the release before this one), at the cost of one re-upload per work;
 rolling forward again forgets the recorded identity and takes the first one read.
 Removing the store also works, at the cost of re-uploading the whole library.
+**Across schema 5 a rollback is the owner's to allow each time** (2026-11-25), because
+the release before it sweeps the set by the old rule: it refuses the store and parks
+only that Frame wall until the store's version is set to 2 or the store is deleted,
+and then removes every uploaded picture its own records do not name, the
+household's included, even the one on screen.
 **Before the upgrade, if a Frame's address was ever moved to a different
 television, delete that wall's `display-state.sqlite` first**: nothing on the Pi
 records which set the old rows were made on, so a store from before the identity
@@ -182,7 +194,9 @@ Nothing pages anyone. A failure is noticed when somebody looks at one of these.
   `GET /api/clients` (`heartbeat.age_seconds`, `heartbeat.problem`), and
   `GET /api/walls` (`reads_feed`, `feed_notice`). Runbook steps 15–16 give the
   commands and the expected values. While the server is reachable, the client
-  heartbeat is sent at least every 60 s (`client.Supervisor._report_outputs`); the
+  heartbeat is sent at least every 60 s (`client.Supervisor._report_outputs`), except
+  that one the server refused in its error form waits until it changes or 300 s pass
+  (`pull.ClientPull.report`); the
   contract calls a report stale after three intervals, 180 s
   (`arrt_contract.timing()`, held by `tests/test_heartbeat_interval.py`).
 - **The wall heartbeat** reports, per wall, the manifest schema, the current work,
@@ -207,8 +221,9 @@ on a current cache has none); `pull.unreachable`,
 in use, correctly left alone); `rotation.wall_unchanged`, `tv.unavailable`;
 `daemon.misconfigured`, `daemon.state_too_new`; `frame.crashed`, `store.failed`,
 `store.busy` (the Frame's store); `tv.unidentified`, `tv.unidentified_going_on`,
-`binding.set_changed` (which television is at the Frame's address);
-`binding.retired`; `pull.cache_unwritable`; `notify.unusable`, `notify.unsent`
+`binding.set_changed` and `client.identity_changed` (which television is at the
+Frame's address); `tv.others_left_alone` (pictures on the set the Player's records
+do not name, left where they are); `binding.retired`; `pull.cache_unwritable`; `notify.unusable`, `notify.unsent`
 (the unit's watchdog); `panel.unavailable`, `panel.type_scale`, `label.failed`;
 `heartbeat.failed`; `screen.absent`.
 
@@ -227,9 +242,9 @@ do not. The runbook's § If this doesn't work covers a release that will not sta
 | `pull.refused` with 403 or 404 | The wall's assignment on the server | Assign the wall to this client and output, or hang a theme on it |
 | A wall worker crashing repeatedly | `client.worker_crashed` tracebacks | The other walls keep running; the worker retries at up to 300 s. Fix the cause; a restart of the unit is not needed |
 | `daemon.state_too_new` | The revision on the Pi | Roll forward. Or set that store's `PRAGMA user_version` to what this revision writes (runbook § Going back), or remove the file and accept a re-upload |
-| `store.failed` repeating | `journalctl -u display.service` for its `fault` (`SQLITE_FULL`, `SQLITE_READONLY`, `SQLITE_IOERR`, `SQLITE_CORRUPT`) | The disk or the file: free space, remount, or remove the damaged `display-state.sqlite`. The wall's pass ends and tries again; **while it persists, each pass uploads a copy the store cannot record** (left open). `store.busy` is a lock and clears by itself |
+| `store.failed` repeating | `journalctl -u display.service` for its `fault` (`SQLITE_FULL`, `SQLITE_READONLY`, `SQLITE_IOERR`, `SQLITE_CORRUPT`) | The disk or the file: free space, remount, or remove the damaged `display-state.sqlite`. The wall's pass ends and tries again; **while it persists, no upload is sent**, because one the store could not record is one the Player could never remove, so the wall shows what it already put on the set and the theme stops filling. `store.busy` is a lock and clears by itself |
 | `tv.unidentified`, then `tv.unidentified_going_on` | The set's REST port (a `curl` of its `/api/v2/`, as in `deploy/README.md`) | Nothing to do if the set answers again (`tv.identified`). For fifteen minutes the wall uses none of its pictures on that set; after, it shows art from memory and removes nothing |
-| `binding.set_changed` | Whether the Frame's address was meant to move | Expected after pointing the Player at another television: it uploads every work there and the old set keeps this Player's pictures (`security-model.md` § What it does to the television). Unexpected: the router gave the set another lease, or another set answers at the address; fix the address on the settings page |
+| `binding.set_changed` | Whether the Frame's address was meant to move | Expected after pointing the Player at another television: it uploads every work there, leaves that set's own pictures alone, and the old set keeps this Player's pictures (`security-model.md` § What it does to the television). Unexpected: the router gave the set another lease, or another set answers at the address; fix the address on the settings page |
 | Unit restarted with `Watchdog timeout` in `systemctl status` | `journalctl -u display.service` before it | The Player stopped making progress. Read what it last logged; `notify.unsent` says systemd's socket refused it. A stop that took 90 s and ended in SIGKILL means its event loop was stuck |
 | Label blank or stale, wall fine | `panel.unavailable` at start, `label.failed` later | The message names the cause: unstated viewing conditions, missing text stack (`uv sync --frozen --no-dev --group raster --group epaper`), or a panel that will not open. The walls are unaffected by design |
 | Art channel refused for minutes | `tv.unavailable` repeating | Wait. The set holds abandoned clients for minutes (`samsung-tv-state-findings.md` § The art channel can refuse to open). Do not SIGKILL or restart in a loop, which makes it worse |
