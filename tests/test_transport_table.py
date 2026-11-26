@@ -38,7 +38,11 @@ TABLE = transport()
 ROWS = [(route, answer["case"]) for route, spec in TABLE["routes"].items() for answer in spec["answers"]]
 
 #: The frame output the double's default wall is placed on, as the client reports it.
-FRAME = OutputReport(name="frame", kind="frame", connected=True, screen=None)
+FRAME = OutputReport(name="frame", kind="frame", connected=True, screen=None, identity="uuid:frame-in-the-living-room")
+
+#: Where the Player's settings page is, as its client heartbeat says: every client-heartbeat row is replayed over a
+#: report that carries one and the Frame's identity, as a running Player's does.
+SETTINGS_URL = "http://192.0.2.10:8771/"
 #: The panel a label output is drawn on.
 PANEL = LabelOutputReport(name="epd-0", kind="epaper", connected=True, size=(1448, 1072))
 
@@ -132,6 +136,7 @@ class _Supervised:
             monotonic=loop.time,
             label_worker=_Labels(),
             label_outputs=lambda: [PANEL],
+            settings_url=lambda: SETTINGS_URL,
         )
 
     async def cycles(self, count: int = 1) -> None:
@@ -205,6 +210,8 @@ async def client_heartbeat_accepted(world: World) -> None:
         await supervised.cycles(3)
         assert world.posts("/client/heartbeat") == 1
         assert len(world.stub.client_heartbeats) == 1
+        taken = world.stub.client_heartbeats[0]
+        assert (taken["settings_url"], taken["outputs"][0]["identity"]) == (SETTINGS_URL, FRAME.identity)
 
     await _supervised(world, body)
 
