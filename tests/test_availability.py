@@ -129,14 +129,14 @@ async def test_orphan_removal_owed_during_an_outage_happens_when_the_set_returns
 ):
     """The declared deliverable, on the path it is most likely to be needed.
 
-    Removing what the binding table cannot account for was reachable from exactly
-    one place — the tick a manifest is first seen on — and the watcher reports a
-    manifest once. A set asleep on that tick aborted the pass and the work was
-    never attempted again, so on a fresh install the legacy uploads the chunk
-    exists to clear would have stayed on the television for ever. Owing the work
-    until it is done, rather than attempting it when the news arrives, is the fix.
-    The picture is one the Player recorded putting there that no binding wants,
-    which is all it removes.
+    The removal is first due on the tick a manifest is first seen on, and the
+    watcher reports a manifest once. Were it attempted only when that news
+    arrives, a set asleep on that tick would abort the pass and the removal
+    would never be attempted again, so a picture the Player recorded putting
+    there and no binding wants would stay on the television for ever. Owing the
+    work until it is done is what prevents that. The picture is one the Player
+    recorded putting there that no binding wants, which is all it removes; a
+    picture it has no record of is never removed, owed or not.
     """
     ours_on_the_set(tv, state, "MY-LEGACY-1", Path("/gone/legacy-1.jpg"))
     tv.unavailable = True

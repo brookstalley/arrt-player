@@ -1,9 +1,11 @@
 """What this television holds, what this device believes, and the gap between them.
 
-Two defects shape everything here. The 2024 loader recorded a successful upload
+Two facts shape everything here. The 2024 loader recorded a successful upload
 with no content id, so a failure read as a success; and the television's single
-user-upload category means anything this device cannot account for is an image
-nobody will ever remove if this process does not.
+user-upload category holds the household's own pictures beside the Player's, so
+the Player removes only what it recorded uploading to that set. A copy it sent
+without a record is one it will never remove, which is why an upload is recorded
+before it is sent and not sent when that record cannot be written.
 """
 
 import logging
