@@ -12,7 +12,8 @@ What the double decides for itself is only what the table leaves to a server:
 which client a token is, which walls and labels it holds, its body limit
 (`BODY_LIMIT_BYTES`, the server's own and not the contract's), and the ETag rule
 of `conditional_get` (`etag_for`). Both heartbeats are validated against their
-schemas, so a Player writing a bad one fails here as it would against Arrt.
+schemas (the client heartbeat's rules a schema cannot state too, as the package
+states them), so a Player writing a bad one fails here as it would against Arrt.
 Masters are streamed in pieces, so a Player that stops reading is seen to stop.
 
 The forced answers (`manifest_status`, `client_status` and the rest) are the
@@ -28,13 +29,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aiohttp import web
-from arrt_contract import root, routes, transport, validator
+from arrt_contract import root, routes, semantic_errors, transport, validator
 from PIL import Image
 
 CONTRACT = root()
 ROUTES = routes()
 TRANSPORT = transport()
-CLIENT_HEARTBEAT = validator("schemas/client-heartbeat.v1.schema.json")
+CLIENT_HEARTBEAT_SCHEMA = "schemas/client-heartbeat.v1.schema.json"
+CLIENT_HEARTBEAT = validator(CLIENT_HEARTBEAT_SCHEMA)
 WALL_HEARTBEAT = validator("schemas/heartbeat.v1.schema.json")
 
 #: The largest request body the double reads, as Arrt's `BODY_LIMIT_BYTES` is:
@@ -149,9 +151,6 @@ class ServerDouble:
         status, kind = answer["status"], answer["body"]
         if kind == "error":
             return web.json_response({"error": sentence}, status=status, headers=headers)
-        if kind == "framework":
-            # The web framework's own refusal, which is not the error shape.
-            return web.json_response({"detail": [{"msg": sentence}]}, status=status, headers=headers)
         if kind == "document":
             return web.Response(body=body, content_type="application/json", status=status, headers=headers)
         if kind == "none":
@@ -161,7 +160,7 @@ class ServerDouble:
     def _forced(self, route: str, status: int) -> web.Response:
         """A failure test's forced status: the first row of the route that names it, else bare, as a status of its class."""
         for answer in TRANSPORT["routes"][route]["answers"]:
-            if answer["status"] == status and answer["body"] in ("error", "none", "framework"):
+            if answer["status"] == status and answer["body"] in ("error", "none"):
                 return self.answer(route, answer["case"], sentence=f"forced {status}")
         self.answered.append((route, f"{status // 100}xx"))
         return web.Response(status=status)
@@ -242,11 +241,8 @@ class ServerDouble:
         except ValueError:
             return self.answer("client_heartbeat", "not_json", sentence="The body is not JSON.")
         errors = [error.message for error in CLIENT_HEARTBEAT.iter_errors(document)]
-        if isinstance(document, dict):
-            for key in ("outputs", "label_outputs"):
-                names = [output.get("name") for output in document.get(key) or [] if isinstance(output, dict)]
-                if len(names) != len(set(names)):
-                    errors.append(f"two {key} share a name")
+        # The rules a schema cannot state are the package's, asked only of a report the schema accepts.
+        errors = errors or semantic_errors(document, schema=CLIENT_HEARTBEAT_SCHEMA)
         if errors:
             return self.answer("client_heartbeat", "not_a_client_heartbeat", sentence="; ".join(errors))
         self.client_heartbeats.append(document)
