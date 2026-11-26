@@ -826,11 +826,11 @@ def _listed(items: list[str]) -> str:
 
 
 #: The words the page labels the two pairing fields with, **and the only place
-#: they are written**. The server's dialog that issues a token must say the same:
-#: in wave 1 each repository "fixed" these to the other's old wording. The
-#: contract's vocabulary file (contract 1.2.0) is to own them, and the change that
-#: moves this Player's pin to that tag replaces this mapping with the package's
-#: words, here and nowhere else.
+#: they are written**. The server's dialog that issues a token must say the same,
+#: so the contract owns them (`vocabulary()`'s `pairing`). They are quoted here
+#: rather than read from the package because `arrt-contract` is a development
+#: dependency the Player does not install, and
+#: `tests/test_player_contract.py` holds the quote to the package.
 PAIRING_LABELS: Final[Mapping[str, str]] = MappingProxyType({"SERVER_URL": "Server address", "CLIENT_TOKEN": "Token"})
 
 #: Each key the page manages, by the label of its field, in the order the page
