@@ -774,6 +774,31 @@ async def test_a_client_document_the_cache_cannot_take_is_followed_said_once_and
     assert _events(caplog).count("client.cache_writable") == 1, _events(caplog)
 
 
+async def test_a_client_document_the_card_will_not_force_leaves_the_last_one_whole_and_no_staged_file(
+    client_link, client_settings, stub, monkeypatch
+):
+    """The cache write as it really fails, through the one helper rather than a stand-in: the walls get the new
+    document, the cached one stays whole, no ETag is kept for either, and nothing is left beside them."""
+    link = client_link()
+    first = await link.fetch()
+    assert first is not None
+    assert link.cached() == first
+    stub.assign("hall", "hdmi-a-1")
+
+    def no_disk(_descriptor: int) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(os, "fsync", no_disk)
+    second = await link.fetch()
+    monkeypatch.undo()
+
+    assert second is not None, "the walls were not handed the document the cache refused"
+    assert second != first, "the server's change never reached the walls, so the refused write proves nothing"
+    assert link.cached() == first, "the cached document is not the last one written whole"
+    assert not (client_settings.cache_dir / CLIENT_ETAG_FILENAME).exists(), "an ETag was kept for a document not cached"
+    assert sorted(path.name for path in client_settings.cache_dir.iterdir() if path.name.endswith(".tmp")) == []
+
+
 @pytest.mark.parametrize("code", _UNWRITABLE)
 async def test_a_label_document_the_cache_cannot_take_is_followed_said_once_and_cached_when_it_can_be(
     stub, client_settings, clock, monkeypatch, caplog, code
